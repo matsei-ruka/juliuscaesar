@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""jc-voice — voice synthesis / transcription / enrollment for a JC instance.
+
+Subcommands:
+  speak "text" [--out path.ogg]
+      Synthesize text with the instance's cloned voice. voice_id + target_model
+      come from <instance>/voice/references/voice.json. Default output:
+      <instance>/voice/tmp/out.ogg.
+
+  transcribe <audio-file> [--out text.txt]
+      Transcribe via DashScope qwen2.5-omni. Prints transcription to stdout;
+      optional --out writes to file.
+
+  enroll <audio-sample> [--name NAME] [--target-model MODEL]
+      Enroll a voice clone. Writes the returned metadata to
+      <instance>/voice/references/voice.json (creating if missing).
+
+  list-voices
+      List all enrolled voices for the DashScope account.
+
+Instance dir resolution (same as jc-memory / jc-heartbeat):
+  1. --instance-dir flag
+  2. $JC_INSTANCE_DIR env var
+  3. Walk up from cwd for a .jc marker
+  4. cwd (if it has voice/ or memory/)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from voice import enroll, synthesize, transcribe  # type: ignore  # noqa: E402
+from voice.enroll import list_voices  # type: ignore  # noqa: E402
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    if arg:
+        p = Path(arg).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"--instance-dir does not exist: {p}")
+        return p
+    env = os.environ.get("JC_INSTANCE_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
+        return p
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ".jc").exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    cwd = Path.cwd().resolve()
+    if (cwd / "voice").exists() or (cwd / "memory").exists():
+        return cwd
+    raise SystemExit(
+        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
+        "or run from a directory with voice/ or a .jc marker."
+    )
+
+
+def load_instance_env(instance: Path) -> None:
+    env_file = instance / ".env"
+    if env_file.exists():
+        load_dotenv(str(env_file))
+
+
+def load_voice_json(instance: Path) -> dict:
+    ref = instance / "voice" / "references" / "voice.json"
+    if not ref.exists():
+        raise SystemExit(
+            f"No voice enrolled at {ref}. Run `jc-voice enroll <audio-sample>` first."
+        )
+    return json.loads(ref.read_text(encoding="utf-8"))
+
+
+def write_voice_json(instance: Path, data: dict) -> Path:
+    ref = instance / "voice" / "references" / "voice.json"
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return ref
+
+
+def default_speak_out(instance: Path) -> Path:
+    return instance / "voice" / "tmp" / "out.ogg"
+
+
+# --- Commands ----------------------------------------------------------------
+
+
+def cmd_speak(args: argparse.Namespace, instance: Path) -> int:
+    load_instance_env(instance)
+    v = load_voice_json(instance)
+    out = Path(args.out) if args.out else default_speak_out(instance)
+    path = synthesize(
+        args.text,
+        out,
+        voice_id=v["voice"],
+        target_model=v["target_model"],
+    )
+    print(str(path))
+    return 0
+
+
+def cmd_transcribe(args: argparse.Namespace, instance: Path) -> int:
+    load_instance_env(instance)
+    text = transcribe(Path(args.audio))
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+    print(text)
+    return 0
+
+
+def cmd_enroll(args: argparse.Namespace, instance: Path) -> int:
+    load_instance_env(instance)
+    data = enroll(
+        Path(args.audio),
+        preferred_name=args.name,
+        target_model=args.target_model,
+    )
+    ref = write_voice_json(instance, data)
+    print(json.dumps(data, indent=2))
+    print(f"wrote {ref}", file=sys.stderr)
+    return 0
+
+
+def cmd_list_voices(_args: argparse.Namespace, instance: Path) -> int:
+    load_instance_env(instance)
+    voices = list_voices()
+    for v in voices:
+        print(
+            f"{v.get('voice','?')}\t{v.get('language','-')}\t"
+            f"{v.get('gmt_create','')}\t{v.get('target_model','')}"
+        )
+    return 0
+
+
+# --- main --------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-voice")
+    p.add_argument("--instance-dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    ps = sub.add_parser("speak", help="Synthesize text as OGG/Opus using the instance's cloned voice")
+    ps.add_argument("text")
+    ps.add_argument("--out", help="Output .ogg path (default: <instance>/voice/tmp/out.ogg)")
+    ps.set_defaults(func=cmd_speak)
+
+    pt = sub.add_parser("transcribe", help="Transcribe an audio file (DashScope qwen omni)")
+    pt.add_argument("audio")
+    pt.add_argument("--out", help="Optional output text file")
+    pt.set_defaults(func=cmd_transcribe)
+
+    pe = sub.add_parser("enroll", help="Enroll a voice sample; writes to voice/references/voice.json")
+    pe.add_argument("audio")
+    pe.add_argument("--name", default="rachel")
+    pe.add_argument("--target-model", default="qwen3-tts-vc-realtime-2026-01-15")
+    pe.set_defaults(func=cmd_enroll)
+
+    pl = sub.add_parser("list-voices", help="List enrolled voices on the DashScope account")
+    pl.set_defaults(func=cmd_list_voices)
+
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    instance = resolve_instance_dir(args.instance_dir)
+    return args.func(args, instance)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
