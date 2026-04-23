@@ -183,6 +183,42 @@ The returned voice id is written to `voice/references/voice.json`.
 
 ---
 
+## 7.5. Route reports to multiple chats (optional — destinations)
+
+By default, every heartbeat task posts to `$TELEGRAM_CHAT_ID` from `.env` (your DM with the bot). If you want tasks to route to different chats — e.g. routine reports to a team group and critical alerts to the owner's DM — declare named destinations in `heartbeat/tasks.yaml`:
+
+```yaml
+destinations:
+  owner-dm:
+    channel: telegram
+    chat_id: 123456789             # your personal DM
+  team-group:
+    channel: telegram
+    chat_id: -1001234567890        # group chat (negative chat id)
+
+tasks:
+  daily_report:
+    destination: team-group        # single
+    prompt: |
+      ...
+
+  critical_alert:
+    destination: owner-dm
+    prompt: |
+      ...
+
+  announcement:
+    destination: [team-group, owner-dm]   # multi-fanout, one message to each
+    prompt: |
+      ...
+```
+
+To post in a group, add the bot to it, then send any message there and grep `curl https://api.telegram.org/bot<TOKEN>/getUpdates` for the `chat.id` (negative number). For a group bot to see non-mention messages, set its privacy to "Disabled" in @BotFather (`/setprivacy`).
+
+`jc doctor` validates the `destinations:` block — warns on broken references and unused entries. Backward-compat: if `destinations:` is absent, tasks continue to use `TELEGRAM_CHAT_ID` from `.env`.
+
+---
+
 ## 8. Test the heartbeat
 
 ```bash

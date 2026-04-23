@@ -48,7 +48,14 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN not set (define in $ENV_FILE)}"
-: "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID not set (define in $ENV_FILE)}"
+
+# Precedence for chat_id:
+#   1. $TELEGRAM_CHAT_ID_OVERRIDE (used by the runner for named destinations)
+#   2. $TELEGRAM_CHAT_ID from the instance's .env
+if [[ -n "${TELEGRAM_CHAT_ID_OVERRIDE:-}" ]]; then
+    TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID_OVERRIDE"
+fi
+: "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID not set (define in $ENV_FILE or pass TELEGRAM_CHAT_ID_OVERRIDE)}"
 
 BODY=$(cat)
 if [[ -z "${BODY// }" ]]; then
