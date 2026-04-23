@@ -376,7 +376,32 @@ def cmd_rebuild(_args: argparse.Namespace, instance: Path) -> int:
         conn.close()
     _write_index(instance)
     print("INDEX.md regenerated")
+    _ensure_claude_md(instance)
     return 0
+
+
+def _ensure_claude_md(instance: Path) -> None:
+    """Write CLAUDE.md at the instance root if it doesn't exist yet.
+
+    Claude Code auto-loads this file when a session starts in the instance
+    dir. The template @imports L1 memory so identity + user profile + rules
+    are always in context. Migration path for instances scaffolded before
+    this feature existed.
+    """
+    target = instance / "CLAUDE.md"
+    if target.exists():
+        return
+    # Source the framework's template
+    template = (
+        Path(__file__).resolve().parent.parent
+        / "templates"
+        / "init-instance"
+        / "CLAUDE.md"
+    )
+    if not template.exists():
+        return
+    target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"wrote {target}")
 
 
 def cmd_consolidate(_args: argparse.Namespace, _instance: Path) -> int:
