@@ -19,7 +19,7 @@ SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$SHARE_DIR/venv"
 DEPS=(pyyaml python-dotenv)
-BINARIES=(jc-memory)
+BINARIES=(jc-memory jc-heartbeat)
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
