@@ -202,10 +202,20 @@ else
 fi
 
 # Live claude
-if pgrep -f "claude .*--channels plugin:telegram" >/dev/null 2>&1; then
-    ok "live claude process running"
+# Scope to THIS instance: claude whose cwd is INSTANCE_DIR. Multi-instance
+# hosts can have several unrelated claude sessions running; count only ours.
+OUR_CLAUDE_PID=""
+for pid in $(pgrep -f "claude .*--channels plugin:telegram" 2>/dev/null); do
+    cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+    if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
+        OUR_CLAUDE_PID="$pid"
+        break
+    fi
+done
+if [[ -n "$OUR_CLAUDE_PID" ]]; then
+    ok "live claude process running (pid $OUR_CLAUDE_PID, cwd $INSTANCE_DIR)"
 else
-    info "no interactive claude session detected (start one with: claude --channels plugin:telegram@claude-plugins-official)"
+    info "no interactive claude session detected for this instance (start one with: claude --channels plugin:telegram@claude-plugins-official)"
 fi
 
 # Telegram plugin health

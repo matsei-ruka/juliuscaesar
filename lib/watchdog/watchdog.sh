@@ -29,8 +29,9 @@ INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
 CONF_FILE="$INSTANCE_DIR/ops/watchdog.conf"
 ENV_FILE="$INSTANCE_DIR/.env"
 
-# Cron has a minimal PATH — export a useful one BEFORE resolving binaries.
-export PATH="/home/$(id -un)/.local/bin:/home/$(id -un)/.npm-global/bin:/home/$(id -un)/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+# Cron has a minimal PATH. Use $HOME (respects root's /root, not /home/root)
+# and fall back to standard system paths.
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 # --- Config defaults ---
 SESSION_ID=""
@@ -93,9 +94,29 @@ screen_named_alive() {
 }
 
 claude_alive() {
-    # Match any claude process that uses our --channels arg (i.e. actual
-    # interactive session, not a one-shot `claude -p` spawned by adapters).
-    pgrep -u "$(id -un)" -f "claude .*--channels plugin:telegram" >/dev/null 2>&1
+    # Scope to THIS instance only: an interactive claude process whose
+    # working directory is INSTANCE_DIR. Previously matched any claude
+    # with --channels, which falsely identifies unrelated sessions on
+    # multi-instance hosts as ours — breaks both detection and restart.
+    local pid cwd
+    for pid in $(pgrep -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null); do
+        cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+        if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+our_claude_pids() {
+    # Emit PIDs of claude processes scoped to this instance (one per line).
+    local pid cwd
+    for pid in $(pgrep -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null); do
+        cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+        if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
+            echo "$pid"
+        fi
+    done
 }
 
 # --- Channel plugin liveness -------------------------------------------------
@@ -170,20 +191,25 @@ main() {
 
     log "down: screen_named_alive=$(screen_named_alive && echo y || echo n) claude_alive=$(claude_alive && echo y || echo n) plugin_alive=$(telegram_plugin_alive && echo y || echo n) claude_bin=${CLAUDE_BIN:-<none>}"
 
-    # Kill the main claude process if it's still running but degraded (so the
-    # restart below is clean; otherwise --resume from a new spawn would fight
-    # the stale process over session locks).
+    # Kill this instance's claude if it's still running but degraded (so the
+    # restart below is clean; --resume from a new spawn would fight a stale
+    # process over session locks). Only kills OUR pids — other instances'
+    # claudes on the same host are untouched.
     if claude_alive; then
-        log "killing stale claude process to allow clean restart"
-        pkill -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null || true
-        # Wait up to 15s for it to actually die. If it doesn't, force.
+        log "killing stale claude process(es) to allow clean restart"
+        for pid in $(our_claude_pids); do
+            kill "$pid" 2>/dev/null || true
+        done
+        # Wait up to 15s for graceful shutdown.
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             claude_alive || break
             sleep 1
         done
         if claude_alive; then
             log "SIGTERM didn't land — SIGKILL"
-            pkill -9 -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null || true
+            for pid in $(our_claude_pids); do
+                kill -9 "$pid" 2>/dev/null || true
+            done
             sleep 2
         fi
     fi
