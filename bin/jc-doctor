@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# jc-doctor — diagnose a JuliusCaesar instance + environment.
+#
+# Checks prereqs (binaries, python, ffmpeg), instance structure,
+# credentials, voice enrollment, watchdog install state, and the
+# runtime claude + plugin processes. Per-check green / yellow / red.
+#
+# Exits non-zero if any RED checks fail (useful in CI / pre-flight).
+
+set -uo pipefail
+
+# --- Colors ---
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'; YEL=$'\033[0;33m'; GRN=$'\033[0;32m'; DIM=$'\033[0;37m'; RST=$'\033[0m'
+else
+    RED=''; YEL=''; GRN=''; DIM=''; RST=''
+fi
+
+FAIL=0
+
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*"; }
+fail() { printf '%s✗%s %s\n' "$RED" "$RST" "$*"; FAIL=$((FAIL+1)); }
+info() { printf '%s·%s %s\n' "$DIM" "$RST" "$*"; }
+section() { printf '\n%s%s%s\n' "$GRN" "$*" "$RST"; }
+
+# --- Instance resolution ---
+INSTANCE_DIR=""
+for arg in "$@"; do
+    case "$arg" in
+        --instance-dir=*) INSTANCE_DIR="${arg#*=}" ;;
+    esac
+done
+
+if [[ -z "$INSTANCE_DIR" ]]; then
+    # env > walk-up > cwd
+    if [[ -n "${JC_INSTANCE_DIR:-}" && -d "$JC_INSTANCE_DIR" ]]; then
+        INSTANCE_DIR="$JC_INSTANCE_DIR"
+    else
+        cur="$(pwd)"
+        while :; do
+            [[ -f "$cur/.jc" ]] && { INSTANCE_DIR="$cur"; break; }
+            [[ "$(dirname "$cur")" == "$cur" ]] && break
+            cur="$(dirname "$cur")"
+        done
+        [[ -z "$INSTANCE_DIR" && -d "$(pwd)/memory" ]] && INSTANCE_DIR="$(pwd)"
+    fi
+fi
+
+# --- Environment checks ---
+
+section "Environment"
+
+for bin in python3 bash curl screen ffmpeg git; do
+    if command -v "$bin" >/dev/null 2>&1; then
+        ok "$bin found: $(command -v "$bin")"
+    else
+        fail "$bin missing (required)"
+    fi
+done
+
+if command -v claude >/dev/null 2>&1; then
+    ok "claude CLI: $(command -v claude) ($(claude --version 2>/dev/null | head -1 || echo 'version unknown'))"
+else
+    fail "claude CLI not on PATH (https://www.anthropic.com/claude-code)"
+fi
+
+# --- JC binaries ---
+
+section "JuliusCaesar binaries"
+
+for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-init jc-doctor; do
+    if command -v "$b" >/dev/null 2>&1; then
+        ok "$b"
+    else
+        fail "$b missing — run install.sh from the juliuscaesar repo"
+    fi
+done
+
+# --- Adapter CLIs (optional, only warn) ---
+
+section "Adapter CLIs (optional — only needed per your tasks.yaml)"
+
+for b in gemini opencode; do
+    if command -v "$b" >/dev/null 2>&1; then
+        ok "$b"
+    else
+        info "$b not installed (only needed if a task uses it)"
+    fi
+done
+
+# --- Instance ---
+
+section "Instance"
+
+if [[ -z "$INSTANCE_DIR" ]]; then
+    fail "No instance dir found. Use --instance-dir, set JC_INSTANCE_DIR, or run from inside an instance."
+    echo ""
+    [[ $FAIL -gt 0 ]] && exit 1 || exit 0
+fi
+INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
+ok "instance: $INSTANCE_DIR"
+
+if [[ -f "$INSTANCE_DIR/.jc" ]]; then
+    ok ".jc marker present"
+else
+    warn ".jc marker missing — auto-discovery may fail from other dirs"
+fi
+
+# Directory structure
+for d in memory memory/L1 memory/L2 heartbeat voice; do
+    if [[ -d "$INSTANCE_DIR/$d" ]]; then
+        ok "$d/ present"
+    else
+        warn "$d/ missing (did you run jc init?)"
+    fi
+done
+
+# Memory content
+if [[ -d "$INSTANCE_DIR/memory/L1" ]]; then
+    L1_COUNT=$(find "$INSTANCE_DIR/memory/L1" -maxdepth 1 -name '*.md' | wc -l)
+    if [[ "$L1_COUNT" -ge 3 ]]; then
+        ok "memory/L1: $L1_COUNT files"
+    else
+        warn "memory/L1: only $L1_COUNT files (expect at least IDENTITY, USER, RULES, HOT)"
+    fi
+fi
+
+if [[ -f "$INSTANCE_DIR/memory/index.sqlite" ]]; then
+    SIZE=$(du -h "$INSTANCE_DIR/memory/index.sqlite" | awk '{print $1}')
+    ok "memory/index.sqlite: $SIZE"
+else
+    warn "memory/index.sqlite missing — run: jc memory rebuild"
+fi
+
+# Heartbeat
+if [[ -f "$INSTANCE_DIR/heartbeat/tasks.yaml" ]]; then
+    TASK_COUNT=$(grep -cE '^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_]*:[[:space:]]*$' "$INSTANCE_DIR/heartbeat/tasks.yaml" || true)
+    ok "heartbeat/tasks.yaml: $TASK_COUNT task(s) defined"
+fi
+
+# Voice
+if [[ -f "$INSTANCE_DIR/voice/references/voice.json" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        VOICE_ID=$(python3 -c "import json; d=json.load(open('$INSTANCE_DIR/voice/references/voice.json')); print(d.get('voice', '<malformed>'))" 2>/dev/null || echo '<unreadable>')
+        ok "voice enrolled: $VOICE_ID"
+    else
+        ok "voice enrolled (couldn't parse without python3)"
+    fi
+else
+    info "voice not enrolled (optional — run: jc voice enroll <sample>)"
+fi
+
+# --- Credentials ---
+
+section "Credentials"
+
+if [[ ! -f "$INSTANCE_DIR/.env" ]]; then
+    fail ".env missing at $INSTANCE_DIR/.env"
+else
+    ok ".env exists ($(stat -c '%a' "$INSTANCE_DIR/.env") permissions)"
+    # shellcheck disable=SC1091
+    set -a; source "$INSTANCE_DIR/.env"; set +a
+
+    # DashScope
+    if [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then
+        # Ping getMe-equivalent for DashScope
+        ok "DASHSCOPE_API_KEY set (prefix: ${DASHSCOPE_API_KEY:0:6}…)"
+    else
+        info "DASHSCOPE_API_KEY not set (required for voice)"
+    fi
+
+    # Telegram
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        TG_RESP=$(curl -sS --max-time 5 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || echo '')
+        if echo "$TG_RESP" | grep -q '"ok":true'; then
+            BOT_NAME=$(echo "$TG_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"].get("username","?"))' 2>/dev/null || echo '?')
+            ok "TELEGRAM_BOT_TOKEN valid (bot: @$BOT_NAME)"
+        else
+            fail "TELEGRAM_BOT_TOKEN set but getMe failed"
+        fi
+    else
+        info "TELEGRAM_BOT_TOKEN not set (required for notifications)"
+    fi
+
+    if [[ -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+        ok "TELEGRAM_CHAT_ID set: $TELEGRAM_CHAT_ID"
+    elif [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        warn "TELEGRAM_CHAT_ID not set (token is set but messages can't be delivered)"
+    fi
+fi
+
+# --- Watchdog + runtime ---
+
+section "Runtime (watchdog)"
+
+TAG="# jc-watchdog for $INSTANCE_DIR"
+if crontab -l 2>/dev/null | grep -qF "$TAG"; then
+    ok "watchdog cron entries installed"
+else
+    info "watchdog cron not installed (optional — run: jc watchdog install)"
+fi
+
+# Live claude
+if pgrep -f "claude .*--channels plugin:telegram" >/dev/null 2>&1; then
+    ok "live claude process running"
+else
+    info "no interactive claude session detected (start one with: claude --channels plugin:telegram@claude-plugins-official)"
+fi
+
+# Telegram plugin health
+PIDFILE="$HOME/.claude/channels/telegram/bot.pid"
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    if [[ ! -f "$PIDFILE" ]]; then
+        warn "telegram plugin bot.pid missing (plugin may not be running)"
+    else
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+            ok "telegram plugin alive (pid $PID)"
+        else
+            fail "telegram plugin dead (pid $PID). Restart claude to respawn."
+        fi
+    fi
+fi
+
+# --- Summary ---
+
+echo ""
+if [[ $FAIL -eq 0 ]]; then
+    printf '%sAll critical checks passed.%s\n' "$GRN" "$RST"
+    exit 0
+else
+    printf '%s%d critical issue(s) found.%s\n' "$RED" "$FAIL" "$RST"
+    exit 1
+fi

@@ -98,6 +98,31 @@ claude_alive() {
     pgrep -u "$(id -un)" -f "claude .*--channels plugin:telegram" >/dev/null 2>&1
 }
 
+# --- Channel plugin liveness -------------------------------------------------
+#
+# Claude Code's telegram plugin spawns a `bun server.ts` subprocess and writes
+# its PID to ~/.claude/channels/telegram/bot.pid. The plugin dies occasionally
+# under heavy subprocess load (claude -p spawns, pip installs, git pushes).
+# When it dies, inbound telegram messages silently queue at the API and
+# outbound tools fail. This check detects the dead-plugin-alive-claude case so
+# the watchdog restarts claude (which respawns the plugin via --channels).
+#
+# Only runs when TELEGRAM_BOT_TOKEN is set — instances that don't use telegram
+# shouldn't trip this check.
+
+telegram_plugin_expected() {
+    [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]
+}
+
+telegram_plugin_alive() {
+    local pidfile="$HOME/.claude/channels/telegram/bot.pid"
+    [[ -f "$pidfile" ]] || return 1
+    local pid
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [[ -n "$pid" ]] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
 start_rachel() {
     if [[ -z "$CLAUDE_BIN" ]]; then
         log "start: no claude binary found on PATH or fallbacks"
@@ -122,18 +147,46 @@ main() {
     prev=$(read_state)
 
     if claude_alive; then
-        write_state "ok"
-        if ! screen_named_alive; then
-            log "note: claude running but not in screen '$SCREEN_NAME'. Not restarting (process is alive)."
+        # Degraded state: claude is up but the telegram plugin has died.
+        # Messages queue silently at the Telegram API. Force a restart of
+        # claude to respawn the plugin via --channels.
+        if telegram_plugin_expected && ! telegram_plugin_alive; then
+            log "degraded: claude alive but telegram plugin dead — restarting to respawn plugin"
+            write_state "plugin-dead"
+            # Fall through to the restart path. The main claude process will
+            # be killed when screen quit fires below.
+        else
+            write_state "ok"
+            if ! screen_named_alive; then
+                log "note: claude running but not in screen '$SCREEN_NAME'. Not restarting (process is alive)."
+            fi
+            if [[ "$prev" == "down" || "$prev" == "restart-failed" || "$prev" == "plugin-dead" ]]; then
+                log "transition: $prev -> ok"
+                notify "✨ $SCREEN_NAME back alive"
+            fi
+            exit 0
         fi
-        if [[ "$prev" == "down" || "$prev" == "restart-failed" ]]; then
-            log "transition: $prev -> ok"
-            notify "✨ $SCREEN_NAME back alive"
-        fi
-        exit 0
     fi
 
-    log "down: screen_named_alive=$(screen_named_alive && echo y || echo n) claude_alive=n claude_bin=${CLAUDE_BIN:-<none>}"
+    log "down: screen_named_alive=$(screen_named_alive && echo y || echo n) claude_alive=$(claude_alive && echo y || echo n) plugin_alive=$(telegram_plugin_alive && echo y || echo n) claude_bin=${CLAUDE_BIN:-<none>}"
+
+    # Kill the main claude process if it's still running but degraded (so the
+    # restart below is clean; otherwise --resume from a new spawn would fight
+    # the stale process over session locks).
+    if claude_alive; then
+        log "killing stale claude process to allow clean restart"
+        pkill -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null || true
+        # Wait up to 15s for it to actually die. If it doesn't, force.
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            claude_alive || break
+            sleep 1
+        done
+        if claude_alive; then
+            log "SIGTERM didn't land — SIGKILL"
+            pkill -9 -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null || true
+            sleep 2
+        fi
+    fi
 
     screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1 || true
     sleep 1

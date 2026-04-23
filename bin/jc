@@ -29,6 +29,7 @@ Subcommands:
   voice        TTS / ASR / enrollment (jc-voice).
   watchdog     Live session supervisor (jc-watchdog).
   init         Scaffold a new instance from templates.
+  doctor       Diagnose the instance + environment.
 
 Global flags:
   --instance-dir <path>    Override instance dir (or set \$JC_INSTANCE_DIR).
@@ -55,7 +56,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|init)
+    memory|heartbeat|voice|watchdog|init|doctor)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127
