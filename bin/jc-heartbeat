@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""jc-heartbeat — run a heartbeat task defined in the instance's tasks.yaml.
+
+Usage:
+  jc-heartbeat run <task-name> [--dry-run] [--instance-dir <path>]
+
+Instance dir resolution (same as jc-memory):
+  1. --instance-dir flag
+  2. $JC_INSTANCE_DIR env var
+  3. Walk up from cwd for a .jc marker
+  4. cwd (if it has a heartbeat/tasks.yaml)
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from heartbeat import run_task  # type: ignore  # noqa: E402
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    if arg:
+        p = Path(arg).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"--instance-dir does not exist: {p}")
+        return p
+    env = os.environ.get("JC_INSTANCE_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
+        return p
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ".jc").exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    cwd = Path.cwd().resolve()
+    if (cwd / "heartbeat" / "tasks.yaml").exists():
+        return cwd
+    raise SystemExit(
+        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
+        "or run from a directory with heartbeat/tasks.yaml or a .jc marker."
+    )
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="jc-heartbeat")
+    p.add_argument("--instance-dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pr = sub.add_parser("run", help="Execute one task")
+    pr.add_argument("task")
+    pr.add_argument("--dry-run", action="store_true", help="Skip Telegram send; print output")
+
+    args = p.parse_args()
+    instance = resolve_instance_dir(args.instance_dir)
+    return run_task(instance, args.task, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

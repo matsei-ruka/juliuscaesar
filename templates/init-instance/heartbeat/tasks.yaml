@@ -1,0 +1,28 @@
+# Heartbeat tasks — run via `jc-heartbeat run <task-name>` (cron-driven).
+#
+# Per-task fields:
+#   tool:           adapter name (claude | gemini | minimax | opencode)
+#   model:          model id for the tool; empty = tool's own default
+#   folder:         working dir for the adapter (default: instance dir)
+#   pre_fetch:      bash script path relative to <instance>/heartbeat/
+#                   Writes bundle to stdout → captured to state/bundles/
+#   context_files:  additional memory files to prepend (paths relative to instance)
+#                   (memory/L1/*.md is always auto-included; no need to list)
+#   only_if_delta:  skip send if bundle hash matches the last successful run
+#   prompt:         task prompt. Template vars: {{date}} {{time}} {{timezone}} {{bundle_path}}
+#
+# Send the literal string "SILENT" as output to suppress Telegram delivery —
+# useful for monitor-type tasks that only speak on escalation.
+
+defaults:
+  tool: claude
+  model: claude-sonnet-4-6
+  folder: ""   # empty = instance dir
+
+tasks:
+
+  # Smoke test — pings Telegram. Manual trigger to validate wiring.
+  hello:
+    prompt: |
+      Respond with ONE short sentence confirming the heartbeat pipeline is alive.
+      Mention the current time ({{time}}).
