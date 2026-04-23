@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# jc — JuliusCaesar CLI router. Dispatches to jc-<subcommand> binaries.
+#
+# Usage:
+#   jc <subcommand> <args...>
+#
+# Known subcommands:
+#   memory     Knowledge base (llm-wiki + FTS5).
+#   heartbeat  Run scheduled tasks.
+#   voice      TTS / ASR / voice enrollment.
+#   watchdog   Supervisor for the instance's live claude session.
+#   init       Scaffold a new instance from templates.
+#
+# All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+usage() {
+    cat <<EOF
+jc — JuliusCaesar CLI router ($VERSION)
+
+Usage: jc <subcommand> [args...]
+
+Subcommands:
+  memory       Knowledge base (backed by jc-memory).
+  heartbeat    Scheduled task runner (jc-heartbeat).
+  voice        TTS / ASR / enrollment (jc-voice).
+  watchdog     Live session supervisor (jc-watchdog).
+  init         Scaffold a new instance from templates.
+
+Global flags:
+  --instance-dir <path>    Override instance dir (or set \$JC_INSTANCE_DIR).
+
+Examples:
+  jc init ~/my-new-instance
+  jc memory search "query"
+  jc heartbeat run morning_briefing
+  jc voice speak "hello world"
+  jc watchdog status
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+    usage; exit 0
+fi
+
+SUB="$1"; shift
+
+case "$SUB" in
+    -h|--help|help)
+        usage; exit 0
+        ;;
+    -v|--version|version)
+        echo "juliuscaesar $VERSION"; exit 0
+        ;;
+    memory|heartbeat|voice|watchdog|init)
+        if ! command -v "jc-$SUB" >/dev/null 2>&1; then
+            echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
+            exit 127
+        fi
+        exec "jc-$SUB" "$@"
+        ;;
+    *)
+        echo "Unknown subcommand: $SUB" >&2
+        echo "Run 'jc help' for a list." >&2
+        exit 2
+        ;;
+esac

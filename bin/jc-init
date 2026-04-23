@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# jc-init — scaffold a new JuliusCaesar instance from templates/init-instance/.
+#
+# Usage:
+#   jc-init [<path>]
+#
+# If <path> is omitted, uses the current directory (must be empty or contain
+# only allowed files like .git).
+#
+# Copies the template tree, creates an empty .env, writes the .jc marker, and
+# prints next-steps instructions.
+
+set -euo pipefail
+
+FRAMEWORK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+TEMPLATE_DIR="$FRAMEWORK_ROOT/templates/init-instance"
+
+if [[ ! -d "$TEMPLATE_DIR" ]]; then
+    echo "Template dir missing: $TEMPLATE_DIR" >&2
+    exit 1
+fi
+
+TARGET="${1:-$(pwd)}"
+mkdir -p "$TARGET"
+TARGET="$(cd "$TARGET" && pwd)"
+
+# Refuse to scaffold on top of an existing instance
+if [[ -f "$TARGET/.jc" ]]; then
+    echo "Refusing: $TARGET is already an instance (.jc marker exists)." >&2
+    exit 1
+fi
+
+# Refuse if dir isn't empty (except for .git, .gitignore, README.md, LICENSE)
+LEFTOVER=$(find "$TARGET" -mindepth 1 -maxdepth 1 \
+    ! -name .git ! -name .gitignore ! -name README.md ! -name LICENSE \
+    -printf '%f\n' 2>/dev/null | head -1 || true)
+if [[ -n "$LEFTOVER" ]]; then
+    echo "Refusing: $TARGET is not empty (contains '$LEFTOVER'). Use a fresh directory." >&2
+    exit 1
+fi
+
+echo "==> Scaffolding JC instance at $TARGET"
+cp -rn "$TEMPLATE_DIR"/. "$TARGET"/
+
+# .jc marker
+echo "framework=juliuscaesar" > "$TARGET/.jc"
+echo "created=$(date +%F)" >> "$TARGET/.jc"
+
+# Root .gitignore if missing
+if [[ ! -f "$TARGET/.gitignore" ]]; then
+    cat > "$TARGET/.gitignore" <<'EOF'
+.env
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/index.sqlite
+**/index.sqlite-*
+heartbeat/state/
+voice/tmp/
+EOF
+fi
+
+# .env template
+if [[ ! -f "$TARGET/.env" ]]; then
+    cat > "$TARGET/.env" <<'EOF'
+# JuliusCaesar instance secrets. Do not commit.
+#
+# Required for voice (TTS + ASR):
+# DASHSCOPE_API_KEY=
+#
+# Required for heartbeat / watchdog Telegram notifications:
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
+EOF
+    chmod 600 "$TARGET/.env"
+fi
+
+echo "==> Instance scaffolded. Next steps:"
+cat <<EOF
+
+  1. cd $TARGET
+  2. Edit .env and fill in DASHSCOPE_API_KEY / TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+  3. Edit memory/L1/*.md to describe who this assistant is and who they help.
+  4. Enroll a voice (optional):      jc voice enroll path/to/sample.mp3 --name <name>
+  5. Scaffold the SQLite index:      jc memory rebuild
+  6. Install the watchdog (optional):jc watchdog install
+  7. Test the heartbeat pipeline:    jc heartbeat run hello --dry-run
+
+Your instance is tagged .jc so all jc-* binaries will auto-discover it when run
+from inside (or you can pass --instance-dir $TARGET explicitly).
+EOF
