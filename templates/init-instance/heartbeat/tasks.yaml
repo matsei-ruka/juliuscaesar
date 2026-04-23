@@ -10,6 +10,9 @@
 #                   (memory/L1/*.md is always auto-included; no need to list)
 #   only_if_delta:  skip send if bundle hash matches the last successful run
 #   prompt:         task prompt. Template vars: {{date}} {{time}} {{timezone}} {{bundle_path}}
+#   destination:    named destination from the `destinations:` block below
+#                   (string for single, list for multi-fanout; omit to fall
+#                   back to $TELEGRAM_CHAT_ID from .env)
 #
 # Send the literal string "SILENT" as output to suppress Telegram delivery —
 # useful for monitor-type tasks that only speak on escalation.
@@ -18,6 +21,17 @@ defaults:
   tool: claude
   model: claude-sonnet-4-6
   folder: ""   # empty = instance dir
+  # destination: owner-dm    # uncomment to set a default destination
+
+# destinations:
+#   # Named chats — reference by name in a task's `destination:` field.
+#   # Fully optional — if absent, tasks send to TELEGRAM_CHAT_ID from .env.
+#   owner-dm:
+#     channel: telegram
+#     chat_id: 123456789            # Luca's personal DM (for critical alerts)
+#   team-group:
+#     channel: telegram
+#     chat_id: -1001234567890       # team group (for routine reports)
 
 tasks:
 
@@ -26,3 +40,14 @@ tasks:
     prompt: |
       Respond with ONE short sentence confirming the heartbeat pipeline is alive.
       Mention the current time ({{time}}).
+
+  # Example: a report that fans out to two destinations simultaneously.
+  # Uncomment + wire up your destinations above to use.
+  #
+  # daily_report:
+  #   destination: [team-group, owner-dm]
+  #   prompt: |
+  #     Compose the daily ops report for {{date}}. Use the bundle at
+  #     {{bundle_path}} and L1 memory above. Keep it tight.
+  #   pre_fetch: fetch/daily.sh
+  #   only_if_delta: false

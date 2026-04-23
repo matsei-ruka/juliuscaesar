@@ -119,12 +119,22 @@ def call_adapter(tool: str, model: str | None, prompt: str, workdir: Path, log_p
     return r.stdout
 
 
-def send_telegram(instance_dir: Path, body: str, log_path: Path) -> str | None:
-    """Send via the framework's send_telegram.sh. Token + chat_id are read
-    from the instance's .env by that script. Returns message_id as string
-    on success, or None on failure."""
+def send_telegram(
+    instance_dir: Path,
+    body: str,
+    log_path: Path,
+    chat_id_override: str | None = None,
+) -> str | None:
+    """Send via the framework's send_telegram.sh.
+
+    By default, token + chat_id are read from the instance's .env. Pass
+    `chat_id_override` to send to a specific chat (used for named
+    destinations). Returns message_id as string on success, or None.
+    """
     env = os.environ.copy()
     env["JC_INSTANCE_DIR"] = str(instance_dir)
+    if chat_id_override:
+        env["TELEGRAM_CHAT_ID_OVERRIDE"] = str(chat_id_override)
     r = subprocess.run(
         [str(SEND_TELEGRAM)],
         input=body,
@@ -136,6 +146,42 @@ def send_telegram(instance_dir: Path, body: str, log_path: Path) -> str | None:
         log_line(f"telegram send FAILED rc={r.returncode} stderr={r.stderr[:500]}", log_path)
         return None
     return r.stdout.strip()
+
+
+def resolve_destinations(task: dict, defaults: dict, all_destinations: dict) -> list[dict]:
+    """Resolve a task's `destination:` field into a list of destination configs.
+
+    Precedence:
+      1. task.destination (string or list of names)
+      2. defaults.destination (string or list of names)
+      3. [] — caller falls back to legacy env-var behavior
+
+    Each returned item has the shape:
+      {"name": str, "channel": str, "chat_id": str}
+
+    Raises ValueError if a referenced destination name isn't defined.
+    """
+    raw = task.get("destination")
+    if raw is None:
+        raw = defaults.get("destination")
+    if raw is None:
+        return []
+    names = [raw] if isinstance(raw, str) else list(raw)
+    resolved = []
+    for name in names:
+        if name not in all_destinations:
+            raise ValueError(f"unknown destination '{name}' (not defined in destinations:)")
+        d = all_destinations[name]
+        if not isinstance(d, dict) or "chat_id" not in d:
+            raise ValueError(f"destination '{name}' must be a mapping with a chat_id")
+        resolved.append(
+            {
+                "name": name,
+                "channel": d.get("channel", "telegram"),
+                "chat_id": str(d["chat_id"]),
+            }
+        )
+    return resolved
 
 
 class FileLock:
@@ -186,6 +232,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
     cfg = load_tasks(tasks_file)
     defaults = cfg.get("defaults") or {}
     tasks = cfg.get("tasks") or {}
+    destinations = cfg.get("destinations") or {}
     if task_name not in tasks:
         log_line(f"unknown task: {task_name}", log_path)
         print(f"Unknown task: {task_name}", file=sys.stderr)
@@ -262,18 +309,54 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
 
         tag = f"[{task_name} · {ts.strftime('%H:%M')}]"
         body = f"{tag}\n\n{output.strip()}"
-        msg_id = send_telegram(instance_dir, body, log_path)
 
-        if msg_id:
-            sent_log = state / "sent.log"
-            line = (
-                f"message_id={msg_id}  task={task_name}  ts={ts.isoformat(timespec='seconds')}  "
-                f"prompt={prompt_path}  output={output_path}  "
-                f"bundle={bundle_path if bundle_path else '-'}\n"
-            )
-            with sent_log.open("a", encoding="utf-8") as f:
-                f.write(line)
-            log_line(f"task {task_name}: sent message_id={msg_id}", log_path)
+        # Resolve destinations. If none configured, fall back to legacy
+        # env-var behavior (send_telegram uses TELEGRAM_CHAT_ID from .env).
+        try:
+            dest_list = resolve_destinations(task, defaults, destinations)
+        except ValueError as e:
+            log_line(f"task {task_name}: destination resolution failed — {e}", log_path)
+            return 1
+
+        sent_log = state / "sent.log"
+
+        if not dest_list:
+            # Legacy path: single send to TELEGRAM_CHAT_ID from .env
+            msg_id = send_telegram(instance_dir, body, log_path)
+            if msg_id:
+                with sent_log.open("a", encoding="utf-8") as f:
+                    f.write(
+                        f"message_id={msg_id}  task={task_name}  "
+                        f"ts={ts.isoformat(timespec='seconds')}  "
+                        f"destination=-  "
+                        f"prompt={prompt_path}  output={output_path}  "
+                        f"bundle={bundle_path if bundle_path else '-'}\n"
+                    )
+                log_line(f"task {task_name}: sent message_id={msg_id}", log_path)
+        else:
+            # Named destinations: one send per destination; log each.
+            for d in dest_list:
+                if d["channel"] != "telegram":
+                    log_line(
+                        f"task {task_name}: destination '{d['name']}' has unsupported "
+                        f"channel '{d['channel']}' — skipped (telegram only in 0.1.x)",
+                        log_path,
+                    )
+                    continue
+                msg_id = send_telegram(instance_dir, body, log_path, chat_id_override=d["chat_id"])
+                if msg_id:
+                    with sent_log.open("a", encoding="utf-8") as f:
+                        f.write(
+                            f"message_id={msg_id}  task={task_name}  "
+                            f"ts={ts.isoformat(timespec='seconds')}  "
+                            f"destination={d['name']}  "
+                            f"prompt={prompt_path}  output={output_path}  "
+                            f"bundle={bundle_path if bundle_path else '-'}\n"
+                        )
+                    log_line(
+                        f"task {task_name}: sent message_id={msg_id} to destination={d['name']}",
+                        log_path,
+                    )
 
         return 0
     finally:

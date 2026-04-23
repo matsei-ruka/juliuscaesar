@@ -137,6 +137,81 @@ fi
 if [[ -f "$INSTANCE_DIR/heartbeat/tasks.yaml" ]]; then
     TASK_COUNT=$(grep -cE '^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_]*:[[:space:]]*$' "$INSTANCE_DIR/heartbeat/tasks.yaml" || true)
     ok "heartbeat/tasks.yaml: $TASK_COUNT task(s) defined"
+
+    # Validate destinations if the block is present
+    DEST_CHECK=$(python3 - "$INSTANCE_DIR/heartbeat/tasks.yaml" <<'PY' 2>&1
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception as e:
+    print(f"YAML_ERROR:{e}")
+    sys.exit(0)
+
+destinations = cfg.get("destinations") or {}
+defaults = cfg.get("defaults") or {}
+tasks = cfg.get("tasks") or {}
+
+if not destinations and not defaults.get("destination") and not any(
+    (t or {}).get("destination") for t in tasks.values()
+):
+    sys.exit(0)
+
+errors = []
+warnings = []
+
+# Check destinations schema
+for name, d in destinations.items():
+    if not isinstance(d, dict):
+        errors.append(f"destination '{name}' is not a mapping")
+        continue
+    if "chat_id" not in d:
+        errors.append(f"destination '{name}' is missing chat_id")
+    if d.get("channel") and d["channel"] != "telegram":
+        warnings.append(f"destination '{name}' channel='{d['channel']}' (only 'telegram' supported in 0.1.x)")
+
+# Check all referenced names exist
+referenced = set()
+raw = defaults.get("destination")
+if raw:
+    referenced.update([raw] if isinstance(raw, str) else list(raw))
+for tname, t in tasks.items():
+    raw = (t or {}).get("destination")
+    if raw:
+        referenced.update([raw] if isinstance(raw, str) else list(raw))
+
+unknown = referenced - set(destinations.keys())
+for u in sorted(unknown):
+    errors.append(f"task references unknown destination '{u}'")
+
+used = set()
+for tname, t in tasks.items():
+    raw = (t or {}).get("destination") or defaults.get("destination")
+    if raw:
+        used.update([raw] if isinstance(raw, str) else list(raw))
+unused = set(destinations.keys()) - used
+for u in sorted(unused):
+    warnings.append(f"destination '{u}' is defined but never referenced")
+
+print(f"TOTAL:{len(destinations)}")
+for e in errors:
+    print(f"ERROR:{e}")
+for w in warnings:
+    print(f"WARN:{w}")
+PY
+)
+    while IFS= read -r line; do
+        case "$line" in
+            TOTAL:*) n=${line#TOTAL:}; ok "heartbeat destinations: $n defined" ;;
+            ERROR:*) fail "destinations: ${line#ERROR:}" ;;
+            WARN:*) warn "destinations: ${line#WARN:}" ;;
+            YAML_ERROR:*) fail "tasks.yaml parse error: ${line#YAML_ERROR:}" ;;
+        esac
+    done <<<"$DEST_CHECK"
 fi
 
 # Voice
