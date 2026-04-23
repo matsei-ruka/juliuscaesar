@@ -1,17 +1,60 @@
 # Quickstart
 
-From zero to a working JuliusCaesar instance in ~10 minutes.
+From zero to a running JuliusCaesar instance in ~15 minutes on Linux.
 
-## Prerequisites
+---
 
-- Linux host (Ubuntu 22.04+ tested). macOS likely works but untested.
-- Python 3.11+, `bash`, `screen`, `curl`, `ffmpeg`, `git`.
-- An always-on box if you want 24/7 availability (VPS, local always-on machine, etc.).
-- A [Claude Code](https://www.anthropic.com/claude-code) subscription (Max recommended for scheduled tasks).
-- A DashScope API key from Alibaba Cloud if you want voice (TTS/ASR).
-- A Telegram bot token if you want chat notifications.
+## 1. Prerequisites on the target machine
 
-## Install the framework
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv git curl screen ffmpeg
+```
+
+Verify:
+
+```bash
+python3 --version     # must be ≥ 3.10
+which git curl screen ffmpeg
+```
+
+Install [Claude Code](https://www.anthropic.com/claude-code) and log in:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+claude /login        # interactive; completes in your browser
+```
+
+---
+
+## 2. Register a Telegram bot (one-time)
+
+Skip this section if your instance won't use Telegram.
+
+1. On your phone, open Telegram and message [@BotFather](https://t.me/BotFather).
+2. Send `/newbot` and follow the prompts. Pick a display name and a unique `@handle` ending in `_bot`.
+3. Save the token BotFather returns (looks like `123456789:ABC…`).
+4. Message your new bot any text (e.g. `hi`). This creates the first update so the API has something to return.
+5. On the target machine, fetch your chat id:
+
+   ```bash
+   TOKEN=123456789:ABC...
+   curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates" | python3 -m json.tool
+   ```
+
+   Look for `"chat": { "id": <NUMBER> }` in the JSON. That number is your `TELEGRAM_CHAT_ID`.
+
+6. Install the Claude Code telegram plugin (required for inbound/outbound when the live session is running):
+
+   ```bash
+   claude
+   > /plugins install claude-plugins-official/telegram
+   > /exit
+   ```
+
+---
+
+## 3. Install the framework
 
 ```bash
 git clone https://github.com/matsei-ruka/juliuscaesar.git ~/juliuscaesar
@@ -19,70 +62,97 @@ cd ~/juliuscaesar
 ./install.sh
 ```
 
-This creates a venv at `~/.local/share/juliuscaesar/venv`, installs Python deps (pyyaml, python-dotenv, dashscope, requests), and writes shims into `~/.local/bin/` for `jc`, `jc-memory`, `jc-heartbeat`, `jc-voice`, `jc-watchdog`, `jc-init`.
+Add `~/.local/bin` to your shell PATH if it isn't already:
 
-Make sure `~/.local/bin` is on your `$PATH`. Verify:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Verify:
 
 ```bash
 jc help
 ```
 
-## Scaffold your first instance
+You should see the router listing `memory`, `heartbeat`, `voice`, `watchdog`, `init`, `doctor`.
 
-Pick a directory name for your assistant. We'll use `~/my-assistant`.
+---
+
+## 4. Scaffold an instance
+
+Pick a directory for your assistant. Anywhere you have write access works. Common choices:
+
+- `~/my-assistant/` — your home dir, no special setup.
+- `/opt/my-assistant/` — shared system location; needs a quick chown so the running user can write to it.
 
 ```bash
+# Option A — home dir
 jc init ~/my-assistant
 cd ~/my-assistant
+
+# Option B — /opt (requires sudo for the mkdir)
+sudo mkdir -p /opt/my-assistant
+sudo chown $(id -u):$(id -g) /opt/my-assistant
+jc init /opt/my-assistant
+cd /opt/my-assistant
 ```
 
-What `jc init` creates:
+`jc init` creates:
 
 ```
 my-assistant/
-├── .jc               # marker so jc-* tools auto-discover this instance
-├── .env              # credentials — fill this in next (mode 600)
-├── .gitignore        # sensible defaults (.env, index.sqlite, state/, etc.)
-├── memory/           # llm-wiki + FTS5 knowledge base
-│   ├── L1/           # always-loaded (identity, user profile, rules, hot cache)
-│   ├── L2/           # on-demand topical entries
-│   ├── LOG.md        # operation audit trail
-│   └── raw/          # immutable source archives
+├── .jc                # marker — other jc-* tools auto-discover this instance
+├── .env               # secrets (mode 600) — fill in next step
+├── .gitignore
+├── memory/
+│   ├── L1/{IDENTITY,USER,RULES,HOT}.md    # seed these
+│   ├── L2/{people,business,projects,learnings,reference}/
+│   ├── LOG.md
+│   └── raw/
 ├── heartbeat/
-│   ├── tasks.yaml    # scheduled task definitions (seeded with a 'hello' smoke task)
-│   └── fetch/        # bash scripts that fetch data before synthesis
-└── voice/
-    ├── references/   # cloned voice metadata goes here after enroll
-    └── tmp/          # scratch dir for generated audio
+│   ├── tasks.yaml     # 'hello' smoke task pre-seeded
+│   └── fetch/
+├── voice/
+│   ├── references/
+│   └── tmp/
+└── ops/
+    └── watchdog.conf  # SESSION_ID + SCREEN_NAME overrides
 ```
 
-## Fill in .env
+---
+
+## 5. Fill in credentials
 
 ```bash
 vim .env
 ```
 
-Required depending on features you use:
+Set whatever you'll use:
 
 ```
 # Voice (TTS + ASR via DashScope Qwen, Singapore/intl endpoint)
 DASHSCOPE_API_KEY=sk-...
 
-# Telegram notifications from heartbeat + watchdog
-TELEGRAM_BOT_TOKEN=123456:ABC...
-TELEGRAM_CHAT_ID=1234567890
+# Telegram notifications
+TELEGRAM_BOT_TOKEN=123456789:ABC...
+TELEGRAM_CHAT_ID=<chat id from step 2.5>
 ```
 
-To get a Telegram bot token, chat with [@BotFather](https://t.me/BotFather). To find your chat_id, message your bot and then `curl https://api.telegram.org/bot<TOKEN>/getUpdates`.
+File should be mode 600 (auto-set by `jc init`; re-apply with `chmod 600 .env` if you copied it).
 
-## Seed memory
+---
 
-Edit the four L1 files to describe who this assistant is, who they help, and what rules to follow:
+## 6. Seed identity
 
-- `memory/L1/IDENTITY.md` — personality, voice, boundaries
-- `memory/L1/USER.md` — the user's profile, preferences, context
-- `memory/L1/RULES.md` — standing corrections and feedback
-- `memory/L1/HOT.md` — rolling 7-day hot cache (start empty)
+Edit the L1 files to describe who this assistant is and who they help:
+
+```bash
+vim memory/L1/IDENTITY.md   # personality, voice, boundaries
+vim memory/L1/USER.md       # user profile, preferences, context
+vim memory/L1/RULES.md      # standing rules, corrections, feedback
+# HOT.md can stay as-is; it's a rolling 7-day cache
+```
 
 Then index:
 
@@ -90,75 +160,123 @@ Then index:
 jc memory rebuild
 ```
 
-Try a search:
+Verify:
 
 ```bash
-jc memory search "identity"
+jc doctor
 ```
 
-## Enroll a voice (optional)
+All critical checks should be green. Telegram credentials are validated with a live `getMe` ping.
 
-Record 10–20s of clean mono audio at ≥24kHz (`.mp3`, `.m4a`, or `.wav`), then:
+---
+
+## 7. Enroll a voice (optional)
+
+Need a 10–20s clean mono audio sample (mp3/m4a/wav at ≥24kHz):
 
 ```bash
-jc voice enroll ~/voice-sample.mp3 --name myassistant
+jc voice enroll /path/to/sample.mp3 --name myassistant
+jc voice speak "Testing, one two three." --out /tmp/test.ogg
 ```
 
-This returns a voice id and writes `voice/references/voice.json`. Test:
+The returned voice id is written to `voice/references/voice.json`.
+
+---
+
+## 8. Test the heartbeat
 
 ```bash
-jc voice speak "This is my cloned voice."
+jc heartbeat run hello --dry-run     # synthesis only; no Telegram send
+jc heartbeat run hello               # sends to Telegram for real
 ```
 
-The output OGG lands at `voice/tmp/out.ogg`. Use `--out <path>` to control.
+You should see a message on your phone within a few seconds.
 
-## Test the heartbeat pipeline
+---
+
+## 9. Start the live runtime
 
 ```bash
-jc heartbeat run hello --dry-run
+screen -dmS myassistant bash -c "cd $(pwd) && claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official"
 ```
 
-The `hello` task is seeded in `tasks.yaml` as a smoke test. `--dry-run` skips Telegram send and prints the output.
+Wait ~10s, then:
 
-Drop `--dry-run` to send it for real. You should see a message on Telegram within a few seconds.
+```bash
+jc doctor
+```
 
-## Install the watchdog (optional but recommended)
+`live claude process running` should now be green, and `telegram plugin alive` should report a pid.
 
-If you're running on an always-on box and want your `claude` session to auto-recover from crashes or auto-updates:
+Find the session id so the watchdog can restore conversation memory on restart:
+
+```bash
+ls -lat ~/.claude/projects/*$(basename $(pwd))*/*.jsonl | head -1
+```
+
+Copy the UUID portion of the filename (strip `.jsonl`), then:
+
+```bash
+vim ops/watchdog.conf
+```
+
+Uncomment and fill in:
+
+```
+SESSION_ID=<uuid-from-above>
+SCREEN_NAME=myassistant
+```
+
+---
+
+## 10. Install the watchdog
 
 ```bash
 jc watchdog install
+jc watchdog status
 ```
 
-This writes two crontab entries (`@reboot` + every 2 minutes) that supervise the screen session and respawn claude on death. You get a Telegram ping when it restarts.
+Two cron entries get installed (`@reboot` + every 2 minutes). If claude dies (crash, auto-update, or Telegram plugin death), the watchdog respawns it with `--resume`, and you get a Telegram ping when it's back.
 
-To pin a specific claude session id (so `--resume` keeps conversation memory across restarts), edit `ops/watchdog.conf`:
+---
 
-```
-SESSION_ID=<uuid-from-~/.claude/sessions>
-```
+## Done
 
-## You're done
+Normal day-to-day:
 
 ```bash
-jc doctor        # verify the whole setup
-jc watchdog status
-jc memory search "..."
+jc memory search "query"
+jc memory read <slug>
 jc heartbeat run <task>
-jc voice speak "..."
+jc voice speak "text"
+jc watchdog status
+jc doctor
 ```
 
-Put the `my-assistant/` directory under private git if you want version control — `.env` and `index.sqlite` are already gitignored.
+DM the Telegram bot and the live session will respond.
+
+---
 
 ## Troubleshooting
 
-- `jc` not found → `~/.local/bin` isn't on `$PATH`. Add it to your shell config.
-- `DASHSCOPE_API_KEY not set` → you skipped the `.env` step, or forgot to `source` a shell. `.env` is auto-loaded by all `jc` commands.
-- Heartbeat says "adapter not found" → the tool's CLI (`claude`, `gemini`, etc.) isn't installed. `jc doctor` tells you which.
-- Telegram plugin dies silently → framework watchdog detects it and restarts claude. Your only visible signal is the "back alive" ping.
+**`jc` not found** → `~/.local/bin` isn't on `$PATH`. See step 3.
 
-## More
+**`python3 required` or Python version error on install** → `install.sh` needs Python 3.10+. Upgrade (pyenv, deadsnakes, or `apt install python3.10`).
 
-- Architecture: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
-- Roadmap: [ROADMAP.md](./ROADMAP.md)
-- Issues: [GitHub Issues](https://github.com/matsei-ruka/juliuscaesar/issues)
+**`DASHSCOPE_API_KEY not set`** → your `.env` is missing a value or isn't being sourced. Every `jc-*` command auto-sources `.env` at the instance root.
+
+**`jc doctor` says `telegram plugin dead`** → restart the live claude session (`exit` inside the screen and let the watchdog respawn it, or `screen -S <name> -X quit && screen -dmS <name> ...`).
+
+**`tasks.yaml` adapter error** → the CLI for that adapter (`claude`, `gemini`, etc.) isn't installed or isn't authenticated. `jc doctor` flags which are missing.
+
+**`jc init` refuses to scaffold** → the target dir already has files (expected for a JC instance to be scaffolded into an empty directory) or a `.jc` marker (already an instance).
+
+**Shim collision** (`install.sh` refuses to overwrite) → another juliuscaesar clone is already installed. Either use that clone, or rerun `./install.sh --force` to repoint the shims to this clone.
+
+---
+
+## What's next
+
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — how the pieces fit together
+- [ROADMAP.md](./ROADMAP.md) — shipped + planned features
+- Issues: open one at https://github.com/matsei-ruka/juliuscaesar/issues
