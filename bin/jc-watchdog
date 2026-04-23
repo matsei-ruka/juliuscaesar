@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# jc-watchdog — supervise a JuliusCaesar instance's live claude session.
+#
+# Subcommands:
+#   tick        Run one supervisor tick (for cron).
+#   install     Install cron entries (@reboot + */2 * * * *) for this instance.
+#   uninstall   Remove this instance's cron entries.
+#   status      Print current state + tail of log.
+#   test-notify Send a manual Telegram ping to verify creds.
+#
+# Instance dir resolution (same as other jc-* binaries):
+#   --instance-dir <path>  →  $JC_INSTANCE_DIR  →  walk up for .jc  →  cwd
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+LIB_DIR="$(cd "$HERE/../lib" && pwd)"
+WATCHDOG_SH="$LIB_DIR/watchdog/watchdog.sh"
+
+# --- Instance dir resolution ---
+resolve_instance_dir() {
+    local arg="${1:-}"
+    if [[ -n "$arg" ]]; then
+        [[ -d "$arg" ]] || { echo "--instance-dir does not exist: $arg" >&2; exit 2; }
+        (cd "$arg" && pwd)
+        return 0
+    fi
+    if [[ -n "${JC_INSTANCE_DIR:-}" && -d "$JC_INSTANCE_DIR" ]]; then
+        (cd "$JC_INSTANCE_DIR" && pwd)
+        return 0
+    fi
+    local cur
+    cur="$(pwd)"
+    while :; do
+        [[ -f "$cur/.jc" ]] && { echo "$cur"; return 0; }
+        local parent
+        parent="$(dirname "$cur")"
+        [[ "$parent" == "$cur" ]] && break
+        cur="$parent"
+    done
+    if [[ -d "$(pwd)/ops" ]]; then
+        pwd; return 0
+    fi
+    echo "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, or create a .jc marker." >&2
+    exit 2
+}
+
+# Parse --instance-dir
+INSTANCE_DIR_ARG=""
+REST=()
+while (( $# )); do
+    case "$1" in
+        --instance-dir) INSTANCE_DIR_ARG="$2"; shift 2 ;;
+        --instance-dir=*) INSTANCE_DIR_ARG="${1#*=}"; shift ;;
+        *) REST+=("$1"); shift ;;
+    esac
+done
+set -- "${REST[@]:+${REST[@]}}"
+
+SUBCMD="${1:-}"
+shift || true
+INSTANCE_DIR="$(resolve_instance_dir "$INSTANCE_DIR_ARG")"
+
+case "$SUBCMD" in
+    tick|"")
+        exec bash "$WATCHDOG_SH" "$INSTANCE_DIR"
+        ;;
+
+    install)
+        # Determine screen name (same logic as watchdog.sh)
+        SCREEN_NAME="jc-$(basename "$INSTANCE_DIR")"
+        if [[ -f "$INSTANCE_DIR/ops/watchdog.conf" ]]; then
+            # shellcheck disable=SC1091
+            source "$INSTANCE_DIR/ops/watchdog.conf"
+        fi
+        JC_BIN="$HOME/.local/bin/jc-watchdog"
+        [[ -x "$JC_BIN" ]] || { echo "jc-watchdog not installed at $JC_BIN. Run juliuscaesar install.sh first." >&2; exit 1; }
+
+        TAG="# jc-watchdog for $INSTANCE_DIR"
+        ENTRY_REBOOT="@reboot $JC_BIN tick --instance-dir $INSTANCE_DIR  $TAG"
+        ENTRY_TICK="*/2 * * * * $JC_BIN tick --instance-dir $INSTANCE_DIR  $TAG"
+
+        # Build new crontab in a tempfile — crontab(1) refuses stdin that
+        # lacks a trailing newline, and command-substitution strips them.
+        TMP_CRON="$(mktemp)"
+        trap 'rm -f "$TMP_CRON"' EXIT
+        crontab -l 2>/dev/null | grep -vF "$TAG" > "$TMP_CRON" || true
+        # Strip trailing blank lines so reinstalls don't accumulate gaps.
+        sed -i -e :a -e '/^$/{$d;N;ba' -e '}' "$TMP_CRON"
+        {
+            echo ""
+            echo "$ENTRY_REBOOT"
+            echo "$ENTRY_TICK"
+        } >> "$TMP_CRON"
+        crontab "$TMP_CRON"
+        echo "Installed cron entries for $INSTANCE_DIR (screen: $SCREEN_NAME)"
+        crontab -l | grep -F "$TAG"
+        ;;
+
+    uninstall)
+        TAG="# jc-watchdog for $INSTANCE_DIR"
+        TMP_CRON="$(mktemp)"
+        trap 'rm -f "$TMP_CRON"' EXIT
+        crontab -l 2>/dev/null | grep -vF "$TAG" > "$TMP_CRON" || true
+        sed -i -e :a -e '/^$/{$d;N;ba' -e '}' "$TMP_CRON"
+        crontab "$TMP_CRON"
+        echo "Removed cron entries for $INSTANCE_DIR"
+        ;;
+
+    status)
+        SCREEN_NAME="jc-$(basename "$INSTANCE_DIR")"
+        if [[ -f "$INSTANCE_DIR/ops/watchdog.conf" ]]; then
+            # shellcheck disable=SC1091
+            source "$INSTANCE_DIR/ops/watchdog.conf"
+        fi
+        STATE_FILE="/tmp/jc-watchdog-${SCREEN_NAME}.state"
+        LOG_FILE="/tmp/jc-watchdog-${SCREEN_NAME}.log"
+        echo "instance:     $INSTANCE_DIR"
+        echo "screen name:  $SCREEN_NAME"
+        echo "session id:   ${SESSION_ID:-<none>}"
+        echo "state:        $([[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo unknown)"
+        echo "cron entries:"
+        crontab -l 2>/dev/null | grep -F "jc-watchdog for $INSTANCE_DIR" || echo "  (none installed)"
+        echo ""
+        echo "last 15 log lines:"
+        [[ -f "$LOG_FILE" ]] && tail -15 "$LOG_FILE" || echo "  (no log)"
+        ;;
+
+    test-notify)
+        if [[ -f "$INSTANCE_DIR/.env" ]]; then
+            # shellcheck disable=SC1091
+            set -a; source "$INSTANCE_DIR/.env"; set +a
+        fi
+        : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN not set in $INSTANCE_DIR/.env}"
+        : "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID not set in $INSTANCE_DIR/.env}"
+        RESP=$(curl -sS --max-time 10 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=jc-watchdog test-notify: $(date +'%FT%T%z')")
+        printf '%s\n' "$RESP"
+        ;;
+
+    -h|--help|help)
+        cat <<'EOF'
+jc-watchdog — supervise a JuliusCaesar instance's live claude session.
+
+Usage:
+  jc-watchdog [--instance-dir <path>] <subcommand>
+
+Subcommands:
+  tick          Run one supervisor tick (intended for cron).
+  install       Install @reboot + */2 cron entries for this instance.
+  uninstall     Remove this instance's cron entries.
+  status        Show state, cron entries, recent log.
+  test-notify   Send a Telegram message to validate credentials.
+EOF
+        ;;
+
+    *)
+        echo "Unknown subcommand: $SUBCMD (try --help)" >&2
+        exit 2
+        ;;
+esac
