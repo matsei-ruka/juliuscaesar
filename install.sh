@@ -26,7 +26,37 @@ log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 # --- Checks ------------------------------------------------------------------
 
 command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
+
+# Python 3.10+ required — lib/* uses PEP 604 union syntax (str | None).
+PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_MAJOR=${PY_VER%.*}
+PY_MINOR=${PY_VER#*.}
+if (( PY_MAJOR < 3 || (PY_MAJOR == 3 && PY_MINOR < 10) )); then
+    echo "error: Python $PY_VER detected; JuliusCaesar requires Python 3.10+." >&2
+    echo "       Install a newer python3 (e.g. via pyenv, deadsnakes, or your package manager)." >&2
+    exit 1
+fi
+
 mkdir -p "$SHARE_DIR" "$BIN_DIR"
+
+# Shim-collision guard: don't silently overwrite shims that point at a
+# different juliuscaesar clone. First install wins; subsequent installs from
+# other clones must explicitly --force or uninstall first.
+EXISTING_OTHER=""
+for bin in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-init jc-doctor; do
+    s="$BIN_DIR/$bin"
+    if [[ -e "$s" ]] && ! grep -qF "Source: $HERE/bin/$bin" "$s" 2>/dev/null; then
+        EXISTING_OTHER="$s"
+        break
+    fi
+done
+if [[ -n "$EXISTING_OTHER" && "${1:-}" != "--force" ]]; then
+    echo "error: $EXISTING_OTHER is a shim pointing at a DIFFERENT juliuscaesar clone." >&2
+    echo "       Refusing to overwrite. Options:" >&2
+    echo "         1) Use this clone only:   rerun with --force" >&2
+    echo "         2) Keep existing clone:   just use that clone's install" >&2
+    exit 1
+fi
 
 case ":${PATH:-}:" in
     *":$BIN_DIR:"*) ;;
