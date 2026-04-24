@@ -59,3 +59,32 @@ Output is sent via a raw-API channel client (Telegram, etc.) that does **not** d
 ## Watchdog
 
 Cron-triggered supervisor for the live Claude session. Detects crashes (including Claude CLI auto-updates that kill the running process), restarts with `--resume <session-id>` from a conf file, pings the user via Telegram on state transitions.
+
+## Workers (on-demand background agents)
+
+Heartbeat is for *scheduled* tasks (cron-driven). Workers are for *on-demand* tasks — dev work the user asks for interactively, that shouldn't block the chat session.
+
+```
+  main session (chat, Sonnet)
+      │
+      │  spawns via `jc workers spawn`
+      ▼
+  state/workers.db  ◄─── status updates ◄─── worker process (detached)
+      │
+      ▼                                       │
+  jc workers list/show/tail                   ▼
+                                        send_telegram.sh
+                                              │
+                                              ▼
+                                        user's Telegram DM
+```
+
+State is in `<instance>/state/workers.db` (SQLite) + per-worker `state/workers/<id>/{prompt,log,result}`. Each worker runs detached via a double-fork + setsid, so it survives the spawning shell and the main Claude session crashing. Completion is pushed to Telegram as a plain-text summary.
+
+**When the main session should spawn vs. do inline:**
+- Quick answers, explanations, chat → inline
+- Single edit to one file → inline
+- Multi-file refactors, scaffolding, research reports → spawn
+- Anything iterative or with tests to run → spawn
+
+See `docs/specs/workers.md` for the full spec.

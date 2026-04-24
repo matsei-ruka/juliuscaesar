@@ -69,7 +69,7 @@ fi
 
 section "JuliusCaesar binaries"
 
-for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-init jc-doctor; do
+for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-doctor; do
     if command -v "$b" >/dev/null 2>&1; then
         ok "$b"
     else
@@ -81,7 +81,7 @@ done
 
 section "Adapter CLIs (optional — only needed per your tasks.yaml)"
 
-for b in gemini opencode; do
+for b in gemini opencode codex; do
     if command -v "$b" >/dev/null 2>&1; then
         ok "$b"
     else
@@ -306,6 +306,59 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
             fail "telegram plugin dead (pid $PID). Restart claude to respawn."
         fi
     fi
+fi
+
+# --- Workers ---
+
+section "Workers"
+
+STATE_DIR="$INSTANCE_DIR/state"
+if [[ -d "$STATE_DIR" ]]; then
+    if [[ -w "$STATE_DIR" ]]; then
+        ok "state/ present and writable"
+    else
+        fail "state/ not writable"
+    fi
+else
+    info "state/ not yet created (first spawn creates it)"
+fi
+
+WORKER_DB="$STATE_DIR/workers.db"
+if [[ -f "$WORKER_DB" ]]; then
+    SIZE=$(du -h "$WORKER_DB" | awk '{print $1}')
+    ok "state/workers.db present ($SIZE)"
+
+    # Count orphan candidates — non-terminal rows with dead/missing pid.
+    ORPHAN_CHECK=$(python3 - "$WORKER_DB" <<'PY' 2>/dev/null
+import os, sqlite3, sys
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    rows = conn.execute(
+        "SELECT id, pid FROM workers WHERE status IN ('queued','running','need_input')"
+    ).fetchall()
+    dead = 0
+    for _id, pid in rows:
+        if pid is None:
+            dead += 1; continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            dead += 1
+        except PermissionError:
+            pass
+    print(f"{dead}/{len(rows)}")
+except Exception:
+    print("?/?")
+PY
+)
+    case "$ORPHAN_CHECK" in
+        0/*) ok "no orphan worker rows ($ORPHAN_CHECK non-terminal)" ;;
+        ?/?) info "worker DB unreadable" ;;
+        */*) DEAD="${ORPHAN_CHECK%/*}"; TOT="${ORPHAN_CHECK#*/}"
+             warn "$DEAD/$TOT non-terminal worker rows look orphaned — run: jc workers reconcile" ;;
+    esac
+else
+    info "state/workers.db not yet created (first spawn creates it)"
 fi
 
 # --- Summary ---
