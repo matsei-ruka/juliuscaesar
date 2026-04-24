@@ -19,7 +19,7 @@ SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$SHARE_DIR/venv"
 DEPS=(pyyaml python-dotenv dashscope requests)
-BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-init jc-doctor)
+BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-doctor)
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
@@ -43,7 +43,7 @@ mkdir -p "$SHARE_DIR" "$BIN_DIR"
 # different juliuscaesar clone. First install wins; subsequent installs from
 # other clones must explicitly --force or uninstall first.
 EXISTING_OTHER=""
-for bin in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-init jc-doctor; do
+for bin in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-doctor; do
     s="$BIN_DIR/$bin"
     if [[ -e "$s" ]] && ! grep -qF "Source: $HERE/bin/$bin" "$s" 2>/dev/null; then
         EXISTING_OTHER="$s"

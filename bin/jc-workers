@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""jc-workers — on-demand background agents for JuliusCaesar.
+
+Subcommands (Sprint 1 — initial slice):
+  spawn     Fork a detached worker that runs a brain adapter on a prompt.
+  _run      (internal) The detached runner. Invoked by spawn via double-fork.
+  list      Print workers table.
+  show      Print one worker's full state.
+  tail      `tail -f` a worker's log.
+
+Future sprints add: cancel, gc, reconcile, timeout enforcement, notifications.
+
+Instance dir resolution (same as jc-memory):
+  1. --instance-dir <path> flag
+  2. $JC_INSTANCE_DIR env var
+  3. Walk up from cwd looking for a .jc marker file
+  4. cwd if memory/ exists
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Allow running directly from a clone without install.
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from workers import (  # type: ignore  # noqa: E402
+    Worker,
+    connect,
+    create,
+    get,
+    list_workers,
+    mark_running,
+    mark_terminal,
+    worker_dir as _worker_dir,
+    workers_dir,
+)
+from workers.db import _now_iso  # type: ignore  # noqa: E402
+
+
+# Adapters live in the heartbeat lib (shared contract).
+FRAMEWORK_ROOT = _HERE.parent
+ADAPTERS_DIR = FRAMEWORK_ROOT / "lib" / "heartbeat" / "adapters"
+
+
+# --- Instance resolution (copied verbatim from jc-memory) --------------------
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    if arg:
+        p = Path(arg).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"--instance-dir does not exist: {p}")
+        return p
+    env = os.environ.get("JC_INSTANCE_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
+        return p
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ".jc").exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    cwd = Path.cwd().resolve()
+    if (cwd / "memory").exists():
+        return cwd
+    raise SystemExit(
+        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
+        "or run from a directory containing memory/ or a .jc marker."
+    )
+
+
+# --- spawn -------------------------------------------------------------------
+
+
+def cmd_spawn(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+
+    # Validate adapter exists up-front — fail-fast is friendlier than a
+    # detached child that silently marks itself failed.
+    adapter = ADAPTERS_DIR / f"{args.brain}.sh"
+    if not adapter.exists():
+        raise SystemExit(f"adapter not found: {adapter}")
+    if not os.access(adapter, os.X_OK):
+        raise SystemExit(f"adapter not executable: {adapter}")
+
+    # Read the prompt.
+    if args.prompt == "-" or args.prompt is None:
+        prompt_text = sys.stdin.read()
+    else:
+        prompt_file = Path(args.prompt).expanduser().resolve()
+        # Security guard from spec §9: prompt must be inside instance dir.
+        if not str(prompt_file).startswith(str(instance)):
+            raise SystemExit(
+                f"--prompt must be inside instance dir ({instance}): {prompt_file}"
+            )
+        prompt_text = prompt_file.read_text(encoding="utf-8")
+
+    if not prompt_text.strip():
+        raise SystemExit("refusing to spawn with empty prompt")
+
+    # Create the DB row first to get an id.
+    conn = connect(instance)
+    try:
+        # Placeholder paths — we fill them after we know the id.
+        worker_id = create(
+            conn,
+            topic=args.topic,
+            brain=args.brain,
+            model=args.model,
+            prompt_path="",
+            log_path="",
+            spawned_by=args.spawned_by,
+            telegram_msg_id=args.telegram_msg_id,
+            notify_chat_id=args.notify,
+            timeout_seconds=args.timeout,
+        )
+
+        wdir = _worker_dir(instance, worker_id)
+        wdir.mkdir(parents=True, exist_ok=True)
+        prompt_path = wdir / "prompt"
+        log_path = wdir / "log"
+        prompt_path.write_text(prompt_text, encoding="utf-8")
+        log_path.touch()
+
+        meta = {
+            "id": worker_id,
+            "topic": args.topic,
+            "brain": args.brain,
+            "model": args.model,
+            "spawned_by": args.spawned_by,
+            "created_at": _now_iso(),
+        }
+        (wdir / "meta.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
+
+        conn.execute(
+            "UPDATE workers SET prompt_path=?, log_path=? WHERE id=?",
+            (str(prompt_path), str(log_path), worker_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Detached double-fork so the runner survives this shell AND our process.
+    # The child re-execs `jc-workers _run <id>` with its own session.
+    pid = _double_fork_run(instance, worker_id)
+
+    print(f"spawned worker #{worker_id} (pid {pid})")
+    return 0
+
+
+def _double_fork_run(instance: Path, worker_id: int) -> int:
+    """Fork twice so the runner is fully detached (no controlling terminal,
+    no parent process waiting). Returns the grandchild pid seen from the
+    first fork.
+    """
+    # First fork.
+    r, w = os.pipe()
+    first = os.fork()
+    if first == 0:
+        # Child 1: become session leader, fork again, send pid up the pipe.
+        os.close(r)
+        os.setsid()
+        second = os.fork()
+        if second == 0:
+            # Grandchild: close all stdio, exec _run.
+            os.close(w)
+            _exec_runner(instance, worker_id)
+            os._exit(127)  # unreachable
+        else:
+            # Child 1 exits after reporting the grandchild pid.
+            os.write(w, f"{second}".encode())
+            os.close(w)
+            os._exit(0)
+    else:
+        # Parent: wait for child 1 to exit, read grandchild pid.
+        os.close(w)
+        os.waitpid(first, 0)
+        data = os.read(r, 32)
+        os.close(r)
+        return int(data.decode().strip()) if data else -1
+
+
+def _exec_runner(instance: Path, worker_id: int) -> None:
+    """In the detached grandchild: reopen stdio to /dev/null and exec
+    `jc-workers _run <id>`. We do NOT return.
+    """
+    # Close inherited stdio.
+    devnull_r = os.open(os.devnull, os.O_RDONLY)
+    devnull_w = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull_r, 0)
+    os.dup2(devnull_w, 1)
+    os.dup2(devnull_w, 2)
+
+    # Locate ourselves on PATH (preferred) or fall back to the current file.
+    exe = shutil.which("jc-workers") or sys.argv[0]
+    os.execvpe(
+        exe,
+        [exe, "--instance-dir", str(instance), "_run", str(worker_id)],
+        os.environ.copy(),
+    )
+
+
+# --- _run (detached runner) --------------------------------------------------
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """The body that runs in the detached grandchild.
+
+    Reads prompt → pipes to adapter → captures stdout to result + log →
+    updates DB on exit. Failures are caught and recorded, not raised.
+    """
+    instance = resolve_instance_dir(args.instance_dir)
+    worker_id = int(args.worker_id)
+
+    conn = connect(instance)
+    try:
+        worker = get(conn, worker_id)
+        if worker is None:
+            sys.exit(f"worker {worker_id} not found")
+
+        prompt_path = Path(worker.prompt_path)
+        log_path = Path(worker.log_path)
+        result_path = _worker_dir(instance, worker_id) / "result"
+
+        adapter = ADAPTERS_DIR / f"{worker.brain}.sh"
+        if not adapter.exists():
+            mark_terminal(
+                conn,
+                worker_id,
+                status="failed",
+                exit_code=127,
+                error=f"adapter missing: {adapter}",
+            )
+            return 127
+
+        mark_running(conn, worker_id, os.getpid())
+    finally:
+        conn.close()
+
+    # Run the adapter. Stdin = prompt. Stdout → result (clean). Stderr → log.
+    with prompt_path.open("rb") as stdin_f, \
+         result_path.open("wb") as stdout_f, \
+         log_path.open("ab") as log_f:
+
+        log_f.write(
+            f"[{_now_iso()}] spawn worker={worker_id} brain={worker.brain} "
+            f"model={worker.model or '-'} adapter={adapter}\n".encode()
+        )
+        log_f.flush()
+
+        try:
+            proc = subprocess.Popen(
+                [str(adapter), worker.model or ""],
+                stdin=stdin_f,
+                stdout=stdout_f,
+                stderr=log_f,
+                cwd=str(instance),
+                preexec_fn=os.setsid,  # isolate process group for future kill
+            )
+            exit_code = proc.wait()
+        except Exception as e:  # noqa: BLE001
+            conn = connect(instance)
+            try:
+                mark_terminal(
+                    conn,
+                    worker_id,
+                    status="failed",
+                    error=f"spawn exception: {e}",
+                )
+            finally:
+                conn.close()
+            return 1
+
+    # Read last stderr line for error reporting on failure.
+    last_err = ""
+    if exit_code != 0:
+        try:
+            log_tail = log_path.read_text(encoding="utf-8", errors="replace")
+            # Use last non-empty line.
+            for line in reversed(log_tail.splitlines()):
+                if line.strip():
+                    last_err = line.strip()[:500]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    status = "done" if exit_code == 0 else "failed"
+    conn = connect(instance)
+    try:
+        mark_terminal(
+            conn,
+            worker_id,
+            status=status,
+            exit_code=exit_code,
+            result_path=str(result_path),
+            error=last_err or None,
+        )
+    finally:
+        conn.close()
+    return 0
+
+
+# --- list --------------------------------------------------------------------
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = connect(instance)
+    try:
+        rows = list_workers(conn, status=args.status, limit=args.limit)
+    finally:
+        conn.close()
+
+    if not rows:
+        print("(no workers)")
+        return 0
+
+    # Tabular output.
+    print(f"{'ID':>4}  {'STATUS':<10}  {'BRAIN':<10}  {'MODEL':<22}  {'STARTED':<20}  TOPIC")
+    print("-" * 100)
+    for w in rows:
+        started = (w.started_at or "")[:19]
+        print(
+            f"{w.id:>4}  {w.status:<10}  {w.brain:<10}  {(w.model or '-'):<22}  "
+            f"{started:<20}  {w.topic}"
+        )
+    return 0
+
+
+# --- show --------------------------------------------------------------------
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = connect(instance)
+    try:
+        w = get(conn, int(args.worker_id))
+    finally:
+        conn.close()
+    if not w:
+        raise SystemExit(f"worker {args.worker_id} not found")
+
+    print(f"worker #{w.id}  [{w.status}]")
+    print(f"  topic       {w.topic}")
+    print(f"  brain       {w.brain}")
+    print(f"  model       {w.model or '-'}")
+    print(f"  pid         {w.pid or '-'}")
+    print(f"  exit_code   {w.exit_code if w.exit_code is not None else '-'}")
+    print(f"  started_at  {w.started_at}")
+    print(f"  finished_at {w.finished_at or '-'}")
+    print(f"  prompt      {w.prompt_path}")
+    print(f"  log         {w.log_path}")
+    print(f"  result      {w.result_path or '-'}")
+    print(f"  notify      {w.notify_chat_id or '(default)'}")
+    if w.error:
+        print(f"  error       {w.error}")
+
+    if w.result_path and Path(w.result_path).exists():
+        body = Path(w.result_path).read_text(encoding="utf-8", errors="replace")
+        print("\n--- result ---")
+        print(body[:2000])
+        if len(body) > 2000:
+            print(f"... ({len(body) - 2000} more chars)")
+    return 0
+
+
+# --- tail --------------------------------------------------------------------
+
+
+def cmd_tail(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = connect(instance)
+    try:
+        w = get(conn, int(args.worker_id))
+    finally:
+        conn.close()
+    if not w:
+        raise SystemExit(f"worker {args.worker_id} not found")
+
+    os.execvp("tail", ["tail", "-n", "200", "-f", w.log_path])
+    return 0  # unreachable
+
+
+# --- argparse ----------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-workers")
+    p.add_argument("--instance-dir", help="override instance dir")
+    subs = p.add_subparsers(dest="cmd", required=True)
+
+    sp = subs.add_parser("spawn", help="spawn a background worker")
+    sp.add_argument("--topic", required=True, help="short human label")
+    sp.add_argument("--brain", required=True, help="adapter name (claude|codex|gemini|opencode)")
+    sp.add_argument("--model", default=None, help="optional model override")
+    sp.add_argument("--notify", default=None, help="telegram chat_id for completion")
+    sp.add_argument("--timeout", type=int, default=None, help="soft timeout in seconds")
+    sp.add_argument("--spawned-by", default="user", help="free-form origin label")
+    sp.add_argument("--telegram-msg-id", default=None, help="inbound msg that triggered the spawn")
+    sp.add_argument("--prompt", default="-", help="prompt file path, or '-' for stdin")
+
+    rp = subs.add_parser("_run", help=argparse.SUPPRESS)
+    rp.add_argument("worker_id")
+
+    lp = subs.add_parser("list", help="list workers")
+    lp.add_argument("--status", default=None,
+                    choices=["queued", "running", "done", "failed", "cancelled",
+                             "need_input", "all"],
+                    help="filter by status")
+    lp.add_argument("--limit", type=int, default=20)
+
+    shp = subs.add_parser("show", help="show one worker's details")
+    shp.add_argument("worker_id")
+
+    tp = subs.add_parser("tail", help="tail -f a worker's log")
+    tp.add_argument("worker_id")
+
+    return p
+
+
+HANDLERS = {
+    "spawn": cmd_spawn,
+    "_run": cmd_run,
+    "list": cmd_list,
+    "show": cmd_show,
+    "tail": cmd_tail,
+}
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return HANDLERS[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
