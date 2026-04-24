@@ -284,26 +284,7 @@ def _format_notification(w: Worker) -> str:
         "",
     ]
 
-    if w.status == "done" and w.result_path and Path(w.result_path).exists():
-        body = Path(w.result_path).read_text(encoding="utf-8", errors="replace").strip()
-        if len(body) > 500:
-            lines.append(body[:500] + "…")
-        else:
-            lines.append(body)
-        lines.append("")
-        lines.append(f"full: {w.result_path}")
-    elif w.status == "need_input" and w.result_path and Path(w.result_path).exists():
-        body = Path(w.result_path).read_text(encoding="utf-8", errors="replace").strip()
-        # Strip the NEED_INPUT: prefix for display.
-        for prefix in ("NEED_INPUT:", "NEED_INPUT"):
-            if body.lstrip().startswith(prefix):
-                body = body.lstrip()[len(prefix):].lstrip(": \n")
-                break
-        if len(body) > 500:
-            lines.append(body[:500] + "…")
-        else:
-            lines.append(body)
-        lines.append("")
+    if w.status == "need_input":
         lines.append(f"respawn with: jc workers spawn --topic '{w.topic}' --brain {w.brain} ...")
     elif w.status in ("failed", "cancelled"):
         if w.error:
