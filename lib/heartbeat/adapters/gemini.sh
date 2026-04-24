@@ -20,10 +20,11 @@ if ! command -v gemini >/dev/null 2>&1; then
     exit 127
 fi
 
-# gemini CLI: -p/--prompt reads from arg; --model overrides default.
-# We capture stdin → arg to keep the adapter stdin-based.
-PROMPT=$(cat)
-ARGS=("-p" "$PROMPT")
+# gemini's -p triggers headless mode. Per `gemini --help`, the prompt string is
+# "appended to input on stdin (if any)", so we pass an empty -p and let the real
+# prompt flow in via stdin. Passing a large prompt as a CLI arg would hit
+# ARG_MAX (~128KB in practice on Linux) and fail with "Argument list too long".
+ARGS=("-p" "")
 
 case "$YOLO" in
     true|yolo)

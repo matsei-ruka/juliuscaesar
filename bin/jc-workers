@@ -107,7 +107,17 @@ def cmd_spawn(args: argparse.Namespace) -> int:
     else:
         prompt_file = Path(args.prompt).expanduser().resolve()
         # Security guard from spec §9: prompt must be inside instance dir.
-        if not str(prompt_file).startswith(str(instance)):
+        # Use is_relative_to (3.9+) — string prefix would accept sibling dirs
+        # like /path/instance-evil/ when instance is /path/instance.
+        try:
+            inside = prompt_file.is_relative_to(instance)
+        except AttributeError:  # pragma: no cover — Python < 3.9
+            try:
+                prompt_file.relative_to(instance)
+                inside = True
+            except ValueError:
+                inside = False
+        if not inside:
             raise SystemExit(
                 f"--prompt must be inside instance dir ({instance}): {prompt_file}"
             )
@@ -373,14 +383,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         timed_out = False
         try:
-            # No preexec_fn=setsid: adapter shares the runner's process group,
-            # so `jc workers cancel` can killpg everything at once.
+            # start_new_session=True puts the adapter in its own session/pgid
+            # so killpg on timeout only hits the adapter tree, not the runner.
             proc = subprocess.Popen(
                 [str(adapter), worker.model or ""],
                 stdin=stdin_f,
                 stdout=stdout_f,
                 stderr=log_f,
                 cwd=str(instance),
+                start_new_session=True,
             )
             try:
                 exit_code = proc.wait(timeout=worker.timeout_seconds)
@@ -642,13 +653,29 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     mark them failed. Intended to run at main-session startup."""
     instance = resolve_instance_dir(args.instance_dir)
 
+    # Skip rows younger than this — spawn writes the row 'queued' with pid=NULL
+    # and only sets pid after double-fork returns, so a reconcile during that
+    # window would falsely flag a healthy new worker as an orphan.
+    fresh_cutoff = datetime.now(timezone.utc) - timedelta(seconds=10)
+
     conn = connect(instance)
     try:
         rows = conn.execute(
-            "SELECT id, pid FROM workers WHERE status IN ('queued','running','need_input')"
+            "SELECT id, pid, started_at FROM workers "
+            "WHERE status IN ('queued','running','need_input')"
         ).fetchall()
         orphans = []
+        skipped_fresh = 0
         for r in rows:
+            try:
+                started = datetime.strptime(
+                    r["started_at"], "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                started = None
+            if started is not None and started > fresh_cutoff:
+                skipped_fresh += 1
+                continue
             pid = r["pid"]
             if pid is None or not _pid_alive(pid):
                 orphans.append(r["id"])
@@ -662,7 +689,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
-    print(f"reconciled {len(orphans)} orphan(s) of {len(rows)} live row(s)")
+    msg = f"reconciled {len(orphans)} orphan(s) of {len(rows)} live row(s)"
+    if skipped_fresh:
+        msg += f" (skipped {skipped_fresh} fresh <10s)"
+    print(msg)
     return 0
 
 

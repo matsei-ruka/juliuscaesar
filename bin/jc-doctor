@@ -183,11 +183,11 @@ for name, d in destinations.items():
 referenced = set()
 raw = defaults.get("destination")
 if raw:
-    referenced.update([raw] if isinstance(raw, str) else list(raw))
+    referenced.update([raw] if isinstance(raw, str) else list(raw or []))
 for tname, t in tasks.items():
     raw = (t or {}).get("destination")
     if raw:
-        referenced.update([raw] if isinstance(raw, str) else list(raw))
+        referenced.update([raw] if isinstance(raw, str) else list(raw or []))
 
 unknown = referenced - set(destinations.keys())
 for u in sorted(unknown):
@@ -197,7 +197,7 @@ used = set()
 for tname, t in tasks.items():
     raw = (t or {}).get("destination") or defaults.get("destination")
     if raw:
-        used.update([raw] if isinstance(raw, str) else list(raw))
+        used.update([raw] if isinstance(raw, str) else list(raw or []))
 unused = set(destinations.keys()) - used
 for u in sorted(unused):
     warnings.append(f"destination '{u}' is defined but never referenced")
