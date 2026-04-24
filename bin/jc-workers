@@ -26,7 +26,8 @@ import shutil
 import signal
 import subprocess
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Allow running directly from a clone without install.
@@ -162,6 +163,15 @@ def cmd_spawn(args: argparse.Namespace) -> int:
     # Detached double-fork so the runner survives this shell AND our process.
     # The child re-execs `jc-workers _run <id>` with its own session.
     pid = _double_fork_run(instance, worker_id)
+
+    # Record the grandchild pid on the row immediately so `reconcile` can
+    # detect crashes in the narrow queued→running window.
+    conn = connect(instance)
+    try:
+        conn.execute("UPDATE workers SET pid=? WHERE id=?", (pid, worker_id))
+        conn.commit()
+    finally:
+        conn.close()
 
     print(f"spawned worker #{worker_id} (pid {pid})")
     return 0
@@ -356,16 +366,27 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         log_f.flush()
 
+        timed_out = False
         try:
+            # No preexec_fn=setsid: adapter shares the runner's process group,
+            # so `jc workers cancel` can killpg everything at once.
             proc = subprocess.Popen(
                 [str(adapter), worker.model or ""],
                 stdin=stdin_f,
                 stdout=stdout_f,
                 stderr=log_f,
                 cwd=str(instance),
-                preexec_fn=os.setsid,  # isolate process group for future kill
             )
-            exit_code = proc.wait()
+            try:
+                exit_code = proc.wait(timeout=worker.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _killpg(proc.pid, signal.SIGTERM)
+                try:
+                    exit_code = proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _killpg(proc.pid, signal.SIGKILL)
+                    exit_code = proc.wait()
         except Exception as e:  # noqa: BLE001
             conn = connect(instance)
             try:
@@ -384,7 +405,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Read last stderr line for error reporting on failure.
     last_err = ""
-    if exit_code != 0:
+    if timed_out:
+        last_err = f"timeout after {worker.timeout_seconds}s"
+    elif exit_code != 0:
         try:
             log_tail = log_path.read_text(encoding="utf-8", errors="replace")
             # Use last non-empty line.
@@ -395,7 +418,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             pass
 
-    status = "done" if exit_code == 0 else "failed"
+    status = "done" if exit_code == 0 and not timed_out else "failed"
     conn = connect(instance)
     try:
         mark_terminal(
@@ -479,6 +502,146 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- process helpers ---------------------------------------------------------
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if the pid exists. Using signal 0 pings the process without
+    affecting it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _killpg(pid: int, sig: int) -> None:
+    """killpg by looking up the pid's process group. Swallow lookup errors
+    (process already dead)."""
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+# --- cancel ------------------------------------------------------------------
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    worker_id = int(args.worker_id)
+
+    conn = connect(instance)
+    try:
+        w = get(conn, worker_id)
+    finally:
+        conn.close()
+    if not w:
+        raise SystemExit(f"worker {worker_id} not found")
+    if w.status not in ("running", "queued"):
+        raise SystemExit(f"worker {worker_id} is {w.status}, not running")
+
+    if w.pid is not None and _pid_alive(w.pid):
+        _killpg(w.pid, signal.SIGTERM)
+        # Grace period: up to 5 seconds.
+        for _ in range(10):
+            if not _pid_alive(w.pid):
+                break
+            time.sleep(0.5)
+        if _pid_alive(w.pid):
+            _killpg(w.pid, signal.SIGKILL)
+
+    conn = connect(instance)
+    try:
+        mark_terminal(
+            conn,
+            worker_id,
+            status="cancelled",
+            error="cancelled by user",
+        )
+        w_fresh = get(conn, worker_id)
+    finally:
+        conn.close()
+
+    if w_fresh:
+        _send_notification(instance, w_fresh)
+
+    print(f"worker #{worker_id} cancelled")
+    return 0
+
+
+# --- gc ----------------------------------------------------------------------
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=args.days)
+    cutoff = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    conn = connect(instance)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id FROM workers
+            WHERE status IN ('done','failed','cancelled')
+              AND (finished_at IS NOT NULL AND finished_at < ?)
+            """,
+            (cutoff,),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+
+        for wid in ids:
+            if args.prune_files:
+                wdir = _worker_dir(instance, wid)
+                if wdir.exists():
+                    shutil.rmtree(wdir, ignore_errors=True)
+            conn.execute("DELETE FROM workers WHERE id = ?", (wid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    print(
+        f"removed {len(ids)} workers older than {args.days}d"
+        + (" (+ files)" if args.prune_files else "")
+    )
+    return 0
+
+
+# --- reconcile ---------------------------------------------------------------
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    """Scan for workers in non-terminal states whose pid is no longer alive,
+    mark them failed. Intended to run at main-session startup."""
+    instance = resolve_instance_dir(args.instance_dir)
+
+    conn = connect(instance)
+    try:
+        rows = conn.execute(
+            "SELECT id, pid FROM workers WHERE status IN ('queued','running','need_input')"
+        ).fetchall()
+        orphans = []
+        for r in rows:
+            pid = r["pid"]
+            if pid is None or not _pid_alive(pid):
+                orphans.append(r["id"])
+        for wid in orphans:
+            mark_terminal(
+                conn,
+                wid,
+                status="failed",
+                error="orphan: pid not alive at reconcile",
+            )
+    finally:
+        conn.close()
+
+    print(f"reconciled {len(orphans)} orphan(s) of {len(rows)} live row(s)")
+    return 0
+
+
 # --- tail --------------------------------------------------------------------
 
 
@@ -530,6 +693,18 @@ def build_parser() -> argparse.ArgumentParser:
     tp = subs.add_parser("tail", help="tail -f a worker's log")
     tp.add_argument("worker_id")
 
+    cp = subs.add_parser("cancel", help="cancel a running worker")
+    cp.add_argument("worker_id")
+
+    gp = subs.add_parser("gc", help="delete old completed workers")
+    gp.add_argument("--days", type=int, default=7,
+                    help="remove workers finished before N days ago (default: 7)")
+    gp.add_argument("--prune-files", action="store_true",
+                    help="also remove state/workers/<id>/ directories")
+
+    rp = subs.add_parser("reconcile",
+                         help="mark stale 'running' rows as failed if pid is dead")
+
     return p
 
 
@@ -539,6 +714,9 @@ HANDLERS = {
     "list": cmd_list,
     "show": cmd_show,
     "tail": cmd_tail,
+    "cancel": cmd_cancel,
+    "gc": cmd_gc,
+    "reconcile": cmd_reconcile,
 }
 
 
