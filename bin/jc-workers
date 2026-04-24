@@ -49,9 +49,10 @@ from workers import (  # type: ignore  # noqa: E402
 from workers.db import _now_iso  # type: ignore  # noqa: E402
 
 
-# Adapters live in the heartbeat lib (shared contract).
+# Adapters + send_telegram live in the heartbeat lib (shared contract).
 FRAMEWORK_ROOT = _HERE.parent
 ADAPTERS_DIR = FRAMEWORK_ROOT / "lib" / "heartbeat" / "adapters"
+SEND_TELEGRAM = FRAMEWORK_ROOT / "lib" / "heartbeat" / "lib" / "send_telegram.sh"
 
 
 # --- Instance resolution (copied verbatim from jc-memory) --------------------
@@ -218,6 +219,92 @@ def _exec_runner(instance: Path, worker_id: int) -> None:
     )
 
 
+# --- notifications -----------------------------------------------------------
+
+
+def _duration_str(started: str, finished: str) -> str:
+    """Format worker duration like '12s', '4m 32s', '1h 02m'."""
+    try:
+        t0 = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        t1 = datetime.strptime(finished, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001
+        return "?"
+    secs = int((t1 - t0).total_seconds())
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60:02d}s"
+    return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
+
+
+def _format_notification(w: Worker) -> str:
+    """Plain-text completion summary for send_telegram.sh (no markdown)."""
+    duration = "?"
+    if w.started_at and w.finished_at:
+        duration = _duration_str(w.started_at, w.finished_at)
+
+    brain_model = w.brain + (f" / {w.model}" if w.model else "")
+
+    if w.status == "done":
+        head = f"worker #{w.id} done ({duration})"
+    elif w.status == "failed":
+        head = f"worker #{w.id} FAILED (exit {w.exit_code if w.exit_code is not None else '?'})"
+    elif w.status == "cancelled":
+        head = f"worker #{w.id} cancelled"
+    elif w.status == "need_input":
+        head = f"worker #{w.id} needs input"
+    else:
+        head = f"worker #{w.id} {w.status}"
+
+    lines = [
+        head,
+        f"topic: {w.topic}",
+        f"brain: {brain_model}",
+        "",
+    ]
+
+    if w.status == "done" and w.result_path and Path(w.result_path).exists():
+        body = Path(w.result_path).read_text(encoding="utf-8", errors="replace").strip()
+        if len(body) > 500:
+            lines.append(body[:500] + "…")
+        else:
+            lines.append(body)
+        lines.append("")
+        lines.append(f"full: {w.result_path}")
+    elif w.status in ("failed", "cancelled"):
+        if w.error:
+            lines.append(f"error: {w.error}")
+            lines.append("")
+        lines.append(f"log: {w.log_path}")
+
+    return "\n".join(lines)
+
+
+def _send_notification(instance: Path, worker: Worker) -> None:
+    """Invoke send_telegram.sh. Swallow errors — a failed notify shouldn't
+    crash the runner and shouldn't flip the worker's status."""
+    if not SEND_TELEGRAM.exists():
+        return
+    body = _format_notification(worker)
+    env = os.environ.copy()
+    env["JC_INSTANCE_DIR"] = str(instance)
+    if worker.notify_chat_id:
+        env["TELEGRAM_CHAT_ID_OVERRIDE"] = str(worker.notify_chat_id)
+    try:
+        subprocess.run(
+            [str(SEND_TELEGRAM)],
+            input=body,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=25,
+        )
+    except Exception:  # noqa: BLE001
+        # Intentionally silent — we log nothing because the runner's stderr
+        # is already pointed at the worker log which is closed by now.
+        pass
+
+
 # --- _run (detached runner) --------------------------------------------------
 
 
@@ -249,6 +336,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 exit_code=127,
                 error=f"adapter missing: {adapter}",
             )
+            w_failed = get(conn, worker_id)
+            if w_failed:
+                _send_notification(instance, w_failed)
             return 127
 
         mark_running(conn, worker_id, os.getpid())
@@ -285,8 +375,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                     status="failed",
                     error=f"spawn exception: {e}",
                 )
+                w_failed = get(conn, worker_id)
             finally:
                 conn.close()
+            if w_failed:
+                _send_notification(instance, w_failed)
             return 1
 
     # Read last stderr line for error reporting on failure.
@@ -313,8 +406,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             result_path=str(result_path),
             error=last_err or None,
         )
+        worker = get(conn, worker_id)
     finally:
         conn.close()
+
+    if worker is not None:
+        _send_notification(instance, worker)
     return 0
 
 
