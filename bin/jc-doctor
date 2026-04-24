@@ -83,7 +83,12 @@ section "Adapter CLIs (optional — only needed per your tasks.yaml)"
 
 for b in gemini opencode codex; do
     if command -v "$b" >/dev/null 2>&1; then
-        ok "$b"
+        ver=$(timeout 3 "$b" --version 2>/dev/null | head -1 || true)
+        if [[ -n "$ver" ]]; then
+            ok "$b: $(command -v "$b") ($ver)"
+        else
+            ok "$b found: $(command -v "$b") (version probe failed)"
+        fi
     else
         info "$b not installed (only needed if a task uses it)"
     fi

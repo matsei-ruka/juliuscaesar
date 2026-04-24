@@ -162,8 +162,14 @@ def cmd_spawn(args: argparse.Namespace) -> int:
 
     # Propagate sandbox choice via env so the detached runner inherits it
     # and the adapter subprocess sees it too (os.environ.copy() is passed
-    # through execvpe in _exec_runner).
+    # through execvpe in _exec_runner). Each brain reads its own var — map
+    # our single enum to both.
     os.environ["CODEX_SANDBOX"] = args.sandbox
+    os.environ["GEMINI_YOLO"] = {
+        "yolo": "true",
+        "read-only": "plan",
+        "workspace-write": "true",
+    }[args.sandbox]
 
     # Detached double-fork so the runner survives this shell AND our process.
     # The child re-execs `jc-workers _run <id>` with its own session.
@@ -715,9 +721,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--prompt", default="-", help="prompt file path, or '-' for stdin")
     sandbox = sp.add_mutually_exclusive_group()
     sandbox.add_argument("--read-only", dest="sandbox", action="store_const", const="read-only",
-                         help="codex only: read files but don't edit them")
+                         help="codex + gemini: read files but don't edit them")
     sandbox.add_argument("--yolo", dest="sandbox", action="store_const", const="yolo",
-                         help="codex only: bypass sandbox + approvals (DANGEROUS)")
+                         help="codex + gemini: bypass sandbox + approvals (DANGEROUS)")
     sp.set_defaults(sandbox="workspace-write")
 
     rp = subs.add_parser("_run", help=argparse.SUPPRESS)
