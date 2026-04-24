@@ -22,12 +22,14 @@ Extract the self-contained pieces from the Rachel reference instance into a work
 
 ## 0.2.0 — "It runs"
 
+- [x] Codex adapter (GPT-5.x via ChatGPT subscription) — #10
+- [x] `jc workers` — on-demand background agents (spec: `docs/specs/workers.md`)
 - [ ] Skill loader: `jc skill install <name>`, `jc skill list`, declarative SKILL.md manifests
 - [ ] Instance templates beyond the base: `jc init --template=minimal|full|briefings-only`
 - [ ] Channel plumbing abstraction beyond Telegram (Discord or Slack)
 - [ ] `jc upgrade` self-updater
 - [ ] CI (shellcheck, pytest, smoke test of `jc init` → `jc doctor` pipeline)
-- [ ] `install.sh`: refuse to overwrite shims that point at a different repo
+- [x] `install.sh`: refuse to overwrite shims that point at a different repo
 - [ ] First external alpha tester
 
 ## 0.3.0 — "It helps"

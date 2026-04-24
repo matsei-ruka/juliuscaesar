@@ -276,6 +276,35 @@ Two cron entries get installed (`@reboot` + every 2 minutes). If claude dies (cr
 
 ---
 
+## 11. Workers (on-demand background agents, optional)
+
+`jc heartbeat` handles *scheduled* tasks. `jc workers` handles *on-demand* tasks — dev work the user triggers interactively, that shouldn't block the chat session.
+
+```bash
+# Spawn a detached worker. Stdin is the full prompt.
+echo "Refactor the Telegram adapter for async I/O" | \
+  jc workers spawn --topic "telegram async refactor" \
+                   --brain claude --model claude-opus-4-7
+
+# Watch it progress. The worker is fully detached from this shell.
+jc workers list
+jc workers tail <id>       # tail -f the log
+jc workers show <id>       # full state + result preview
+
+# Kill one
+jc workers cancel <id>
+
+# Maintenance
+jc workers reconcile       # mark stale 'running' rows as failed
+jc workers gc --days 7     # purge old rows (add --prune-files to remove logs)
+```
+
+The worker writes its prompt, log, and result under `<instance>/state/workers/<id>/`. When it reaches a terminal state (done/failed/cancelled/need_input), the runner sends a Telegram summary to `$TELEGRAM_CHAT_ID` (or a per-worker `--notify <chat_id>`).
+
+**When to spawn vs. do inline:** quick answers and single-file edits → inline; multi-file refactors, research, scaffolding, anything iterative → spawn. See `docs/specs/workers.md` for the full design.
+
+---
+
 ## Done
 
 Normal day-to-day:
@@ -285,6 +314,7 @@ jc memory search "query"
 jc memory read <slug>
 jc heartbeat run <task>
 jc voice speak "text"
+jc workers list
 jc watchdog status
 jc doctor
 ```
