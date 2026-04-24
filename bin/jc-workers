@@ -281,6 +281,19 @@ def _format_notification(w: Worker) -> str:
             lines.append(body)
         lines.append("")
         lines.append(f"full: {w.result_path}")
+    elif w.status == "need_input" and w.result_path and Path(w.result_path).exists():
+        body = Path(w.result_path).read_text(encoding="utf-8", errors="replace").strip()
+        # Strip the NEED_INPUT: prefix for display.
+        for prefix in ("NEED_INPUT:", "NEED_INPUT"):
+            if body.lstrip().startswith(prefix):
+                body = body.lstrip()[len(prefix):].lstrip(": \n")
+                break
+        if len(body) > 500:
+            lines.append(body[:500] + "…")
+        else:
+            lines.append(body)
+        lines.append("")
+        lines.append(f"respawn with: jc workers spawn --topic '{w.topic}' --brain {w.brain} ...")
     elif w.status in ("failed", "cancelled"):
         if w.error:
             lines.append(f"error: {w.error}")
@@ -418,7 +431,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             pass
 
-    status = "done" if exit_code == 0 and not timed_out else "failed"
+    # Detect the NEED_INPUT: sentinel — worker finished cleanly but is
+    # asking the user a question it can't resolve. Surfaces as a distinct
+    # status so callers can route the prompt back after clarification.
+    need_input = False
+    if exit_code == 0 and not timed_out:
+        try:
+            head = result_path.open("rb").read(64).decode("utf-8", errors="replace")
+            if head.lstrip().startswith("NEED_INPUT:"):
+                need_input = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    if timed_out:
+        status = "failed"
+    elif need_input:
+        status = "need_input"
+    elif exit_code == 0:
+        status = "done"
+    else:
+        status = "failed"
     conn = connect(instance)
     try:
         mark_terminal(
