@@ -160,6 +160,11 @@ def cmd_spawn(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
+    # Propagate sandbox choice via env so the detached runner inherits it
+    # and the adapter subprocess sees it too (os.environ.copy() is passed
+    # through execvpe in _exec_runner).
+    os.environ["CODEX_SANDBOX"] = args.sandbox
+
     # Detached double-fork so the runner survives this shell AND our process.
     # The child re-execs `jc-workers _run <id>` with its own session.
     pid = _double_fork_run(instance, worker_id)
@@ -708,6 +713,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--spawned-by", default="user", help="free-form origin label")
     sp.add_argument("--telegram-msg-id", default=None, help="inbound msg that triggered the spawn")
     sp.add_argument("--prompt", default="-", help="prompt file path, or '-' for stdin")
+    sandbox = sp.add_mutually_exclusive_group()
+    sandbox.add_argument("--read-only", dest="sandbox", action="store_const", const="read-only",
+                         help="codex only: read files but don't edit them")
+    sandbox.add_argument("--yolo", dest="sandbox", action="store_const", const="yolo",
+                         help="codex only: bypass sandbox + approvals (DANGEROUS)")
+    sp.set_defaults(sandbox="workspace-write")
 
     rp = subs.add_parser("_run", help=argparse.SUPPRESS)
     rp.add_argument("worker_id")
