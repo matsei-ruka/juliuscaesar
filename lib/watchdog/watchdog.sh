@@ -129,6 +129,19 @@ proc_cwd() {
     fi
 }
 
+proc_ppid() {
+    local pid="$1"
+    ps -o ppid= -p "$pid" 2>/dev/null | awk '{ print $1; exit }'
+}
+
+proc_comm_name() {
+    local pid="$1"
+    local comm
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | awk '{ print $1; exit }')
+    comm="${comm##*/}"
+    printf '%s\n' "$comm"
+}
+
 claude_alive() {
     # Scope to THIS instance only: an interactive claude process whose
     # working directory is INSTANCE_DIR. Previously matched any claude
@@ -173,7 +186,7 @@ telegram_plugin_expected() {
     [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]
 }
 
-telegram_plugin_alive() {
+telegram_plugin_process_alive() {
     local pidfile="$HOME/.claude/channels/telegram/bot.pid"
     [[ -f "$pidfile" ]] || return 1
     local pid
@@ -182,19 +195,61 @@ telegram_plugin_alive() {
     kill -0 "$pid" 2>/dev/null
 }
 
+pid_descends_from_any() {
+    local pid="$1"
+    shift
+    (( $# > 0 )) || return 1
+    local ppid ancestor
+    while :; do
+        ppid=$(proc_ppid "$pid")
+        [[ -n "$ppid" && "$ppid" != "0" && "$ppid" != "1" ]] || return 1
+        for ancestor in "$@"; do
+            [[ "$ppid" == "$ancestor" ]] && return 0
+        done
+        pid="$ppid"
+    done
+}
+
+telegram_plugin_owned_by_us() {
+    local pid
+    pid=$(telegram_plugin_pid || true)
+    [[ -n "$pid" ]] || return 1
+    telegram_plugin_process_alive || return 1
+    pid_descends_from_any "$pid" $(our_claude_pids)
+}
+
+telegram_plugin_alive() {
+    telegram_plugin_owned_by_us
+}
+
 telegram_plugin_pid() {
     local pidfile="$HOME/.claude/channels/telegram/bot.pid"
     [[ -f "$pidfile" ]] || return 1
     cat "$pidfile" 2>/dev/null
 }
 
+telegram_plugin_related_pids() {
+    local pid ppid comm
+    pid=$(telegram_plugin_pid || true)
+    [[ -n "$pid" ]] || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    printf '%s\n' "$pid"
+    while :; do
+        ppid=$(proc_ppid "$pid")
+        [[ -n "$ppid" && "$ppid" != "0" && "$ppid" != "1" ]] || break
+        comm=$(proc_comm_name "$ppid")
+        [[ "$comm" == "bun" ]] || break
+        printf '%s\n' "$ppid"
+        pid="$ppid"
+    done
+}
+
 kill_telegram_plugin() {
     local pidfile="$HOME/.claude/channels/telegram/bot.pid"
     local pid
-    pid=$(telegram_plugin_pid || true)
-    if [[ -n "$pid" ]]; then
+    for pid in $(telegram_plugin_related_pids | awk '!seen[$0]++'); do
         kill "$pid" 2>/dev/null || true
-    fi
+    done
     rm -f "$pidfile"
 }
 
@@ -232,7 +287,7 @@ main() {
         # Messages queue silently at the Telegram API. Force a restart of
         # claude to respawn the plugin via --channels.
         if telegram_plugin_expected && ! telegram_plugin_alive; then
-            log "degraded: claude alive but telegram plugin dead — restarting to respawn plugin"
+            log "degraded: claude alive but telegram plugin missing/dead/foreign — restarting to respawn plugin"
             write_state "plugin-dead"
             # Fall through to the restart path. The main claude process will
             # be killed when screen quit fires below.
@@ -249,14 +304,13 @@ main() {
         fi
     fi
 
-    log "down: screen_named_alive=$(screen_named_alive && echo y || echo n) claude_alive=$(claude_alive && echo y || echo n) plugin_alive=$(telegram_plugin_alive && echo y || echo n) claude_bin=${CLAUDE_BIN:-<none>}"
+    log "down: screen_named_alive=$(screen_named_alive && echo y || echo n) claude_alive=$(claude_alive && echo y || echo n) plugin_process_alive=$(telegram_plugin_process_alive && echo y || echo n) plugin_owned_by_us=$(telegram_plugin_owned_by_us && echo y || echo n) claude_bin=${CLAUDE_BIN:-<none>}"
 
-    # Opposite degraded state: claude crashed, but its telegram plugin bun
-    # subprocess was reparented and kept polling the bot token. If we start a
-    # new claude while that orphan still owns the long-poll, plugin init can
-    # fail with Telegram 409 Conflict and the watchdog loops forever.
-    if telegram_plugin_expected && telegram_plugin_alive && ! claude_alive; then
-        log "killing orphan telegram plugin before restart"
+    # Any live pidfile process not descended from this instance's claude is
+    # unusable for this instance. It may be an orphan, or a plugin auto-loaded
+    # by a different claude that hijacked the singleton Telegram long-poll.
+    if telegram_plugin_expected && telegram_plugin_process_alive && ! telegram_plugin_owned_by_us; then
+        log "killing orphan/foreign telegram plugin before restart"
         kill_telegram_plugin
         sleep 1
     fi

@@ -12,3 +12,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-04-25] update | subsystem/watchdog-runtime.md - documented orphan telegram plugin restart handling
 ## [2026-04-25] update | contract/config-and-secret-boundaries.md - documented safe env parsing and setup secret handling
 ## [2026-04-25] update | subsystem/voice-dashscope.md - documented default voice enrollment name
+## [2026-04-25] update | subsystem/watchdog-runtime.md - documented Telegram plugin ownership checks

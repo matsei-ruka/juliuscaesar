@@ -42,6 +42,26 @@ proc_cwd() {
     fi
 }
 
+proc_ppid() {
+    local pid="$1"
+    ps -o ppid= -p "$pid" 2>/dev/null | awk '{ print $1; exit }'
+}
+
+pid_descends_from_any() {
+    local pid="$1"
+    shift
+    (( $# > 0 )) || return 1
+    local ppid ancestor
+    while :; do
+        ppid=$(proc_ppid "$pid")
+        [[ -n "$ppid" && "$ppid" != "0" && "$ppid" != "1" ]] || return 1
+        for ancestor in "$@"; do
+            [[ "$ppid" == "$ancestor" ]] && return 0
+        done
+        pid="$ppid"
+    done
+}
+
 version_probe() {
     local bin="$1"
     if command -v timeout >/dev/null 2>&1; then
@@ -339,11 +359,12 @@ fi
 # Scope to THIS instance: claude whose cwd is INSTANCE_DIR. Multi-instance
 # hosts can have several unrelated claude sessions running; count only ours.
 OUR_CLAUDE_PID=""
+OUR_CLAUDE_PIDS=""
 for pid in $(pgrep -f "claude .*--channels plugin:telegram" 2>/dev/null); do
     cwd=$(proc_cwd "$pid")
     if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
-        OUR_CLAUDE_PID="$pid"
-        break
+        OUR_CLAUDE_PIDS="${OUR_CLAUDE_PIDS}${OUR_CLAUDE_PIDS:+ }$pid"
+        [[ -z "$OUR_CLAUDE_PID" ]] && OUR_CLAUDE_PID="$pid"
     fi
 done
 if [[ -n "$OUR_CLAUDE_PID" ]]; then
@@ -360,7 +381,13 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     else
         PID=$(cat "$PIDFILE" 2>/dev/null)
         if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-            ok "telegram plugin alive (pid $PID)"
+            if [[ -n "$OUR_CLAUDE_PIDS" ]] && pid_descends_from_any "$PID" $OUR_CLAUDE_PIDS; then
+                ok "telegram plugin alive and owned by this instance (pid $PID)"
+            elif [[ -n "$OUR_CLAUDE_PIDS" ]]; then
+                fail "telegram plugin pid $PID is alive but not owned by this instance's claude; watchdog should restart to reclaim Telegram"
+            else
+                warn "telegram plugin pid $PID is alive but no live claude session was detected for this instance"
+            fi
         else
             fail "telegram plugin dead (pid $PID). Restart claude to respawn."
         fi

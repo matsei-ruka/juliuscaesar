@@ -37,13 +37,14 @@ It also detects asymmetric degraded states between Claude and the Telegram plugi
 - `SESSION_ID` from watchdog config adds `--resume <id>`.
 - Cron install writes both `@reboot` and `*/2 * * * *` entries tagged with the instance path, with command paths and instance paths shell-quoted for spaces.
 - Detection scopes Claude processes by working directory, which matters on multi-instance hosts.
+- Telegram plugin health requires the `bot.pid` process to descend from this instance's Claude process. A live pidfile owned by a different Claude is treated as hijacked/orphaned and killed before restart.
 - Runtime startup passes the instance path and Claude binary as positional args to `bash -c`, not interpolated shell text.
 
 ## Degraded plugin handling
 
-If Telegram credentials exist, watchdog expects `~/.claude/channels/telegram/bot.pid` to exist and point to a live process. If Claude is alive but the plugin is dead, watchdog marks `plugin-dead`, kills this instance's Claude process, quits the screen session, and restarts Claude so the channel plugin respawns.
+If Telegram credentials exist, watchdog expects `~/.claude/channels/telegram/bot.pid` to exist, point to a live process, and be descended from this instance's Claude process. If Claude is alive but the plugin is dead or the pidfile belongs to a different Claude, watchdog marks `plugin-dead`, kills this instance's Claude process, quits the screen session, and restarts Claude so the channel plugin respawns.
 
-If Claude is dead but the plugin is still alive, watchdog treats the plugin as an orphan. It kills the plugin pid from `bot.pid`, removes the stale pidfile, waits briefly, then starts a new Claude session. This prevents Telegram 409 Conflict loops where two plugin processes long-poll the same bot token.
+If Claude is dead but the plugin process is still alive, or if a foreign Claude/plugin owns the singleton pidfile, watchdog treats the plugin as an orphan/hijacker. It kills the pid from `bot.pid` plus any direct `bun` launcher parent, removes the stale pidfile, waits briefly, then starts a new Claude session. This prevents Telegram 409 Conflict loops and silent update consumption by the wrong session.
 
 ## Open questions / known stale
 
