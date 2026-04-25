@@ -12,7 +12,7 @@ MODEL="${1:-}"
 ARGS=(
     "-p"
     "--dangerously-skip-permissions"
-    "--no-chrome"
+    "--chrome"
     "--strict-mcp-config"
     '{"mcpServers":{}}'
 )
