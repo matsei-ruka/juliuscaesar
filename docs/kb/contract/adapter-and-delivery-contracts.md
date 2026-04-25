@@ -22,7 +22,7 @@ related:
 
 Adapters are executable shell scripts under `lib/heartbeat/adapters/`. Both heartbeat and workers call them with the same contract: model is `$1`, prompt comes on stdin, final answer is stdout, and stderr is diagnostics.
 
-Delivery currently uses `lib/heartbeat/lib/send_telegram.sh`, which reads message body from stdin and prints the Telegram `message_id` on success.
+Delivery for heartbeat still uses `lib/heartbeat/lib/send_telegram.sh`. Gateway delivery uses direct channel clients for Telegram and Slack Socket Mode.
 
 ## Adapter contract
 
@@ -32,7 +32,7 @@ Delivery currently uses `lib/heartbeat/lib/send_telegram.sh`, which reads messag
 - Input: stdin is the full prompt.
 - Output: stdout is the final result.
 - Error: non-zero exit is failure; stderr is captured into logs.
-- Resume: `WORKER_RESUME_SESSION` may be set by workers and mapped to tool-specific resume flags.
+- Resume: `JC_RESUME_SESSION` is the shared env var for gateway/workers; adapters also accept the older `WORKER_RESUME_SESSION` fallback.
 
 ## Implemented adapters
 
@@ -53,10 +53,10 @@ It refuses empty bodies, disables web previews, and prints the resulting `messag
 
 ## Invariants
 
-- Scheduled `claude -p` runs must not use `--channels`; the live Telegram-bound session is separate.
+- Scheduled and gateway `claude -p` runs must not use `--channels`; Telegram/Slack are owned by the gateway runtime.
 - Heartbeat destinations are Telegram-only in 0.1.x.
-- Workers share adapter behavior with heartbeat but manage their own lifecycle state.
+- Workers share adapter behavior with heartbeat but manage their own lifecycle state; in gateway-configured instances their terminal notifications enqueue delivery events.
 
 ## Open questions / known stale
 
-- 2026-04-25: Discord, Slack, and broader channel abstractions are roadmap work.
+- 2026-04-25: Telegram and Slack Socket Mode are implemented in gateway; Discord and public webhook channels are roadmap work.

@@ -25,7 +25,7 @@ JuliusCaesar invokes native assistant CLIs, especially the real `claude` CLI, in
 
 The project borrows the daemon architecture from OpenClaw but avoids API simulation. Users authenticate through each tool's official login flow, and JuliusCaesar orchestrates subprocesses around those tools.
 
-For Claude Code, scheduled or worker jobs use `claude -p` in fresh non-interactive sessions. The live Telegram-bound Claude session remains separate and is supervised by watchdog.
+For Claude Code, scheduled, worker, and gateway jobs use `claude -p` in non-interactive native CLI sessions. Telegram and Slack channel ownership belongs to the gateway runtime rather than to Claude Code plugins. Legacy live Telegram-bound Claude sessions remain available only as a fallback mode.
 
 ## Consequences
 
@@ -47,8 +47,8 @@ Tradeoffs:
 
 - Framework adapters call native tools as subprocesses.
 - Adapter auth is delegated to each tool.
-- The live Claude session is not reused for scheduled heartbeat synthesis.
-- Watchdog restarts the live session rather than pretending to own an API session.
+- The legacy live Claude session is not reused for scheduled heartbeat synthesis.
+- Watchdog restarts the gateway daemon by default, or the legacy live session when explicitly configured, rather than pretending to own an API session.
 
 ## Open questions / known stale
 

@@ -28,15 +28,15 @@ The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`
 
 ## Important behavior
 
-- Python dependencies are currently `pyyaml`, `python-dotenv`, `dashscope`, and `requests`.
+- Python dependencies are currently `pyyaml`, `python-dotenv`, `dashscope`, `requests`, and `websocket-client`.
 - Python 3.10+ is required because the library code uses modern type syntax.
 - The installer refuses to overwrite existing `~/.local/bin/jc-*` shims that point to a different JuliusCaesar clone unless run with `--force`.
 - Python binaries run through the venv wrapper with the framework `lib/` on `PYTHONPATH`.
 - Native bash binaries are invoked directly by their shim.
 - The router preserves `--instance-dir <path>` or `--instance-dir=<path>` when placed before the subcommand.
-- `jc setup` uses `jc init` underneath, writes `.env`, L1 memory, watchdog config, rebuilds the memory index, and runs `jc doctor`.
-- `jc gateway` owns the first unified-gateway surface: durable SQLite queue initialization, daemon lifecycle, enqueue, claim, complete/fail, and status/list inspection.
-- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, remove stale gateway pidfiles, and create `state/`.
+- `jc setup` uses `jc init` underneath, writes `.env`, L1 memory, `ops/watchdog.conf`, `ops/gateway.yaml`, rebuilds the memory index, and runs `jc doctor`.
+- `jc gateway` owns the unified gateway surface: durable SQLite queue initialization, daemon lifecycle, Telegram/Slack polling, brain dispatch, enqueue, claim, complete/fail, retry, config, logs, and status/list inspection.
+- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`.
 
 ## Failure modes
 

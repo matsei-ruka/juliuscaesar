@@ -31,7 +31,7 @@ Every `jc-*` tool operates on an instance directory. Resolution order is consist
 
 `jc init` copies `templates/init-instance/` into a target, writes a `.jc` marker, creates `.env` with mode 600, and refuses to scaffold over an existing instance or a non-empty target directory except allowed root files.
 
-`jc setup` is the high-level first-run path. It calls `jc init` when needed, asks configuration questions, writes useful L1 identity/user/rules/hot-cache context, writes `.env`, writes `ops/watchdog.conf`, rebuilds the memory index, optionally starts the live Claude session, optionally installs watchdog, and runs `jc doctor`.
+`jc setup` is the high-level first-run path. It calls `jc init` when needed, asks configuration questions, writes useful L1 identity/user/rules/hot-cache context, writes `.env`, writes `ops/watchdog.conf`, writes `ops/gateway.yaml`, rebuilds the memory index, optionally starts the gateway daemon, optionally installs watchdog, and runs `jc doctor`.
 
 Expected base layout:
 
@@ -46,6 +46,7 @@ Expected base layout:
 - `heartbeat/fetch`
 - `voice/references`
 - `voice/tmp`
+- `ops/gateway.yaml`
 - `ops/watchdog.conf`
 - `.codex/`
 

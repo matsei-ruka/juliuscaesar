@@ -6,7 +6,7 @@ code_anchors:
   - path: bin/jc-watchdog
     symbol: "tick"
   - path: lib/watchdog/watchdog.sh
-    symbol: "telegram_plugin_alive()"
+    symbol: "main_gateway()"
   - path: templates/init-instance/ops/watchdog.conf
     symbol: "CLAUDE_ARGS_EXTRA"
 last_verified: 2026-04-25
@@ -18,21 +18,23 @@ related:
 
 ## Summary
 
-Watchdog supervises the live Claude Code session for an instance. It is meant to run from cron via `jc-watchdog tick`, keep the Telegram-connected Claude session alive, and restart with `--resume <session-id>` when configured.
+Watchdog supervises the gateway daemon by default. It is meant to run from cron via `jc-watchdog tick`, keep `jc gateway` alive, and send a Telegram notification when recovery happens.
 
-It also detects asymmetric degraded states between Claude and the Telegram plugin subprocess.
+Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_MODE=legacy-claude`.
 
 ## Components
 
 - `bin/jc-watchdog`: CLI wrapper for tick/install/uninstall/status/test-notify.
-- `lib/watchdog/watchdog.sh`: actual supervisor.
+- `lib/watchdog/watchdog.sh`: actual supervisor for gateway or legacy Claude mode.
 - `<instance>/ops/watchdog.conf`: optional per-instance overrides.
 - `/tmp/jc-watchdog-<screen-name>.state`: latest watchdog state.
 - `/tmp/jc-watchdog-<screen-name>.log`: supervisor log.
 
 ## Important behavior
 
-- Default screen name is `jc-<instance-basename>`.
+- Default runtime mode in setup-created instances is `gateway`.
+- Default screen name is `jc-<instance-basename>` and is still used for watchdog state/log file names and legacy Claude screens.
+- In gateway mode, watchdog checks `<instance>/state/gateway/jc-gateway.pid` and restarts with `jc-gateway --instance-dir <instance> start`.
 - Default Claude args include `--dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official`.
 - `SESSION_ID` from watchdog config adds `--resume <id>`.
 - Cron install writes both `@reboot` and `*/2 * * * *` entries tagged with the instance path, with command paths and instance paths shell-quoted for spaces.
@@ -42,10 +44,12 @@ It also detects asymmetric degraded states between Claude and the Telegram plugi
 
 ## Degraded plugin handling
 
+This section applies only in `RUNTIME_MODE=legacy-claude`.
+
 If Telegram credentials exist, watchdog expects `~/.claude/channels/telegram/bot.pid` to exist, point to a live process, and be descended from this instance's Claude process. If Claude is alive but the plugin is dead or the pidfile belongs to a different Claude, watchdog marks `plugin-dead`, kills this instance's Claude process, quits the screen session, and restarts Claude so the channel plugin respawns.
 
 If Claude is dead but the plugin process is still alive, or if a foreign Claude/plugin owns the singleton pidfile, watchdog treats the plugin as an orphan/hijacker. It kills the pid from `bot.pid` plus any direct `bun` launcher parent, removes the stale pidfile, waits briefly, then starts a new Claude session. This prevents Telegram 409 Conflict loops and silent update consumption by the wrong session.
 
 ## Open questions / known stale
 
-- 2026-04-25: Watchdog is tied to screen plus Telegram-channel Claude Code. Other channel backends are roadmap work.
+- 2026-04-25: Gateway mode is the default, but legacy Claude plugin mode remains for compatibility.

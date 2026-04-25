@@ -15,6 +15,7 @@ JC_INIT="$FRAMEWORK_ROOT/bin/jc-init"
 JC_MEMORY="$FRAMEWORK_ROOT/bin/jc-memory"
 JC_DOCTOR="$FRAMEWORK_ROOT/bin/jc-doctor"
 JC_WATCHDOG="$FRAMEWORK_ROOT/bin/jc-watchdog"
+JC_GATEWAY="$FRAMEWORK_ROOT/bin/jc-gateway"
 
 USE_DEFAULTS=0
 START_LIVE=""
@@ -31,7 +32,7 @@ Usage:
 
 Options:
   --defaults            Use safe defaults and do not prompt.
-  --start               Start a live Claude + Telegram-channel session after setup.
+  --start               Start the gateway daemon after setup.
   --no-start            Do not start a live session.
   --install-watchdog    Install watchdog cron entries after setup.
   --no-watchdog         Do not install watchdog cron entries.
@@ -158,6 +159,8 @@ write_env() {
     local dashscope="$1"
     local telegram_token="$2"
     local telegram_chat="$3"
+    local slack_app_token="$4"
+    local slack_bot_token="$5"
     local tmp old_umask
     old_umask=$(umask)
     umask 077
@@ -167,6 +170,8 @@ write_env() {
         printf 'DASHSCOPE_API_KEY=%s\n' "$(shell_quote "$dashscope")"
         printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(shell_quote "$telegram_token")"
         printf 'TELEGRAM_CHAT_ID=%s\n' "$(shell_quote "$telegram_chat")"
+        printf 'SLACK_APP_TOKEN=%s\n' "$(shell_quote "$slack_app_token")"
+        printf 'SLACK_BOT_TOKEN=%s\n' "$(shell_quote "$slack_bot_token")"
     } > "$tmp"
     umask "$old_umask"
     mv "$tmp" "$TARGET/.env"
@@ -358,8 +363,11 @@ write_watchdog_conf() {
     cat > "$TARGET/ops/watchdog.conf" <<EOF
 # Watchdog configuration for this JuliusCaesar instance.
 
-# Fill SESSION_ID after starting Claude once and locating the latest
-# ~/.claude/projects/.../<uuid>.jsonl file for this instance.
+# Runtime mode: gateway is the default production runtime. Use "legacy-claude"
+# only when intentionally supervising a live Claude Telegram plugin session.
+RUNTIME_MODE=gateway
+
+# Legacy Claude fallback settings. Fill SESSION_ID only if using legacy-claude.
 SESSION_ID=
 
 # GNU screen session name.
@@ -370,22 +378,34 @@ CLAUDE_ARGS_EXTRA="--dangerously-skip-permissions --chrome --channels plugin:tel
 EOF
 }
 
-start_live() {
+write_gateway_config() {
+    local default_brain="$1"
+    local telegram_enabled="$2"
+    local telegram_chat="$3"
+    local slack_enabled="$4"
+    PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$TARGET" "$default_brain" "$telegram_enabled" "$telegram_chat" "$slack_enabled" <<'PY'
+from pathlib import Path
+import sys
+from gateway.config import render_default_config
+
+target = Path(sys.argv[1])
+target.joinpath("ops").mkdir(parents=True, exist_ok=True)
+target.joinpath("ops", "gateway.yaml").write_text(
+    render_default_config(
+        default_brain=sys.argv[2],
+        telegram_enabled=sys.argv[3] == "yes",
+        telegram_chat_id=sys.argv[4],
+        slack_enabled=sys.argv[5] == "yes",
+    ),
+    encoding="utf-8",
+)
+PY
+}
+
+start_gateway() {
     local assistant_name="$1"
-    local screen_name
-    screen_name="$(grep '^SCREEN_NAME=' "$TARGET/ops/watchdog.conf" | head -1 | cut -d= -f2-)"
-    screen_name="${screen_name:-jc-$(basename "$TARGET")}"
-    if ! command -v screen >/dev/null 2>&1; then
-        echo "screen not found; start manually from the instance directory:" >&2
-        echo "  cd '$TARGET' && claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official" >&2
-        return 1
-    fi
-    if ! command -v claude >/dev/null 2>&1; then
-        echo "claude not found on PATH; install/login to Claude Code before starting live runtime." >&2
-        return 1
-    fi
-    screen -dmS "$screen_name" bash -c "cd \"\$1\" && exec claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official" _ "$TARGET"
-    echo "Started live Claude session in screen '$screen_name' for $assistant_name."
+    "$JC_GATEWAY" --instance-dir "$TARGET" start
+    echo "Started gateway runtime for $assistant_name."
 }
 
 echo "==> JuliusCaesar guided setup"
@@ -419,26 +439,36 @@ if [[ "$WRITE_CONFIG" == "yes" ]]; then
     existing_dashscope="$(env_value DASHSCOPE_API_KEY)"
     existing_telegram_token="$(env_value TELEGRAM_BOT_TOKEN)"
     existing_telegram_chat="$(env_value TELEGRAM_CHAT_ID)"
+    existing_slack_app_token="$(env_value SLACK_APP_TOKEN)"
+    existing_slack_bot_token="$(env_value SLACK_BOT_TOKEN)"
 
     dashscope="$(secret_prompt "DashScope API key (optional)" "$existing_dashscope")"
     telegram_token="$(secret_prompt "Telegram bot token (optional)" "$existing_telegram_token")"
     telegram_chat="$(prompt "Telegram chat id (optional)" "$existing_telegram_chat")"
+    slack_app_token="$(secret_prompt "Slack app-level token xapp-* for Socket Mode (optional)" "$existing_slack_app_token")"
+    slack_bot_token="$(secret_prompt "Slack bot token xoxb-* (optional)" "$existing_slack_bot_token")"
+    default_brain="$(prompt "Default gateway brain (claude|codex|opencode|gemini)" "claude")"
+    case "$default_brain" in
+        claude|codex|opencode|gemini) ;;
+        *) echo "Unknown brain '$default_brain'; using claude." >&2; default_brain=claude ;;
+    esac
 
-    write_env "$dashscope" "$telegram_token" "$telegram_chat"
+    write_env "$dashscope" "$telegram_token" "$telegram_chat" "$slack_app_token" "$slack_bot_token"
     write_l1 "$assistant_name" "$user_name" "$timezone" "$mission" "$style" "$external_policy"
     write_watchdog_conf "$assistant_name"
+    write_gateway_config "$default_brain" "$([[ -n "$telegram_token" ]] && echo yes || echo no)" "$telegram_chat" "$([[ -n "$slack_app_token" && -n "$slack_bot_token" ]] && echo yes || echo no)"
 else
-    echo "==> Keeping existing .env, L1 memory, and watchdog config."
+    echo "==> Keeping existing .env, L1 memory, watchdog config, and gateway config."
 fi
 
 echo "==> Rebuilding memory index"
 "$JC_MEMORY" --instance-dir "$TARGET" rebuild >/dev/null
 
 if [[ -z "$START_LIVE" ]]; then
-    START_LIVE="$(yesno "Start live Claude session now?" "no")"
+    START_LIVE="$(yesno "Start gateway daemon now?" "no")"
 fi
 if [[ "$START_LIVE" == "yes" ]]; then
-    start_live "$assistant_name" || true
+    start_gateway "$assistant_name" || true
 fi
 
 if [[ -z "$INSTALL_WATCHDOG" ]]; then
@@ -459,7 +489,7 @@ Instance: $TARGET
 
 Next useful commands:
   cd "$TARGET"
-  jc doctor
+  jc doctor --fix
+  jc gateway status
   jc heartbeat run hello --dry-run
-  claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official
 EOF

@@ -33,18 +33,18 @@
 | Installation and CLI routing | subsystem/installation-and-cli-routing.md | Installer shims, venv, top-level `jc` dispatch |
 | Layered memory system | subsystem/memory-system.md | L1/L2 markdown memory, FTS5 index, `jc memory` |
 | Heartbeat scheduled task runner | subsystem/heartbeat-runner.md | Scheduled task pipeline, prompts, deltas, destinations |
-| Watchdog runtime supervision | subsystem/watchdog-runtime.md | Live Claude session supervision and plugin-death restart |
+| Watchdog runtime supervision | subsystem/watchdog-runtime.md | Gateway daemon supervision plus legacy Claude plugin fallback |
 | On-demand background workers | subsystem/workers-background-agents.md | Worker DB, detached lifecycle, named worker resume |
 | DashScope voice subsystem | subsystem/voice-dashscope.md | Voice enrollment, synthesis, transcription |
-| Gateway event queue | subsystem/gateway-queue.md | SQLite event queue foundation for unified gateway |
+| Gateway runtime and event queue | subsystem/gateway-queue.md | Telegram/Slack gateway runtime, SQLite queue, dispatch, delivery |
 
 ### contract
 
 | Topic | File | What's inside |
 |-------|------|---------------|
 | Instance layout and resolution contract | contract/instance-layout-and-resolution.md | Instance scaffold, `.jc`, resolution precedence |
-| Adapter and delivery contracts | contract/adapter-and-delivery-contracts.md | Brain adapters, stdin/stdout contract, Telegram delivery |
-| Config and secret boundaries | contract/config-and-secret-boundaries.md | `.env`, tasks, watchdog config, doctor diagnostics |
+| Adapter and delivery contracts | contract/adapter-and-delivery-contracts.md | Brain adapters, resume env, heartbeat and gateway delivery |
+| Config and secret boundaries | contract/config-and-secret-boundaries.md | `.env`, gateway/tasks/watchdog config, doctor diagnostics |
 
 ### decision
 

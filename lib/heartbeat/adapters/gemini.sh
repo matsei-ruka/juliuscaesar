@@ -46,10 +46,12 @@ if [[ -n "$MODEL" ]]; then
     ARGS+=("--model" "$MODEL")
 fi
 
-# Resume a prior conversation when the runner sets WORKER_RESUME_SESSION.
+# Resume a prior conversation when the runner sets JC_RESUME_SESSION or the
+# older WORKER_RESUME_SESSION.
 # Value is the session id (or "latest" / index) accepted by `gemini --resume`.
-if [[ -n "${WORKER_RESUME_SESSION:-}" ]]; then
-    ARGS+=("--resume" "$WORKER_RESUME_SESSION")
+RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"
+if [[ -n "$RESUME" ]]; then
+    ARGS+=("--resume" "$RESUME")
 fi
 
 exec gemini "${ARGS[@]}"

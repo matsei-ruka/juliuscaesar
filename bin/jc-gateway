@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""jc-gateway - gateway queue foundation for JuliusCaesar.
-
-This first slice intentionally implements the durable queue and inspection
-surface before channel adapters and brain invocation land.
-"""
+"""jc-gateway - production channel/brain gateway for JuliusCaesar."""
 
 from __future__ import annotations
 
@@ -24,6 +20,8 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from gateway import queue  # type: ignore  # noqa: E402
+from gateway.config import config_path, load_config  # type: ignore  # noqa: E402
+from gateway.runtime import GatewayRuntime  # type: ignore  # noqa: E402
 
 
 RUNNING = True
@@ -116,6 +114,8 @@ def pid_alive(pid: int | None) -> bool:
         return False
     try:
         os.kill(pid, 0)
+    except PermissionError:
+        return True
     except OSError:
         return False
     return True
@@ -152,6 +152,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     pid = read_pid(instance)
     print(f"instance: {instance}")
     print(f"queue:    {queue.queue_path(instance)}")
+    print(f"config:   {config_path(instance)}")
     print(f"pidfile:  {pid_path(instance)}")
     print(f"log:      {log_path(instance)}")
     if pid_alive(pid):
@@ -180,8 +181,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
     install_signal_handlers()
     log_line(instance, f"gateway daemon started pid={os.getpid()}")
+    runtime = GatewayRuntime(instance, log_path=log_path(instance), stop_requested=lambda: not RUNNING)
+    runtime.start_channels()
     try:
         while RUNNING:
+            if not pid_path(instance).exists():
+                pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
             conn = queue.connect(instance)
             try:
                 requeued = queue.requeue_expired(conn)
@@ -190,6 +195,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 conn.close()
             if requeued:
                 log_line(instance, f"requeued expired events count={requeued}")
+            runtime.dispatch_once()
             time.sleep(args.interval_seconds)
     finally:
         pid_path(instance).unlink(missing_ok=True)
@@ -291,6 +297,10 @@ def cmd_tail(args: argparse.Namespace) -> int:
                 time.sleep(0.5)
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    return cmd_tail(args)
+
+
 def cmd_enqueue(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
     conn = queue.connect(instance)
@@ -356,6 +366,58 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_events(args: argparse.Namespace) -> int:
+    return cmd_list(args)
+
+
+def cmd_retry(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    event = queue.retry_now(conn, args.event_id)
+    conn.close()
+    print_json(event.to_dict())
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    if args.json:
+        cfg = load_config(instance)
+        print_json(
+            {
+                "path": str(config_path(instance)),
+                "default_brain": cfg.default_brain,
+                "default_model": cfg.default_model,
+                "gateway": {
+                    "poll_interval_seconds": cfg.poll_interval_seconds,
+                    "lease_seconds": cfg.lease_seconds,
+                    "max_retries": cfg.max_retries,
+                    "adapter_timeout_seconds": cfg.adapter_timeout_seconds,
+                },
+                "channels": {
+                    name: {
+                        "enabled": ch.enabled,
+                        "token_env": ch.token_env,
+                        "app_token_env": ch.app_token_env,
+                        "bot_token_env": ch.bot_token_env,
+                        "chat_ids": list(ch.chat_ids),
+                        "brain": ch.brain,
+                        "model": ch.model,
+                    }
+                    for name, ch in cfg.channels.items()
+                },
+            }
+        )
+    else:
+        path = config_path(instance)
+        if path.exists():
+            print(path.read_text(encoding="utf-8"), end="")
+        else:
+            print(f"gateway config not found: {path}")
+            return 1
+    return 0
+
+
 def cmd_work_once(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
     conn = queue.connect(instance)
@@ -386,12 +448,12 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("status", help="Show queue path and event counts")
     ps.set_defaults(func=cmd_status)
 
-    pr = sub.add_parser("run", help="Run the gateway maintenance loop in the foreground")
-    pr.add_argument("--interval-seconds", type=float, default=5.0)
+    pr = sub.add_parser("run", help="Run the gateway dispatcher in the foreground")
+    pr.add_argument("--interval-seconds", type=float, default=1.0)
     pr.set_defaults(func=cmd_run)
 
     pstart = sub.add_parser("start", help="Start the gateway daemon")
-    pstart.add_argument("--interval-seconds", type=float, default=5.0)
+    pstart.add_argument("--interval-seconds", type=float, default=1.0)
     pstart.set_defaults(func=cmd_start)
 
     pstop = sub.add_parser("stop", help="Stop the gateway daemon")
@@ -409,6 +471,11 @@ def build_parser() -> argparse.ArgumentParser:
     ptail.add_argument("-n", "--lines", type=int, default=40)
     ptail.add_argument("-f", "--follow", action="store_true")
     ptail.set_defaults(func=cmd_tail)
+
+    plogs = sub.add_parser("logs", help="Alias for tail")
+    plogs.add_argument("-n", "--lines", type=int, default=80)
+    plogs.add_argument("-f", "--follow", action="store_true")
+    plogs.set_defaults(func=cmd_logs)
 
     pe = sub.add_parser("enqueue", help="Enqueue a gateway event")
     pe.add_argument("content", nargs="?", help="Event content. Omit or use '-' to read stdin.")
@@ -439,6 +506,19 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--limit", type=int, default=20)
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_list)
+
+    pev = sub.add_parser("events", help="List recent events")
+    pev.add_argument("--limit", type=int, default=20)
+    pev.add_argument("--json", action="store_true")
+    pev.set_defaults(func=cmd_events)
+
+    pret = sub.add_parser("retry", help="Requeue an event immediately")
+    pret.add_argument("event_id", type=int)
+    pret.set_defaults(func=cmd_retry)
+
+    pcfg = sub.add_parser("config", help="Show resolved gateway config")
+    pcfg.add_argument("--json", action="store_true")
+    pcfg.set_defaults(func=cmd_config)
 
     pw = sub.add_parser("work-once", help="Claim and process one event with a test worker")
     pw.add_argument("--worker-id", default=f"worker-{os.getpid()}")

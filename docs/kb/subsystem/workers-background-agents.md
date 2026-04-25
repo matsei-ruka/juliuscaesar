@@ -43,7 +43,7 @@ Terminal states are `done`, `failed`, `cancelled`, and `need_input`.
 
 ## Named workers
 
-Named workers add `name`, `tags`, and `session_id` columns. When `--name` is supplied without `--fresh`, the latest terminal run with a captured `session_id` can be resumed by setting `WORKER_RESUME_SESSION` for the adapter.
+Named workers add `name`, `tags`, and `session_id` columns. When `--name` is supplied without `--fresh`, the latest terminal run with a captured `session_id` can be resumed by setting `JC_RESUME_SESSION` for the adapter, with `WORKER_RESUME_SESSION` retained for compatibility.
 
 Session capture is best-effort and brain-specific:
 
@@ -56,7 +56,7 @@ Session capture is best-effort and brain-specific:
 
 - Prompt file paths passed to `spawn` must be inside the instance directory.
 - Workers run detached from the spawning shell.
-- Notifications use the shared `send_telegram.sh` helper.
+- Notifications enqueue gateway delivery events when `ops/gateway.yaml` exists; older instances fall back to the shared `send_telegram.sh` helper.
 - Adapter failures are recorded in the DB and last stderr line where possible.
 
 ## Open questions / known stale
