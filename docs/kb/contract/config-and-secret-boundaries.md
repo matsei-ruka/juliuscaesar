@@ -33,15 +33,18 @@ Primary secret file:
 Common keys:
 
 - `DASHSCOPE_API_KEY` for voice operations.
-- `TELEGRAM_BOT_TOKEN` for Telegram delivery and watchdog notifications.
+- `TELEGRAM_BOT_TOKEN` for gateway Telegram delivery and watchdog notifications.
 - `TELEGRAM_CHAT_ID` for default delivery.
+- `SLACK_APP_TOKEN` for Slack Socket Mode.
+- `SLACK_BOT_TOKEN` for Slack delivery.
 
 `jc init` creates `.env` when missing under a restrictive umask and applies mode 600. `jc setup` rewrites `.env` from guided answers through a mode-600 temp file, preserving existing values as prompt defaults. Secret prompts do not echo typed values.
 
 ## Config files
 
 - `<instance>/heartbeat/tasks.yaml`: scheduled task definitions, defaults, destinations.
-- `<instance>/ops/watchdog.conf`: live session resume id, screen name, Claude args.
+- `<instance>/ops/gateway.yaml`: non-secret gateway runtime config, including enabled channels, env-var names, default brain, retries, leases, and timeouts.
+- `<instance>/ops/watchdog.conf`: runtime mode, state/log name, and legacy Claude fallback settings.
 - `<instance>/voice/references/voice.json`: voice id and target model after enrollment.
 - `<instance>/CLAUDE.md`: imports L1 memory and describes how sessions load context.
 - `<instance>/.codex/`: initial Codex-related config from the template.
@@ -58,17 +61,20 @@ Common keys:
 - heartbeat task and destination shape,
 - voice enrollment presence,
 - `.env` existence and selected credentials,
+- gateway config and channel readiness,
 - watchdog cron state,
-- live Claude and Telegram plugin health,
+- gateway daemon state or, in legacy mode, live Claude and Telegram plugin health,
 - worker state directory and DB.
 
 ## Invariants
 
 - Framework code should not contain instance credentials.
 - Telegram `getMe` validation is only possible when a token is present.
+- Slack `auth.test` validation is only possible when both Slack tokens are present.
 - Voice calls fail fast when `DASHSCOPE_API_KEY` is missing.
 - Runtime scripts must not `source` `.env`. Bash consumers use an allowlisted key parser so values such as `$(...)` remain data, not shell code.
 - `watchdog.conf` is sourced by bash, so it must stay shell-compatible.
+- `gateway.yaml` is parsed as data and must not contain secrets.
 - `jc doctor` supports both `--instance-dir <path>` and `--instance-dir=<path>`.
 
 ## Open questions / known stale

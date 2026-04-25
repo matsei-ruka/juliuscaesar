@@ -3,7 +3,8 @@
 # Reads prompt from stdin, writes response to stdout. Model is $1 (optional).
 #
 # Non-interactive mode: `opencode run --dangerously-skip-permissions <prompt>`
-# Resume: set WORKER_RESUME_SESSION to a session ID → passes --session <id>
+# Resume: set JC_RESUME_SESSION or WORKER_RESUME_SESSION to a session ID →
+# passes --session <id>
 #
 # `opencode run` takes the message as a positional arg only — no --file or
 # stdin flag exists in current releases. Linux ARG_MAX is ~2 MB, but kernels
@@ -29,8 +30,9 @@ fi
 
 ARGS=("run" "--dangerously-skip-permissions")
 
-if [[ -n "${WORKER_RESUME_SESSION:-}" ]]; then
-    ARGS+=("--session" "$WORKER_RESUME_SESSION")
+RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"
+if [[ -n "$RESUME" ]]; then
+    ARGS+=("--session" "$RESUME")
 fi
 
 if [[ -n "$MODEL" ]]; then

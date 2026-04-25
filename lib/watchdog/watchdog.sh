@@ -34,6 +34,7 @@ ENV_FILE="$INSTANCE_DIR/.env"
 export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 # --- Config defaults ---
+RUNTIME_MODE="legacy-claude"
 SESSION_ID=""
 SCREEN_NAME="jc-$(basename "$INSTANCE_DIR")"
 CLAUDE_ARGS_EXTRA="--dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official"
@@ -277,6 +278,62 @@ write_state() {
     printf '%s\n' "$1" >"$STATE_FILE"
 }
 
+gateway_pidfile() {
+    printf '%s\n' "$INSTANCE_DIR/state/gateway/jc-gateway.pid"
+}
+
+gateway_alive() {
+    local pidfile pid
+    pidfile="$(gateway_pidfile)"
+    [[ -f "$pidfile" ]] || return 1
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [[ -n "$pid" ]] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+start_gateway() {
+    local jc_gateway
+    jc_gateway="$(command -v jc-gateway 2>/dev/null || true)"
+    if [[ -z "$jc_gateway" ]]; then
+        log "gateway start failed: jc-gateway not on PATH"
+        return 1
+    fi
+    "$jc_gateway" --instance-dir "$INSTANCE_DIR" start >>"$LOG_FILE" 2>&1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        gateway_alive && return 0
+        sleep 1
+    done
+    return 1
+}
+
+main_gateway() {
+    local prev
+    prev=$(read_state)
+    if gateway_alive; then
+        write_state "ok"
+        if [[ "$prev" == "down" || "$prev" == "restart-failed" ]]; then
+            log "transition: $prev -> ok"
+            notify "✨ $SCREEN_NAME gateway back alive"
+        fi
+        exit 0
+    fi
+
+    log "gateway down: pidfile=$(gateway_pidfile)"
+    write_state "down"
+    if start_gateway; then
+        log "gateway restart: success"
+        write_state "ok"
+        notify "✨ $SCREEN_NAME gateway back alive"
+    else
+        log "gateway restart: FAILED"
+        write_state "restart-failed"
+        if [[ "$prev" == "ok" || "$prev" == "unknown" ]]; then
+            notify "⚠️ $SCREEN_NAME watchdog could not restart gateway. Check $LOG_FILE"
+        fi
+        exit 1
+    fi
+}
+
 # --- Main ---
 main() {
     local prev
@@ -362,4 +419,8 @@ main() {
     fi
 }
 
-main
+if [[ "${RUNTIME_MODE:-legacy-claude}" == "gateway" ]]; then
+    main_gateway
+else
+    main
+fi

@@ -15,3 +15,13 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-04-25] update | subsystem/watchdog-runtime.md - documented Telegram plugin ownership checks
 ## [2026-04-25] new | subsystem/gateway-queue.md - documented SQLite gateway queue foundation
 ## [2026-04-25] update | subsystem/gateway-queue.md - documented gateway daemon lifecycle and doctor fix behavior
+## [2026-04-25] update | subsystem/gateway-queue.md - documented Telegram/Slack runtime dispatch and sessions
+## [2026-04-25] update | subsystem/watchdog-runtime.md - documented default gateway watchdog mode
+## [2026-04-25] update | contract/adapter-and-delivery-contracts.md - documented JC_RESUME_SESSION and gateway delivery
+## [2026-04-25] update | subsystem/workers-background-agents.md - documented gateway-backed worker notifications
+## [2026-04-25] update | source/project-documentation-map.md - documented gateway-first README and quickstart
+## [2026-04-25] update | subsystem/installation-and-cli-routing.md - documented gateway production CLI and websocket dependency
+## [2026-04-25] update | contract/config-and-secret-boundaries.md - documented Slack secrets and gateway config
+## [2026-04-25] update | decision/native-cli-over-api-simulation.md - documented gateway-owned channels
+## [2026-04-25] update | domain/personal-assistant-framework.md - documented Telegram/Slack gateway runtime model
+## [2026-04-25] update | contract/instance-layout-and-resolution.md - documented ops/gateway.yaml and gateway start path

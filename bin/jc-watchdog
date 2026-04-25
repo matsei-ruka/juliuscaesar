@@ -146,6 +146,7 @@ case "$SUBCMD" in
         STATE_FILE="/tmp/jc-watchdog-${SCREEN_NAME}.state"
         LOG_FILE="/tmp/jc-watchdog-${SCREEN_NAME}.log"
         echo "instance:     $INSTANCE_DIR"
+        echo "runtime:      ${RUNTIME_MODE:-legacy-claude}"
         echo "screen name:  $SCREEN_NAME"
         echo "session id:   ${SESSION_ID:-<none>}"
         echo "state:        $([[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo unknown)"

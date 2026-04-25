@@ -1,6 +1,6 @@
 # Quickstart
 
-From zero to a running JuliusCaesar instance in ~15 minutes on Linux.
+From zero to a running JuliusCaesar instance in ~15 minutes. Commands below are Linux-flavored; macOS works with Homebrew equivalents for `python3`, `git`, `curl`, `screen`, and `ffmpeg`.
 
 ---
 
@@ -44,13 +44,20 @@ Skip this section if your instance won't use Telegram.
 
    Look for `"chat": { "id": <NUMBER> }` in the JSON. That number is your `TELEGRAM_CHAT_ID`.
 
-6. Install the Claude Code telegram plugin (required for inbound/outbound when the live session is running):
+6. Do not install the Claude Code Telegram plugin for the normal path. JuliusCaesar now talks to Telegram directly through `jc gateway`, which avoids singleton plugin lock conflicts.
 
-   ```bash
-   claude
-   > /plugins install claude-plugins-official/telegram
-   > /exit
-   ```
+---
+
+## 2.5. Register a Slack app (optional)
+
+Skip this section if your instance won't use Slack.
+
+1. Create a Slack app with Socket Mode enabled.
+2. Add a bot token scope that can post messages, such as `chat:write`, and subscribe to message events for the conversations you want.
+3. Install the app to your workspace.
+4. Save both tokens:
+   - `SLACK_APP_TOKEN`: app-level token beginning with `xapp-`.
+   - `SLACK_BOT_TOKEN`: bot token beginning with `xoxb-`.
 
 ---
 
@@ -75,7 +82,7 @@ Verify:
 jc help
 ```
 
-You should see the router listing `memory`, `heartbeat`, `voice`, `watchdog`, `init`, `doctor`.
+You should see the router listing `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, and `doctor`.
 
 ---
 
@@ -99,9 +106,10 @@ cd /opt/my-assistant
 ```
 
 `jc setup` asks for assistant name, user profile, timezone, communication style,
-optional Telegram credentials, optional DashScope key, and whether to start the
-live runtime or install watchdog. It uses `jc init` underneath when the target is
-not already a JC instance.
+optional Telegram credentials, optional Slack Socket Mode credentials, optional
+DashScope key, a default brain (`claude`, `codex`, `opencode`, or `gemini`), and
+whether to start the gateway or install watchdog. It uses `jc init` underneath
+when the target is not already a JC instance.
 
 For automation or tests, use safe defaults:
 
@@ -128,7 +136,8 @@ my-assistant/
 │   ├── references/
 │   └── tmp/
 └── ops/
-    └── watchdog.conf  # SESSION_ID + SCREEN_NAME overrides
+    ├── gateway.yaml   # non-secret gateway runtime config
+    └── watchdog.conf  # gateway supervision + legacy fallback settings
 ```
 
 ---
@@ -153,10 +162,10 @@ vim memory/L1/RULES.md
 
 ```bash
 jc memory rebuild
-jc doctor
+jc doctor --fix
 ```
 
-All critical checks should be green. Telegram credentials are validated with a live `getMe` ping.
+All critical checks should be green. Telegram credentials are validated with a live `getMe` ping. Slack bot credentials are validated with `auth.test`; Socket Mode also needs the `websocket-client` Python package, which `install.sh` installs.
 
 ---
 
@@ -220,39 +229,21 @@ You should see a message on your phone within a few seconds.
 
 ---
 
-## 9. Start the live runtime
+## 9. Start the gateway runtime
 
 ```bash
-INSTANCE_DIR="$(pwd)"
-screen -dmS myassistant bash -c 'cd "$1" && exec claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official' _ "$INSTANCE_DIR"
+jc gateway start
 ```
 
-Wait ~10s, then:
+Wait a few seconds, then:
 
 ```bash
-jc doctor
+jc gateway status
+jc gateway logs -n 40
+jc doctor --fix
 ```
 
-`live claude process running` should now be green, and `telegram plugin alive` should report a pid.
-
-Find the session id so the watchdog can restore conversation memory on restart:
-
-```bash
-ls -lat ~/.claude/projects/*$(basename $(pwd))*/*.jsonl | head -1
-```
-
-Copy the UUID portion of the filename (strip `.jsonl`), then:
-
-```bash
-vim ops/watchdog.conf
-```
-
-Uncomment and fill in:
-
-```
-SESSION_ID=<uuid-from-above>
-SCREEN_NAME=myassistant
-```
+`jc gateway status` shows the daemon pid, queue path, config path, and event counts.
 
 ---
 
@@ -263,7 +254,7 @@ jc watchdog install
 jc watchdog status
 ```
 
-Two cron entries get installed (`@reboot` + every 2 minutes). If claude dies (crash, auto-update, or Telegram plugin death), the watchdog respawns it with `--resume`, and you get a Telegram ping when it's back.
+Two cron entries get installed (`@reboot` + every 2 minutes). In the default `RUNTIME_MODE=gateway`, watchdog restarts `jc gateway` when the daemon dies and sends a Telegram ping when it recovers.
 
 ---
 
@@ -290,7 +281,7 @@ jc workers reconcile       # mark stale 'running' rows as failed
 jc workers gc --days 7     # purge old rows (add --prune-files to remove logs)
 ```
 
-The worker writes its prompt, log, and result under `<instance>/state/workers/<id>/`. When it reaches a terminal state (done/failed/cancelled/need_input), the runner sends a Telegram summary to `$TELEGRAM_CHAT_ID` (or a per-worker `--notify <chat_id>`).
+The worker writes its prompt, log, and result under `<instance>/state/workers/<id>/`. When gateway mode is configured, terminal-state notifications are enqueued into `jc gateway` for delivery; older instances fall back to direct Telegram delivery.
 
 **When to spawn vs. do inline:** quick answers and single-file edits → inline; multi-file refactors, research, scaffolding, anything iterative → spawn. See `docs/specs/workers.md` for the full design.
 
@@ -310,7 +301,7 @@ jc watchdog status
 jc doctor
 ```
 
-DM the Telegram bot and the live session will respond.
+DM the Telegram bot or message the configured Slack app channel and the gateway will route the event to the configured brain.
 
 ---
 
@@ -322,7 +313,13 @@ DM the Telegram bot and the live session will respond.
 
 **`DASHSCOPE_API_KEY not set`** → your `.env` is missing a value or isn't being sourced. Every `jc-*` command auto-sources `.env` at the instance root.
 
-**`jc doctor` says `telegram plugin dead`** → restart the live claude session (`exit` inside the screen and let the watchdog respawn it, or `screen -S <name> -X quit && screen -dmS <name> ...`).
+**`jc gateway status` says stopped** → run `jc gateway start`, then `jc gateway logs -n 80`. If watchdog is installed, `jc watchdog status` shows the last restart attempt.
+
+**Slack Socket Mode does not start** → run `jc doctor --fix`. Confirm `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, Socket Mode enablement, app event subscriptions, and the `websocket-client` package.
+
+**Telegram returns 409 Conflict** → another process is long-polling the same bot token, commonly the legacy Claude Telegram plugin. Stop that plugin/session before starting `jc gateway`.
+
+**Legacy Claude Telegram plugin deployment** → set `RUNTIME_MODE=legacy-claude` in `ops/watchdog.conf`, install the Claude plugin manually, and use the old `screen ... claude --channels plugin:telegram@claude-plugins-official` launch path.
 
 **`tasks.yaml` adapter error** → the CLI for that adapter (`claude`, `gemini`, etc.) isn't installed or isn't authenticated. `jc doctor` flags which are missing.
 

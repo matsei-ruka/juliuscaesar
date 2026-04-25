@@ -24,7 +24,7 @@ fi
 #   exec        accepts -s/--sandbox <mode>
 #   exec resume does NOT — sandbox must be set via -c sandbox_mode=<mode>
 # Both accept --dangerously-bypass-approvals-and-sandbox.
-RESUME="${WORKER_RESUME_SESSION:-}"
+RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"
 
 if [[ -n "$RESUME" ]]; then
     ARGS=("exec" "resume" "$RESUME")

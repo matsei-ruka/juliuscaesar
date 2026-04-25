@@ -88,7 +88,7 @@ load_env_file() {
         key="${key#"${key%%[![:space:]]*}"}"
         key="${key%"${key##*[![:space:]]}"}"
         case "$key" in
-            DASHSCOPE_API_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID) ;;
+            DASHSCOPE_API_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|SLACK_APP_TOKEN|SLACK_BOT_TOKEN) ;;
             *) continue ;;
         esac
         value="${value#"${value%%[![:space:]]*}"}"
@@ -173,6 +173,15 @@ for b in gemini opencode codex; do
         info "$b not installed (only needed if a task uses it)"
     fi
 done
+
+if python3 - <<'PY' >/dev/null 2>&1
+import websocket
+PY
+then
+    ok "python websocket-client available (needed for Slack Socket Mode)"
+else
+    info "python websocket-client not installed (needed only for Slack Socket Mode; install.sh installs it)"
+fi
 
 # --- Instance ---
 
@@ -365,11 +374,39 @@ else
     elif [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         warn "TELEGRAM_CHAT_ID not set (token is set but messages can't be delivered)"
     fi
+
+    # Slack
+    if [[ -n "${SLACK_APP_TOKEN:-}" || -n "${SLACK_BOT_TOKEN:-}" ]]; then
+        if [[ -z "${SLACK_APP_TOKEN:-}" || -z "${SLACK_BOT_TOKEN:-}" ]]; then
+            warn "Slack Socket Mode needs both SLACK_APP_TOKEN and SLACK_BOT_TOKEN"
+        else
+            SLACK_AUTH=$(curl -sS --max-time 5 -X POST \
+                -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+                -H "Content-Type: application/json" \
+                https://slack.com/api/auth.test || echo '')
+            if echo "$SLACK_AUTH" | grep -q '"ok":true'; then
+                ok "SLACK_BOT_TOKEN valid"
+            else
+                fail "SLACK_BOT_TOKEN set but Slack auth.test failed"
+            fi
+        fi
+    else
+        info "Slack tokens not set (required only for Slack channel)"
+    fi
 fi
 
 # --- Watchdog + runtime ---
 
 section "Runtime (watchdog)"
+
+RUNTIME_MODE="legacy-claude"
+if [[ -f "$INSTANCE_DIR/ops/watchdog.conf" ]]; then
+    raw_mode=$(awk -F= '$1 == "RUNTIME_MODE" { print $2; exit }' "$INSTANCE_DIR/ops/watchdog.conf")
+    raw_mode="${raw_mode%\"}"; raw_mode="${raw_mode#\"}"
+    raw_mode="${raw_mode%\'}"; raw_mode="${raw_mode#\'}"
+    [[ -n "$raw_mode" ]] && RUNTIME_MODE="$raw_mode"
+fi
+ok "watchdog runtime mode: $RUNTIME_MODE"
 
 TAG="# jc-watchdog for $INSTANCE_DIR"
 if crontab -l 2>/dev/null | grep -qF "$TAG"; then
@@ -378,6 +415,21 @@ else
     info "watchdog cron not installed (optional — run: jc watchdog install)"
 fi
 
+if [[ "$RUNTIME_MODE" == "gateway" ]]; then
+    info "legacy live Claude/plugin checks skipped in gateway mode"
+    PIDFILE="$HOME/.claude/channels/telegram/bot.pid"
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -f "$PIDFILE" ]]; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+            warn "legacy Claude Telegram plugin pidfile is alive (pid $PID); stop it before using the same bot token with gateway"
+        elif [[ "$FIX" == 1 ]]; then
+            rm -f "$PIDFILE"
+            fixed "removed stale legacy Telegram plugin pidfile"
+        else
+            warn "legacy Claude Telegram plugin pidfile is stale: $PIDFILE"
+        fi
+    fi
+else
 # Live claude
 # Scope to THIS instance: claude whose cwd is INSTANCE_DIR. Multi-instance
 # hosts can have several unrelated claude sessions running; count only ours.
@@ -416,10 +468,55 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         fi
     fi
 fi
+fi
 
 # --- Gateway ---
 
 section "Gateway"
+
+GATEWAY_CONFIG="$INSTANCE_DIR/ops/gateway.yaml"
+if [[ -f "$GATEWAY_CONFIG" ]]; then
+    ok "gateway config present: $GATEWAY_CONFIG"
+    GATEWAY_CONFIG_CHECK=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+from gateway.config import load_config, SUPPORTED_BRAINS
+
+try:
+    cfg = load_config(Path(sys.argv[1]))
+except Exception as exc:
+    print(f"ERROR:{exc}")
+    raise SystemExit(0)
+print(f"BRAIN:{cfg.default_brain}")
+for name, ch in cfg.channels.items():
+    print(f"CHANNEL:{name}:{'enabled' if ch.enabled else 'disabled'}")
+if cfg.default_brain not in SUPPORTED_BRAINS:
+    print(f"ERROR:unsupported default brain {cfg.default_brain}")
+PY
+)
+    while IFS= read -r line; do
+        case "$line" in
+            BRAIN:*) ok "gateway default brain: ${line#BRAIN:}" ;;
+            CHANNEL:*) info "gateway ${line#CHANNEL:}" ;;
+            ERROR:*) fail "gateway config: ${line#ERROR:}" ;;
+        esac
+    done <<<"$GATEWAY_CONFIG_CHECK"
+else
+    if [[ "$FIX" == 1 ]]; then
+        mkdir -p "$INSTANCE_DIR/ops"
+        PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$INSTANCE_DIR" <<'PY'
+from pathlib import Path
+import sys
+from gateway.config import render_default_config
+
+target = Path(sys.argv[1])
+target.joinpath("ops", "gateway.yaml").write_text(render_default_config(), encoding="utf-8")
+PY
+        fixed "gateway config created at $GATEWAY_CONFIG"
+    else
+        warn "gateway config missing (run: jc setup, or jc doctor --fix for defaults)"
+    fi
+fi
 
 GATEWAY_DB="$INSTANCE_DIR/state/gateway/queue.db"
 if [[ -f "$GATEWAY_DB" ]]; then

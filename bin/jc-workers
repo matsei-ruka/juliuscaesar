@@ -50,6 +50,8 @@ from workers import (  # type: ignore  # noqa: E402
     workers_dir,
 )
 from workers.db import _now_iso  # type: ignore  # noqa: E402
+from gateway import queue as gateway_queue  # type: ignore  # noqa: E402
+from gateway.config import config_path as gateway_config_path  # type: ignore  # noqa: E402
 
 
 # Adapters + send_telegram live in the heartbeat lib (shared contract).
@@ -204,11 +206,14 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         "workspace-write": "true",
     }[args.sandbox]
 
-    # Sprint 3: pass the resume session id through to the adapter via env.
-    # Each adapter reads WORKER_RESUME_SESSION and maps to its brain-specific flag.
+    # Pass the resume session id through to the adapter via env.
+    # JC_RESUME_SESSION is shared by gateway + workers; WORKER_* remains
+    # for backward compatibility with older adapters.
     if resume_session_id:
+        os.environ["JC_RESUME_SESSION"] = resume_session_id
         os.environ["WORKER_RESUME_SESSION"] = resume_session_id
     else:
+        os.environ.pop("JC_RESUME_SESSION", None)
         os.environ.pop("WORKER_RESUME_SESSION", None)
 
     # Detached double-fork so the runner survives this shell AND our process.
@@ -338,9 +343,11 @@ def _format_notification(w: Worker) -> str:
 def _send_notification(instance: Path, worker: Worker) -> None:
     """Invoke send_telegram.sh. Swallow errors — a failed notify shouldn't
     crash the runner and shouldn't flip the worker's status."""
+    body = _format_notification(worker)
+    if _enqueue_gateway_notification(instance, worker, body):
+        return
     if not SEND_TELEGRAM.exists():
         return
-    body = _format_notification(worker)
     env = os.environ.copy()
     env["JC_INSTANCE_DIR"] = str(instance)
     if worker.notify_chat_id:
@@ -358,6 +365,36 @@ def _send_notification(instance: Path, worker: Worker) -> None:
         # Intentionally silent — we log nothing because the runner's stderr
         # is already pointed at the worker log which is closed by now.
         pass
+
+
+def _enqueue_gateway_notification(instance: Path, worker: Worker, body: str) -> bool:
+    if not gateway_config_path(instance).exists():
+        return False
+    try:
+        conn = gateway_queue.connect(instance)
+        try:
+            gateway_queue.enqueue(
+                conn,
+                source="worker",
+                source_message_id=f"worker:{worker.id}:{worker.status}:{worker.finished_at or ''}",
+                user_id=worker.spawned_by,
+                conversation_id=worker.notify_chat_id,
+                content=body,
+                meta={
+                    "deliver_only": True,
+                    "delivery_channel": "telegram",
+                    "chat_id": worker.notify_chat_id,
+                    "worker_id": worker.id,
+                    "status": worker.status,
+                    "result_path": worker.result_path,
+                    "log_path": worker.log_path,
+                },
+            )
+        finally:
+            conn.close()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # --- session id capture ------------------------------------------------------

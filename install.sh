@@ -18,7 +18,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$SHARE_DIR/venv"
-DEPS=(pyyaml python-dotenv dashscope requests)
+DEPS=(pyyaml python-dotenv dashscope requests websocket-client)
 BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor)
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }

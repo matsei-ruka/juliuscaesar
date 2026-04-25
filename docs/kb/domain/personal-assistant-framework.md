@@ -18,7 +18,7 @@ related:
 
 JuliusCaesar is an OpenClaw-inspired personal assistant framework that runs native assistant CLIs around a user-owned instance directory. The framework repo provides reusable tooling: scheduler, supervisor, memory CLI, voice, installer, workers, and diagnostics. It is not supposed to contain user identity, secrets, or memory content.
 
-The core product shape is daemon-like rather than chat-app-like: persistent memory, cron-driven work, Telegram delivery, watchdog supervision, and optional on-demand workers.
+The core product shape is daemon-like rather than chat-app-like: persistent memory, cron-driven work, Telegram/Slack gateway delivery, watchdog supervision, and optional on-demand workers.
 
 ## Source of truth
 
@@ -36,7 +36,7 @@ Typical bootstrapping:
 3. Review `<instance>/.env` and L1 memory files.
 4. Rebuild memory with `jc memory rebuild`.
 5. Validate with `jc doctor`.
-6. Run scheduled tasks with `jc heartbeat run`, live Telegram via Claude Code, and optional watchdog.
+6. Start `jc gateway`, install watchdog if desired, and run scheduled tasks with `jc heartbeat run`.
 
 ## Invariants
 
