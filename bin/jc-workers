@@ -341,35 +341,70 @@ def _format_notification(w: Worker) -> str:
 
 
 def _send_notification(instance: Path, worker: Worker) -> None:
-    """Invoke send_telegram.sh. Swallow errors — a failed notify shouldn't
-    crash the runner and shouldn't flip the worker's status."""
+    """Notify the user about a worker's terminal status.
+
+    Default mode: write a `worker.completed` event JSON into
+    `<instance>/state/events/`. The gateway's jc-events channel picks it up
+    and lets the configured brain synthesize a single Telegram message.
+
+    `WORKERS_NOTIFY_MODE` overrides:
+      - `events`            (default when gateway config exists): write event JSON.
+      - `gateway-deliver`   : enqueue a deliver_only raw body (no synthesis).
+      - `telegram-direct`   : invoke send_telegram.sh with the raw body.
+      - `auto`              : events if gateway config exists, else telegram-direct.
+
+    Errors are swallowed — a failed notify must not flip the worker's status.
+    """
+    mode = os.environ.get("WORKERS_NOTIFY_MODE", "auto").strip().lower() or "auto"
     body = _format_notification(worker)
-    if _enqueue_gateway_notification(instance, worker, body):
-        return
-    if not SEND_TELEGRAM.exists():
-        return
-    env = os.environ.copy()
-    env["JC_INSTANCE_DIR"] = str(instance)
-    if worker.notify_chat_id:
-        env["TELEGRAM_CHAT_ID_OVERRIDE"] = str(worker.notify_chat_id)
+
+    has_gateway = gateway_config_path(instance).exists()
+    if mode == "auto":
+        mode = "events" if has_gateway else "telegram-direct"
+
+    if mode == "events" and has_gateway:
+        if _write_worker_event(instance, worker):
+            return
+    if mode == "gateway-deliver" and has_gateway:
+        if _enqueue_gateway_deliver(instance, worker, body):
+            return
+    if mode in ("telegram-direct", "events", "gateway-deliver"):
+        _telegram_direct(instance, worker, body)
+
+
+def _write_worker_event(instance: Path, worker: Worker) -> bool:
+    events_dir = instance / "state" / "events"
     try:
-        subprocess.run(
-            [str(SEND_TELEGRAM)],
-            input=body,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=25,
-        )
-    except Exception:  # noqa: BLE001
-        # Intentionally silent — we log nothing because the runner's stderr
-        # is already pointed at the worker log which is closed by now.
-        pass
-
-
-def _enqueue_gateway_notification(instance: Path, worker: Worker, body: str) -> bool:
-    if not gateway_config_path(instance).exists():
+        events_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
         return False
+    payload = {
+        "event_type": "worker.completed",
+        "event_id": f"worker-{worker.id}-{worker.status}-{worker.finished_at or ''}",
+        "worker_id": worker.id,
+        "topic": worker.topic,
+        "status": worker.status,
+        "exit_code": worker.exit_code,
+        "duration_seconds": _duration_seconds(worker.started_at, worker.finished_at),
+        "result_path": worker.result_path,
+        "log_path": worker.log_path,
+        "brain": worker.brain,
+        "model": worker.model,
+        "notify_channel": "telegram",
+        "notify_chat_id": worker.notify_chat_id,
+        "conversation_id": worker.notify_chat_id,
+        "spawned_by": worker.spawned_by,
+        "error": worker.error,
+    }
+    target = events_dir / f"worker-{worker.id}-{worker.status}.json"
+    try:
+        target.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _enqueue_gateway_deliver(instance: Path, worker: Worker, body: str) -> bool:
     try:
         conn = gateway_queue.connect(instance)
         try:
@@ -395,6 +430,39 @@ def _enqueue_gateway_notification(instance: Path, worker: Worker, body: str) -> 
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _telegram_direct(instance: Path, worker: Worker, body: str) -> None:
+    if not SEND_TELEGRAM.exists():
+        return
+    env = os.environ.copy()
+    env["JC_INSTANCE_DIR"] = str(instance)
+    if worker.notify_chat_id:
+        env["TELEGRAM_CHAT_ID_OVERRIDE"] = str(worker.notify_chat_id)
+    try:
+        subprocess.run(
+            [str(SEND_TELEGRAM)],
+            input=body,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=25,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _duration_seconds(started_at: str | None, finished_at: str | None) -> int | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        from datetime import datetime
+
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+        return int((finish - start).total_seconds())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # --- session id capture ------------------------------------------------------

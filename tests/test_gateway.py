@@ -89,7 +89,7 @@ class GatewayTests(unittest.TestCase):
         )
         conn.close()
         runtime = GatewayRuntime(instance, log_path=queue.queue_dir(instance) / "test.log", stop_requested=lambda: True)
-        with mock.patch("gateway.runtime.call_brain", return_value=BrainResult("hello", "sess-1")), \
+        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult("hello", "sess-1")), \
              mock.patch("gateway.runtime.deliver", return_value=None):
             self.assertTrue(runtime.dispatch_once())
 
@@ -114,7 +114,7 @@ class GatewayTests(unittest.TestCase):
         event, _ = queue.enqueue(conn, source="manual", content="hi")
         conn.close()
         runtime = GatewayRuntime(instance, log_path=queue.queue_dir(instance) / "test.log", stop_requested=lambda: True)
-        with mock.patch("gateway.runtime.call_brain", side_effect=RuntimeError("boom")):
+        with mock.patch("gateway.runtime.invoke_brain", side_effect=RuntimeError("boom")):
             self.assertTrue(runtime.dispatch_once())
         conn2 = queue.connect(instance)
         try:

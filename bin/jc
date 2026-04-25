@@ -88,7 +88,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|gateway|init|setup|doctor)
+    memory|heartbeat|voice|watchdog|workers|gateway|init|setup|doctor|migrate-to-0.3)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

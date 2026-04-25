@@ -422,5 +422,7 @@ main() {
 if [[ "${RUNTIME_MODE:-legacy-claude}" == "gateway" ]]; then
     main_gateway
 else
+    echo "[watchdog] DEPRECATION: RUNTIME_MODE=legacy-claude will be removed in 0.5.0." \
+        "Run 'jc migrate-to-0.3' to switch this instance to the unified gateway." >&2
     main
 fi

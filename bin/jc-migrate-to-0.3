@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""jc migrate-to-0.3 — bootstrap an existing 0.2.x instance for the unified gateway.
+
+Reads `<instance>/ops/watchdog.conf` and `<instance>/.env` and writes a
+conservative `ops/gateway.yaml` that flips the watchdog to gateway mode and
+keeps a single brain (no triage). Backs up `watchdog.conf` to a timestamped
+file so users can roll back.
+
+Re-running on an already-migrated instance is a no-op.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+THIS = Path(__file__).resolve()
+LIB = THIS.parents[1] / "lib"
+sys.path.insert(0, str(LIB))
+
+from gateway import config as gw_config  # noqa: E402
+
+
+def _resolve_instance(arg: str | None) -> Path:
+    candidate = Path(arg).resolve() if arg else Path.cwd().resolve()
+    cur = candidate
+    for _ in range(8):
+        if (cur / ".jc").exists() or (cur / "memory").is_dir():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return candidate
+
+
+def _parse_watchdog_conf(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        out[key] = value
+    return out
+
+
+def _set_runtime_mode(path: Path, mode: str) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    new = re.sub(
+        r"^RUNTIME_MODE\s*=.*$",
+        f"RUNTIME_MODE={mode}",
+        text,
+        flags=re.MULTILINE,
+    )
+    if new == text and "RUNTIME_MODE=" not in text:
+        new = text.rstrip() + f"\nRUNTIME_MODE={mode}\n"
+    if new == text:
+        return False
+    path.write_text(new, encoding="utf-8")
+    return True
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="jc-migrate-to-0.3")
+    parser.add_argument("--instance-dir", help="instance directory (default: cwd)")
+    parser.add_argument("--triage", default="none", choices=["none", "openrouter", "ollama", "claude-channel"])
+    parser.add_argument("--default-brain", default="claude")
+    parser.add_argument("--telegram-chat-id", default="")
+    parser.add_argument("--enable-slack", action="store_true")
+    parser.add_argument("--enable-discord", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    instance = _resolve_instance(args.instance_dir)
+    print(f"target instance: {instance}")
+
+    watchdog_path = instance / "ops" / "watchdog.conf"
+    gateway_path = instance / "ops" / "gateway.yaml"
+    env_path = instance / ".env"
+
+    watchdog = _parse_watchdog_conf(watchdog_path)
+
+    chat_id = args.telegram_chat_id or watchdog.get("TELEGRAM_CHAT_ID", "")
+    telegram_enabled = bool(chat_id) or "TELEGRAM_BOT_TOKEN" in _parse_watchdog_conf(env_path)
+
+    new_yaml = gw_config.render_default_config(
+        default_brain=args.default_brain,
+        telegram_enabled=telegram_enabled,
+        telegram_chat_id=chat_id,
+        slack_enabled=args.enable_slack,
+        discord_enabled=args.enable_discord,
+        triage_backend=args.triage,
+    )
+
+    actions: list[str] = []
+
+    if gateway_path.exists():
+        existing = gateway_path.read_text(encoding="utf-8")
+        if existing.strip() == new_yaml.strip():
+            actions.append(f"ops/gateway.yaml unchanged (already migrated)")
+        else:
+            backup = gateway_path.with_suffix(
+                f".yaml.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            )
+            actions.append(f"backup current gateway.yaml -> {backup.name}")
+            if not args.dry_run:
+                backup.write_text(existing, encoding="utf-8")
+                gateway_path.write_text(new_yaml, encoding="utf-8")
+    else:
+        actions.append(f"create ops/gateway.yaml")
+        if not args.dry_run:
+            gateway_path.parent.mkdir(parents=True, exist_ok=True)
+            gateway_path.write_text(new_yaml, encoding="utf-8")
+
+    if watchdog_path.exists():
+        backup = watchdog_path.with_suffix(
+            f".conf.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        if not args.dry_run:
+            backup.write_text(watchdog_path.read_text(encoding="utf-8"), encoding="utf-8")
+        actions.append(f"backup watchdog.conf -> {backup.name}")
+        if not args.dry_run and _set_runtime_mode(watchdog_path, "gateway"):
+            actions.append("set RUNTIME_MODE=gateway in watchdog.conf")
+    else:
+        actions.append("watchdog.conf missing — skipping mode flip (run jc setup)")
+
+    print("Plan:")
+    for a in actions:
+        print(f"  - {a}")
+    if args.dry_run:
+        print("\n(dry-run; no files written)")
+        return 0
+
+    print("\nNext steps:")
+    print("  1. jc doctor")
+    print("  2. jc gateway start  (or restart watchdog)")
+    if args.triage == "none":
+        print("  3. (optional) edit ops/gateway.yaml: set triage: openrouter, then `jc gateway reload`")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

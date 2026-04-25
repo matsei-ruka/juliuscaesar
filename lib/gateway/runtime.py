@@ -9,10 +9,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import queue
-from .brain import call_brain
-from .channels import SlackSocketModeChannel, TelegramChannel, deliver
+from . import overrides, queue, router, sessions
+from .brains import invoke_brain
+from .channels import build_enabled_channels, deliver
 from .config import GatewayConfig, load_config
+from .logging_setup import configure_logger
+from .triage import MetricsRecorder, TriageBackend, TriageCache, build_backend
+from .triage.base import TriageResult
 
 
 def decode_meta(event: queue.Event) -> dict[str, Any]:
@@ -39,30 +42,60 @@ class GatewayRuntime:
         self.stop_requested = stop_requested
         self.worker_id = f"gateway-{os.getpid()}"
         self.threads: list[threading.Thread] = []
+        self._triage_lock = threading.Lock()
+        self._triage_backend: TriageBackend | None = None
+        self.triage_cache = TriageCache(ttl_seconds=self.config.triage.cache_ttl_seconds)
+        self.metrics = MetricsRecorder(self.instance_dir)
+        self._json_logger = configure_logger(
+            f"gateway.runtime.{os.getpid()}",
+            log_path=log_path,
+            max_bytes=self.config.reliability.log_max_bytes,
+            backups=self.config.reliability.log_backups,
+        )
 
-    def log(self, message: str) -> None:
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.log_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"[{queue.now_iso()}] {message}\n")
+    def _get_triage_backend(self) -> TriageBackend | None:
+        with self._triage_lock:
+            if self._triage_backend is None and self.config.triage.backend not in ("none", "", "always"):
+                self._triage_backend = build_backend(self.config.triage, self.instance_dir)
+            return self._triage_backend
+
+    def reload_config(self) -> None:
+        """Re-read ops/gateway.yaml — used by SIGHUP handlers."""
+        self.config = load_config(self.instance_dir)
+        with self._triage_lock:
+            self._triage_backend = None
+        self.triage_cache = TriageCache(ttl_seconds=self.config.triage.cache_ttl_seconds)
+
+    def log(self, message: str, **fields: Any) -> None:
+        # Drop reserved LogRecord field names to avoid clashes.
+        safe = {k: v for k, v in fields.items() if v is not None and not k.startswith("_")}
+        self._json_logger.info(message, extra=safe)
 
     def enqueue(self, **kwargs: Any) -> None:
         conn = queue.connect(self.instance_dir)
         try:
+            depth = queue.counts(conn)
+            queued = depth.get("queued", 0) + depth.get("running", 0)
+            cap = self.config.reliability.max_queue_depth
+            if cap > 0 and queued >= cap:
+                self.log(
+                    f"backpressure: queue depth {queued} >= {cap} — dropping {kwargs.get('source')}",
+                    source=kwargs.get("source"),
+                    kind="backpressure",
+                )
+                return
             event, inserted = queue.enqueue(conn, **kwargs)
         finally:
             conn.close()
         self.log(
-            f"event {'enqueued' if inserted else 'deduped'} id={event.id} "
-            f"source={event.source} conversation={event.conversation_id or '-'}"
+            "event enqueued" if inserted else "event deduped",
+            event_id=event.id,
+            source=event.source,
+            channel=event.source,
         )
 
     def start_channels(self) -> None:
-        channels = []
-        if self.config.channel("telegram").enabled:
-            channels.append(TelegramChannel(self.instance_dir, self.config.channel("telegram"), self.log))
-        if self.config.channel("slack").enabled:
-            channels.append(SlackSocketModeChannel(self.instance_dir, self.config.channel("slack"), self.log))
-        for channel in channels:
+        for channel in build_enabled_channels(self.instance_dir, self.config, self.log):
             thread = threading.Thread(
                 target=channel.run,
                 args=(self.enqueue, self.stop_requested),
@@ -116,6 +149,102 @@ class GatewayRuntime:
             self.log(f"event {failed.status} id={event.id} error={exc}")
         return True
 
+    def _maybe_triage(
+        self,
+        event: queue.Event,
+        sticky: router.StickyHint | None,
+    ) -> router.TriageHint | None:
+        if sticky is not None:
+            return None
+        meta = decode_meta(event)
+        if meta.get("brain_override"):
+            return None
+        if event.source == "cron" and meta.get("brain"):
+            return None
+        backend = self._get_triage_backend()
+        if backend is None:
+            return None
+        cached = self.triage_cache.get(event.content)
+        if cached is not None:
+            return self._triage_to_hint(cached)
+        try:
+            result = backend.classify(event.content)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"triage error backend={backend.name}: {exc}")
+            return None
+        self.triage_cache.put(event.content, result)
+        try:
+            self.metrics.record(
+                result,
+                fallback=result.confidence < self.config.triage.confidence_threshold,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        if result.is_unsafe():
+            self.log(f"triage rejected event id={event.id} as unsafe")
+            return None
+        return self._triage_to_hint(result)
+
+    def _triage_to_hint(self, result: TriageResult) -> router.TriageHint:
+        # Honor per-class override map: triage may name claude:opus-4-7-1m but
+        # the user might pin claude:sonnet-4-6 for "code" via triage_routing.
+        spec = self.config.triage.routing.get(result.class_, result.brain)
+        brain, _, model = spec.partition(":")
+        return router.TriageHint(brain=brain or result.brain, model=model or None, confidence=result.confidence)
+
+    def _resolve_sticky(self, event: queue.Event, channel: str) -> router.StickyHint | None:
+        if not event.conversation_id:
+            return None
+        conn = queue.connect(self.instance_dir)
+        try:
+            sticky = sessions.get_active_sticky(
+                conn,
+                channel=channel,
+                conversation_id=event.conversation_id,
+            )
+        finally:
+            conn.close()
+        if sticky is None:
+            return None
+        brain, _, model = sticky.brain.partition(":")
+        return router.StickyHint(brain=brain or sticky.brain, model=model or None)
+
+    def _resume_id(self, channel: str, conversation_id: str | None, brain: str) -> str | None:
+        if not conversation_id:
+            return None
+        conn = queue.connect(self.instance_dir)
+        try:
+            existing = sessions.get_session(
+                conn,
+                channel=channel,
+                conversation_id=conversation_id,
+                brain=brain,
+            )
+        finally:
+            conn.close()
+        return existing.session_id if existing else None
+
+    def _record_session(
+        self,
+        channel: str,
+        conversation_id: str | None,
+        brain: str,
+        session_id: str,
+    ) -> None:
+        if not conversation_id:
+            return
+        conn = queue.connect(self.instance_dir)
+        try:
+            sessions.upsert_session(
+                conn,
+                channel=channel,
+                conversation_id=conversation_id,
+                brain=brain,
+                session_id=session_id,
+            )
+        finally:
+            conn.close()
+
     def process_event(self, event: queue.Event) -> str:
         meta = decode_meta(event)
         if meta.get("deliver_only"):
@@ -130,22 +259,32 @@ class GatewayRuntime:
             )
             return response
 
-        channel = event.source if event.source in ("telegram", "slack") else str(meta.get("channel") or event.source)
-        brain, model = self.config.brain_for(channel)
-        resume_session = None
-        if event.conversation_id:
-            conn = queue.connect(self.instance_dir)
-            try:
-                existing = queue.get_session(
-                    conn,
-                    channel=channel,
-                    conversation_id=event.conversation_id,
-                    brain=brain,
-                )
-                resume_session = existing.session_id if existing else None
-            finally:
-                conn.close()
-        result = call_brain(
+        channel = router.channel_name(event)
+        event, meta = self._apply_inline_override(event, meta)
+
+        slash = overrides.parse_slash_command(event.content)
+        if slash is not None:
+            return self._handle_slash(slash, event, meta, channel)
+
+        sticky = self._resolve_sticky(event, channel)
+        triage = self._maybe_triage(event, sticky)
+        selection = router.route(
+            event,
+            cfg=self.config,
+            sticky=sticky,
+            triage=triage,
+            confidence_threshold=self.config.triage.confidence_threshold,
+            fallback_brain=self.config.triage.fallback_brain,
+        )
+        brain, model = selection.brain, selection.model
+        self.log(
+            f"route id={event.id} channel={channel} brain={brain} "
+            f"model={model or '-'} reason={selection.reason}"
+        )
+
+        resume_session = self._resume_id(channel, event.conversation_id, brain)
+
+        result = invoke_brain(
             instance_dir=self.instance_dir,
             event=event,
             brain=brain,
@@ -153,19 +292,15 @@ class GatewayRuntime:
             resume_session=resume_session,
             timeout_seconds=self.config.adapter_timeout_seconds,
             log_path=self.log_path,
+            config=self.config,
         )
-        if result.session_id and event.conversation_id:
-            conn2 = queue.connect(self.instance_dir)
-            try:
-                queue.upsert_session(
-                    conn2,
-                    channel=channel,
-                    conversation_id=event.conversation_id,
-                    brain=brain,
-                    session_id=result.session_id,
-                )
-            finally:
-                conn2.close()
+
+        if result.session_id:
+            self._record_session(channel, event.conversation_id, brain, result.session_id)
+
+        if event.conversation_id and self.config.triage.sticky_idle_seconds > 0:
+            self._update_sticky(channel, event.conversation_id, brain, model)
+
         response = result.response or "(no response)"
         meta.setdefault("delivery_channel", channel)
         deliver(
@@ -177,3 +312,68 @@ class GatewayRuntime:
             log=self.log,
         )
         return response
+
+    # --- override + slash plumbing ----------------------------------------
+
+    def _apply_inline_override(
+        self,
+        event: queue.Event,
+        meta: dict[str, Any],
+    ) -> tuple[queue.Event, dict[str, Any]]:
+        result = overrides.parse_inline_override(event.content)
+        if result is None:
+            return event, meta
+        new_meta = dict(meta)
+        new_meta["brain_override"] = result.spec
+        # rewrite event.content + meta in-place via dataclass replace
+        from dataclasses import replace
+
+        event = replace(event, content=result.cleaned_content, meta=json.dumps(new_meta))
+        return event, new_meta
+
+    def _handle_slash(
+        self,
+        slash: overrides.SlashCommand,
+        event: queue.Event,
+        meta: dict[str, Any],
+        channel: str,
+    ) -> str:
+        if slash.kind == "brain" and slash.spec and event.conversation_id:
+            brain, _, model = slash.spec.partition(":")
+            self._update_sticky(channel, event.conversation_id, brain, model or None)
+        reply = slash.reply or ""
+        meta = dict(meta)
+        meta.setdefault("delivery_channel", channel)
+        deliver(
+            instance_dir=self.instance_dir,
+            source=channel,
+            response=reply,
+            meta=meta,
+            config_channels=self.config.channels,
+            log=self.log,
+        )
+        self.log(f"slash command id={event.id} kind={slash.kind} spec={slash.spec or '-'}")
+        return reply
+
+    def _update_sticky(
+        self,
+        channel: str,
+        conversation_id: str,
+        brain: str,
+        model: str | None,
+    ) -> None:
+        idle = self.config.triage.sticky_idle_seconds
+        if idle <= 0 or not conversation_id:
+            return
+        spec = f"{brain}:{model}" if model else brain
+        conn = queue.connect(self.instance_dir)
+        try:
+            sessions.record_response(
+                conn,
+                channel=channel,
+                conversation_id=conversation_id,
+                brain=spec,
+                sticky_idle_seconds=idle,
+            )
+        finally:
+            conn.close()

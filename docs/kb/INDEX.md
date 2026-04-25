@@ -37,6 +37,10 @@
 | On-demand background workers | subsystem/workers-background-agents.md | Worker DB, detached lifecycle, named worker resume |
 | DashScope voice subsystem | subsystem/voice-dashscope.md | Voice enrollment, synthesis, transcription |
 | Gateway runtime and event queue | subsystem/gateway-queue.md | Telegram/Slack gateway runtime, SQLite queue, dispatch, delivery |
+| Discord channel | subsystem/channel-discord.md | discord.py-backed inbound DM/mention, outbound channel/thread reply |
+| Voice channel | subsystem/channel-voice.md | Paired-channel ASR/TTS via DashScope |
+| jc-events channel | subsystem/channel-jc-events.md | Internal worker/system event ingestion via `state/events/` |
+| Cron channel | subsystem/channel-cron.md | Scheduled task → gateway event with pinned brain |
 
 ### contract
 
@@ -44,6 +48,7 @@
 |-------|------|---------------|
 | Instance layout and resolution contract | contract/instance-layout-and-resolution.md | Instance scaffold, `.jc`, resolution precedence |
 | Adapter and delivery contracts | contract/adapter-and-delivery-contracts.md | Brain adapters, resume env, heartbeat and gateway delivery |
+| Brain capability matrix | contract/brain-capabilities.md | Per-brain support for tools/vision/edits/web + resume mechanism |
 | Config and secret boundaries | contract/config-and-secret-boundaries.md | `.env`, gateway/tasks/watchdog config, doctor diagnostics |
 
 ### decision
@@ -51,6 +56,7 @@
 | Topic | File | What's inside |
 |-------|------|---------------|
 | Native CLI orchestration instead of API simulation | decision/native-cli-over-api-simulation.md | Why JC shells out to native assistant CLIs |
+| Why a unified gateway | decision/why-unified-gateway.md | Pain points 0.2.x → architectural answers in 0.3.0 |
 
 ### source
 

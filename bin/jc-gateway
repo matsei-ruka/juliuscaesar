@@ -127,13 +127,21 @@ def remove_stale_pid(instance_dir: Path) -> None:
         pid_path(instance_dir).unlink(missing_ok=True)
 
 
-def install_signal_handlers() -> None:
+RELOAD_REQUESTED = False
+
+
+def install_signal_handlers(*, on_reload=None) -> None:
     def _handle(_signum: int, _frame: object) -> None:
         global RUNNING
         RUNNING = False
 
+    def _hup(_signum: int, _frame: object) -> None:
+        global RELOAD_REQUESTED
+        RELOAD_REQUESTED = True
+
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGHUP, _hup)
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -184,7 +192,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     runtime = GatewayRuntime(instance, log_path=log_path(instance), stop_requested=lambda: not RUNNING)
     runtime.start_channels()
     try:
+        global RELOAD_REQUESTED
         while RUNNING:
+            if RELOAD_REQUESTED:
+                RELOAD_REQUESTED = False
+                try:
+                    runtime.reload_config()
+                    log_line(instance, "gateway config reloaded")
+                except Exception as exc:  # noqa: BLE001
+                    log_line(instance, f"reload failed: {exc}")
             if not pid_path(instance).exists():
                 pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
             conn = queue.connect(instance)
@@ -295,6 +311,13 @@ def cmd_tail(args: argparse.Namespace) -> int:
                 print(line, end="")
             else:
                 time.sleep(0.5)
+
+
+def cmd_logs_alias(args: argparse.Namespace) -> int:
+    """Wrapper that selects between filter mode and plain tail."""
+    if args.since or args.cls or args.brain or args.source or args.limit:
+        return cmd_logs_filter(args)
+    return cmd_tail(args)
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
@@ -437,6 +460,89 @@ def cmd_work_once(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_since(value: str) -> float:
+    if not value:
+        return 0.0
+    suffix = value[-1]
+    try:
+        n = int(value[:-1])
+    except ValueError:
+        return 0.0
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    return time.time() - n * multipliers.get(suffix, 60)
+
+
+def cmd_logs_filter(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    path = log_path(instance)
+    if not path.exists():
+        print(f"log does not exist yet: {path}")
+        return 1
+    cutoff = _parse_since(args.since) if args.since else 0.0
+    matched = 0
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = __import__("json").loads(line)
+        except Exception:
+            continue
+        if cutoff:
+            ts = payload.get("ts") or ""
+            try:
+                from datetime import datetime as _dt
+
+                t = _dt.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                if t < cutoff:
+                    continue
+            except Exception:
+                pass
+        if args.cls and str(payload.get("class") or "") != args.cls:
+            continue
+        if args.brain and str(payload.get("brain") or "") != args.brain:
+            continue
+        if args.source and str(payload.get("source") or "") != args.source:
+            continue
+        print(line)
+        matched += 1
+        if args.limit and matched >= args.limit:
+            break
+    return 0
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    from gateway.triage import MetricsRecorder
+
+    recorder = MetricsRecorder(instance)
+    summary = recorder.summary(hours=args.hours)
+    if args.json:
+        print_json(summary)
+        return 0
+    print(f"triage metrics since {summary['since']}")
+    if not summary["by_class"]:
+        print("(no observations)")
+        return 0
+    for row in summary["by_class"]:
+        print(
+            f"  {row['class']:<10} count={row['count']:<5} "
+            f"avg_conf={row['avg_confidence']:.2f} "
+            f"fallbacks={row['fallbacks']} overrides={row['overrides']}"
+        )
+    return 0
+
+
+def cmd_reload(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    pid = read_pid(instance)
+    if not pid_alive(pid):
+        raise SystemExit("gateway daemon not running")
+    os.kill(pid, signal.SIGHUP)
+    print(f"sent SIGHUP to pid {pid}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="jc-gateway")
     p.add_argument("--instance-dir")
@@ -472,10 +578,15 @@ def build_parser() -> argparse.ArgumentParser:
     ptail.add_argument("-f", "--follow", action="store_true")
     ptail.set_defaults(func=cmd_tail)
 
-    plogs = sub.add_parser("logs", help="Alias for tail")
+    plogs = sub.add_parser("logs", help="Filter the JSON gateway log")
     plogs.add_argument("-n", "--lines", type=int, default=80)
     plogs.add_argument("-f", "--follow", action="store_true")
-    plogs.set_defaults(func=cmd_logs)
+    plogs.add_argument("--since", help="Time window e.g. 10m, 2h, 1d (filters JSON lines)")
+    plogs.add_argument("--class", dest="cls", help="Filter by triage class (e.g. analysis)")
+    plogs.add_argument("--brain", help="Filter by brain (e.g. claude:opus-4-7-1m)")
+    plogs.add_argument("--source", help="Filter by source channel")
+    plogs.add_argument("--limit", type=int, default=0, help="Stop after N matches (0=all)")
+    plogs.set_defaults(func=cmd_logs_alias)
 
     pe = sub.add_parser("enqueue", help="Enqueue a gateway event")
     pe.add_argument("content", nargs="?", help="Event content. Omit or use '-' to read stdin.")
@@ -525,6 +636,14 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--lease-seconds", type=int, default=300)
     pw.add_argument("--mode", choices=["echo"], default="echo")
     pw.set_defaults(func=cmd_work_once)
+
+    pmet = sub.add_parser("metrics", help="Print recent triage metrics")
+    pmet.add_argument("--hours", type=int, default=24)
+    pmet.add_argument("--json", action="store_true")
+    pmet.set_defaults(func=cmd_metrics)
+
+    pre = sub.add_parser("reload", help="SIGHUP the running daemon to reload config")
+    pre.set_defaults(func=cmd_reload)
 
     return p
 

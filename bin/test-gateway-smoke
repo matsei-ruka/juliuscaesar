@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# bin/test-gateway-smoke — minimal end-to-end check.
+#
+# Spins up a temporary instance, points the claude adapter at the fake echo
+# brain shipped under tests/gateway/fixtures, enqueues one event, runs the
+# dispatcher loop once via `work-once`, and asserts the response is echoed.
+#
+# Exit 0 on success, 1 on assertion failure.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP="$(mktemp -d -t jc-gateway-smoke-XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+mkdir -p "$TMP/ops" "$TMP/memory/L1"
+touch "$TMP/.jc"
+echo "Smoke test instance" > "$TMP/memory/L1/IDENTITY.md"
+
+cat > "$TMP/ops/gateway.yaml" <<'YAML'
+default_brain: claude
+default_model: null
+gateway:
+  poll_interval_seconds: 1
+  lease_seconds: 60
+  max_retries: 1
+  adapter_timeout_seconds: 15
+triage: none
+channels:
+  telegram:
+    enabled: false
+  jc-events:
+    enabled: false
+  cron:
+    enabled: false
+YAML
+
+# Override the claude adapter with the fake echo brain by symlinking.
+ADAPTER="$ROOT/lib/heartbeat/adapters/claude.sh"
+BACKUP="$(mktemp -t jc-gateway-claude.XXXXXX.sh)"
+cp "$ADAPTER" "$BACKUP"
+restore() {
+    cp "$BACKUP" "$ADAPTER"
+    rm -f "$BACKUP"
+}
+trap 'restore; rm -rf "$TMP"' EXIT
+cp "$ROOT/tests/gateway/fixtures/echo-brain.sh" "$ADAPTER"
+chmod +x "$ADAPTER"
+
+"$ROOT/bin/jc-gateway" --instance-dir "$TMP" init >/dev/null
+"$ROOT/bin/jc-gateway" --instance-dir "$TMP" enqueue --source manual "smoke ping" >/dev/null
+"$ROOT/bin/jc-gateway" --instance-dir "$TMP" work-once >/dev/null
+
+LIST="$("$ROOT/bin/jc-gateway" --instance-dir "$TMP" list)"
+if echo "$LIST" | grep -q "smoke ping" && echo "$LIST" | grep -q "done"; then
+    echo "smoke ok"
+    exit 0
+fi
+echo "smoke FAILED"
+echo "$LIST"
+exit 1

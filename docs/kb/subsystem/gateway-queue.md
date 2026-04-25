@@ -78,4 +78,4 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 
 ## Open questions / known stale
 
-- 2026-04-25: Discord and public webhook channels are still roadmap work.
+- 2026-04-25: Public webhook channel and richer voice integration remain roadmap work. Telegram, Slack Socket Mode, Discord, voice, jc-events, and cron channels ship in 0.3.0.
