@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# jc-upgrade — interactive reconfigurator for an existing JuliusCaesar instance.
+#
+# Walks through every knob in 0.3.0 (channel tokens, default brain, triage
+# backend + model + threshold, per-class routing map, reliability tweaks) and
+# writes/merges `.env`, `ops/gateway.yaml`, `ops/watchdog.conf`. Each prompt
+# pre-fills with the current value (or a sensible default) — pressing Enter
+# keeps it.
+#
+# Usage:
+#   jc upgrade [--instance-dir <path>] [--defaults] [--restart]
+#
+#   --defaults   non-interactive: keep existing values as-is, no prompts
+#   --restart    stop + start gateway daemon at the end (reload otherwise)
+#
+# Idempotent: re-running on a fully configured instance is a no-op modulo
+# whitespace.
+
+set -euo pipefail
+
+INSTANCE_DIR=""
+USE_DEFAULTS=0
+RESTART=0
+GLOBAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --instance-dir)
+            INSTANCE_DIR="$2"
+            GLOBAL_ARGS+=("--instance-dir" "$2")
+            shift 2
+            ;;
+        --instance-dir=*)
+            INSTANCE_DIR="${1#--instance-dir=}"
+            GLOBAL_ARGS+=("$1")
+            shift
+            ;;
+        --defaults)
+            USE_DEFAULTS=1
+            shift
+            ;;
+        --restart)
+            RESTART=1
+            shift
+            ;;
+        -h|--help)
+            sed -n '1,/^set -/{ /^# /p }' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "jc-upgrade: unknown arg: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+# Resolve instance dir: explicit > $JC_INSTANCE_DIR > walk up from cwd.
+if [[ -z "$INSTANCE_DIR" ]]; then
+    INSTANCE_DIR="${JC_INSTANCE_DIR:-}"
+fi
+if [[ -z "$INSTANCE_DIR" ]]; then
+    cur="$(pwd)"
+    for _ in 1 2 3 4 5 6 7 8; do
+        if [[ -e "$cur/.jc" || -d "$cur/memory" ]]; then
+            INSTANCE_DIR="$cur"
+            break
+        fi
+        parent="$(dirname "$cur")"
+        [[ "$parent" == "$cur" ]] && break
+        cur="$parent"
+    done
+fi
+if [[ -z "$INSTANCE_DIR" || ! -d "$INSTANCE_DIR" ]]; then
+    echo "jc-upgrade: instance not found. Use --instance-dir or run from inside an instance." >&2
+    exit 1
+fi
+INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
+
+ENV_FILE="$INSTANCE_DIR/.env"
+GATEWAY_YAML="$INSTANCE_DIR/ops/gateway.yaml"
+WATCHDOG_CONF="$INSTANCE_DIR/ops/watchdog.conf"
+
+mkdir -p "$INSTANCE_DIR/ops"
+
+# --- helpers ---------------------------------------------------------------
+
+prompt() {
+    local label="$1" default="${2:-}" value
+    if (( USE_DEFAULTS )); then printf '%s\n' "$default"; return; fi
+    if [[ -n "$default" ]]; then
+        printf '%s [%s]: ' "$label" "$default" >&2
+    else
+        printf '%s: ' "$label" >&2
+    fi
+    IFS= read -r value || value=""
+    [[ -z "$value" ]] && value="$default"
+    printf '%s\n' "$value"
+}
+
+secret_prompt() {
+    local label="$1" default="${2:-}" value
+    if (( USE_DEFAULTS )); then printf '%s\n' "$default"; return; fi
+    if [[ -n "$default" ]]; then
+        printf '%s [keep existing]: ' "$label" >&2
+    else
+        printf '%s: ' "$label" >&2
+    fi
+    IFS= read -rs value || value=""
+    printf '\n' >&2
+    [[ -z "$value" ]] && value="$default"
+    printf '%s\n' "$value"
+}
+
+yesno() {
+    local label="$1" default="${2:-no}" value
+    if (( USE_DEFAULTS )); then printf '%s\n' "$default"; return; fi
+    while :; do
+        printf '%s [%s]: ' "$label" "$default" >&2
+        IFS= read -r value || value=""
+        value="${value:-$default}"
+        case "$value" in
+            y|Y|yes|YES|Yes) printf 'yes\n'; return ;;
+            n|N|no|NO|No) printf 'no\n'; return ;;
+            *) echo "yes/no please" >&2 ;;
+        esac
+    done
+}
+
+env_value() {
+    local key="$1"
+    [[ -f "$ENV_FILE" ]] || { printf ''; return; }
+    awk -F= -v k="$key" '$1==k {sub(/^[^=]+=/, ""); gsub(/^["'"'"' ]+|["'"'"' ]+$/, ""); print; exit}' "$ENV_FILE"
+}
+
+yaml_value() {
+    # Read top-level scalar from gateway.yaml (string/number, no nesting).
+    local key="$1"
+    [[ -f "$GATEWAY_YAML" ]] || { printf ''; return; }
+    awk -v k="$key" '
+        $0 ~ "^"k":" {
+            sub("^"k":[ \t]*", "", $0)
+            gsub(/^[ \t"'"'"']+|[ \t"'"'"']+$/, "", $0)
+            print
+            exit
+        }
+    ' "$GATEWAY_YAML"
+}
+
+yaml_routing_value() {
+    # Read a single line from triage_routing block: "  code: claude:opus".
+    local class="$1"
+    [[ -f "$GATEWAY_YAML" ]] || { printf ''; return; }
+    awk -v c="$class" '
+        /^triage_routing:/ { in_block=1; next }
+        in_block && /^[^ \t#]/ { in_block=0 }
+        in_block && $0 ~ "[ \t]+"c":" {
+            sub(".*"c":[ \t]*", "", $0)
+            gsub(/^[ \t"'"'"']+|[ \t"'"'"']+$/, "", $0)
+            print
+            exit
+        }
+    ' "$GATEWAY_YAML"
+}
+
+yaml_channel_field() {
+    # yaml_channel_field <channel> <field>  →  value (or empty)
+    local channel="$1" field="$2"
+    [[ -f "$GATEWAY_YAML" ]] || { printf ''; return; }
+    awk -v c="$channel" -v f="$field" '
+        /^channels:/ { in_root=1; next }
+        in_root && /^[^ \t]/ { in_root=0 }
+        in_root && $0 ~ "^  "c":" { in_block=1; next }
+        in_block && $0 ~ "^  [^ ]" { in_block=0 }
+        in_block && $0 ~ "^    "f":" {
+            sub(".*"f":[ \t]*", "", $0)
+            gsub(/^[ \t"'"'"'\[]+|[ \t"'"'"'\]]+$/, "", $0)
+            print
+            exit
+        }
+    ' "$GATEWAY_YAML"
+}
+
+shell_quote() {
+    local v="$1"
+    printf "'"
+    printf '%s' "$v" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+set_env_kv() {
+    # set_env_kv <key> <value>  — overwrite or append, keep file mode 600.
+    local key="$1" value="$2" tmp old_umask
+    [[ -f "$ENV_FILE" ]] || { umask 077; printf '# JuliusCaesar secrets. Do not commit.\n' > "$ENV_FILE"; chmod 600 "$ENV_FILE"; }
+    old_umask=$(umask); umask 077
+    tmp=$(mktemp "$ENV_FILE.tmp.XXXXXX")
+    if grep -q "^${key}=" "$ENV_FILE"; then
+        awk -v k="$key" -v v="$(shell_quote "$value")" \
+            'BEGIN{updated=0} $0 ~ "^"k"=" {print k"="v; updated=1; next} {print} END{if(!updated) print k"="v}' \
+            "$ENV_FILE" > "$tmp"
+    else
+        cp "$ENV_FILE" "$tmp"
+        printf '%s=%s\n' "$key" "$(shell_quote "$value")" >> "$tmp"
+    fi
+    umask "$old_umask"
+    mv "$tmp" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+}
+
+set_watchdog_kv() {
+    local key="$1" value="$2" tmp
+    [[ -f "$WATCHDOG_CONF" ]] || return 0
+    tmp=$(mktemp "$WATCHDOG_CONF.tmp.XXXXXX")
+    if grep -q "^${key}=" "$WATCHDOG_CONF"; then
+        awk -v k="$key" -v v="$value" \
+            '$0 ~ "^"k"=" {print k"="v; next} {print}' "$WATCHDOG_CONF" > "$tmp"
+    else
+        cp "$WATCHDOG_CONF" "$tmp"
+        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    fi
+    mv "$tmp" "$WATCHDOG_CONF"
+}
+
+bool_str() {
+    case "$1" in
+        yes|true|1|on) printf 'true' ;;
+        *) printf 'false' ;;
+    esac
+}
+
+# --- intro -----------------------------------------------------------------
+
+echo "==> jc upgrade"
+echo "    instance: $INSTANCE_DIR"
+echo "    config:   $GATEWAY_YAML"
+echo "    secrets:  $ENV_FILE"
+echo
+
+# --- secrets --------------------------------------------------------------
+
+echo "── Channel credentials"
+existing_telegram_token="$(env_value TELEGRAM_BOT_TOKEN)"
+existing_telegram_chat_env="$(env_value TELEGRAM_CHAT_ID)"
+existing_telegram_chat_yaml="$(yaml_channel_field telegram chat_ids)"
+existing_telegram_chat="${existing_telegram_chat_yaml:-$existing_telegram_chat_env}"
+existing_dashscope="$(env_value DASHSCOPE_API_KEY)"
+existing_slack_app="$(env_value SLACK_APP_TOKEN)"
+existing_slack_bot="$(env_value SLACK_BOT_TOKEN)"
+existing_discord="$(env_value DISCORD_BOT_TOKEN)"
+existing_openrouter="$(env_value OPENROUTER_API_KEY)"
+
+# Preserve channel-enabled flags from existing yaml when re-running upgrade.
+existing_telegram_enabled="$(yaml_channel_field telegram enabled)"
+existing_slack_enabled="$(yaml_channel_field slack enabled)"
+existing_discord_enabled="$(yaml_channel_field discord enabled)"
+existing_voice_enabled="$(yaml_channel_field voice enabled)"
+
+telegram_token="$(secret_prompt "Telegram bot token (Enter to keep)" "$existing_telegram_token")"
+telegram_chat="$(prompt "Telegram chat id" "$existing_telegram_chat")"
+default_slack_yes="no"
+[[ "$existing_slack_enabled" == "true" || -n "$existing_slack_bot" ]] && default_slack_yes="yes"
+slack_enable="$(yesno "Enable Slack channel?" "$default_slack_yes")"
+if [[ "$slack_enable" == "yes" ]]; then
+    slack_app_token="$(secret_prompt "Slack app-level token (xapp-…)" "$existing_slack_app")"
+    slack_bot_token="$(secret_prompt "Slack bot token (xoxb-…)" "$existing_slack_bot")"
+else
+    slack_app_token="$existing_slack_app"
+    slack_bot_token="$existing_slack_bot"
+fi
+default_discord_yes="no"
+[[ "$existing_discord_enabled" == "true" || -n "$existing_discord" ]] && default_discord_yes="yes"
+discord_enable="$(yesno "Enable Discord channel?" "$default_discord_yes")"
+if [[ "$discord_enable" == "yes" ]]; then
+    discord_token="$(secret_prompt "Discord bot token" "$existing_discord")"
+else
+    discord_token="$existing_discord"
+fi
+default_voice_yes="$([[ "$existing_voice_enabled" == "true" ]] && echo yes || echo no)"
+voice_enable="$(yesno "Enable voice (paired with Telegram, DashScope ASR/TTS)?" "$default_voice_yes")"
+dashscope="$(secret_prompt "DashScope API key (voice + workers)" "$existing_dashscope")"
+
+# --- gateway brain --------------------------------------------------------
+
+echo
+echo "── Gateway brain"
+existing_default_brain="$(yaml_value default_brain)"
+default_brain="$(prompt "Default brain (claude|codex|gemini|opencode|aider)" "${existing_default_brain:-claude}")"
+
+# --- triage ---------------------------------------------------------------
+
+echo
+echo "── Triage"
+existing_triage="$(yaml_value triage)"
+triage_backend="$(prompt "Triage backend (none|openrouter|ollama|claude-channel)" "${existing_triage:-openrouter}")"
+
+if [[ "$triage_backend" == "openrouter" ]]; then
+    existing_or_model="$(yaml_value openrouter_model)"
+    openrouter_model="$(prompt "OpenRouter model" "${existing_or_model:-meta-llama/llama-3.1-8b-instruct}")"
+    openrouter_key="$(secret_prompt "OPENROUTER_API_KEY" "$existing_openrouter")"
+elif [[ "$triage_backend" == "ollama" ]]; then
+    existing_ol_model="$(yaml_value ollama_model)"
+    existing_ol_host="$(yaml_value ollama_host)"
+    ollama_model="$(prompt "Ollama model" "${existing_ol_model:-phi3:mini}")"
+    ollama_host="$(prompt "Ollama host" "${existing_ol_host:-http://localhost:11434}")"
+elif [[ "$triage_backend" == "claude-channel" ]]; then
+    existing_port="$(yaml_value claude_triage_port)"
+    claude_triage_port="$(prompt "jc-triage HTTP port" "${existing_port:-9876}")"
+fi
+
+existing_threshold="$(yaml_value triage_confidence_threshold)"
+threshold="$(prompt "Confidence threshold for accepting triage (0..1)" "${existing_threshold:-0.7}")"
+existing_fallback="$(yaml_value default_fallback_brain)"
+fallback="$(prompt "Fallback brain when below threshold" "${existing_fallback:-claude:sonnet}")"
+existing_sticky="$(yaml_value sticky_brain_idle_timeout_seconds)"
+sticky="$(prompt "Sticky brain idle seconds (0=triage every msg, slash /brain still pins)" "${existing_sticky:-0}")"
+
+echo
+echo "── Per-class routing (Enter to keep)"
+ex_smalltalk="$(yaml_routing_value smalltalk)"
+ex_quick="$(yaml_routing_value quick)"
+ex_analysis="$(yaml_routing_value analysis)"
+ex_code="$(yaml_routing_value code)"
+ex_image="$(yaml_routing_value image)"
+ex_voice_class="$(yaml_routing_value voice)"
+ex_system="$(yaml_routing_value system)"
+r_smalltalk="$(prompt "smalltalk" "${ex_smalltalk:-claude:haiku}")"
+r_quick="$(prompt "quick" "${ex_quick:-claude:sonnet}")"
+r_analysis="$(prompt "analysis" "${ex_analysis:-claude:opus}")"
+r_code="$(prompt "code" "${ex_code:-claude:sonnet}")"
+r_image="$(prompt "image" "${ex_image:-claude:sonnet}")"
+r_voice="$(prompt "voice" "${ex_voice_class:-claude:sonnet}")"
+r_system="$(prompt "system" "${ex_system:-claude:haiku}")"
+
+# --- write .env ----------------------------------------------------------
+
+[[ -n "$telegram_token" ]] && set_env_kv TELEGRAM_BOT_TOKEN "$telegram_token"
+[[ -n "$telegram_chat" ]] && set_env_kv TELEGRAM_CHAT_ID "$telegram_chat"
+[[ -n "$dashscope" ]] && set_env_kv DASHSCOPE_API_KEY "$dashscope"
+[[ "$slack_enable" == "yes" ]] && {
+    [[ -n "$slack_app_token" ]] && set_env_kv SLACK_APP_TOKEN "$slack_app_token"
+    [[ -n "$slack_bot_token" ]] && set_env_kv SLACK_BOT_TOKEN "$slack_bot_token"
+}
+[[ "$discord_enable" == "yes" && -n "$discord_token" ]] && set_env_kv DISCORD_BOT_TOKEN "$discord_token"
+[[ "$triage_backend" == "openrouter" && -n "$openrouter_key" ]] && set_env_kv OPENROUTER_API_KEY "$openrouter_key"
+
+# --- write gateway.yaml --------------------------------------------------
+
+# Telegram enabled if currently enabled in yaml OR a token is set.
+telegram_enabled="false"
+if [[ "$existing_telegram_enabled" == "true" || -n "$telegram_token" ]]; then
+    telegram_enabled="true"
+fi
+slack_enabled_str="$(bool_str "$slack_enable")"
+discord_enabled_str="$(bool_str "$discord_enable")"
+voice_enabled_str="$(bool_str "$voice_enable")"
+
+# Backup existing gateway.yaml.
+if [[ -f "$GATEWAY_YAML" ]]; then
+    cp "$GATEWAY_YAML" "$GATEWAY_YAML.bak.$(date +%Y%m%d-%H%M%S)"
+fi
+
+# Telegram chat_ids list — single value when present.
+telegram_chats="[]"
+[[ -n "$telegram_chat" ]] && telegram_chats="[$telegram_chat]"
+
+cat > "$GATEWAY_YAML" <<YAML
+# JuliusCaesar gateway runtime config. Secrets live in .env.
+default_brain: $default_brain
+default_model: null
+gateway:
+  poll_interval_seconds: 1
+  lease_seconds: 300
+  max_retries: 3
+  adapter_timeout_seconds: 300
+triage: $triage_backend
+triage_confidence_threshold: $threshold
+default_fallback_brain: $fallback
+sticky_brain_idle_timeout_seconds: $sticky
+triage_routing:
+  smalltalk: $r_smalltalk
+  quick:     $r_quick
+  analysis:  $r_analysis
+  code:      $r_code
+  image:     $r_image
+  voice:     $r_voice
+  system:    $r_system
+YAML
+
+if [[ "$triage_backend" == "openrouter" ]]; then
+    cat >> "$GATEWAY_YAML" <<YAML
+openrouter_model: $openrouter_model
+openrouter_api_key_env: OPENROUTER_API_KEY
+openrouter_timeout_seconds: 5
+YAML
+elif [[ "$triage_backend" == "ollama" ]]; then
+    cat >> "$GATEWAY_YAML" <<YAML
+ollama_model: $ollama_model
+ollama_host: $ollama_host
+ollama_timeout_seconds: 5
+YAML
+elif [[ "$triage_backend" == "claude-channel" ]]; then
+    cat >> "$GATEWAY_YAML" <<YAML
+claude_triage_port: ${claude_triage_port:-9876}
+claude_triage_screen: jc-triage
+claude_triage_model: claude-haiku-4-5
+YAML
+fi
+
+cat >> "$GATEWAY_YAML" <<YAML
+channels:
+  telegram:
+    enabled: $telegram_enabled
+    token_env: TELEGRAM_BOT_TOKEN
+    chat_ids: $telegram_chats
+  slack:
+    enabled: $slack_enabled_str
+    app_token_env: SLACK_APP_TOKEN
+    bot_token_env: SLACK_BOT_TOKEN
+  discord:
+    enabled: $discord_enabled_str
+    bot_token_env: DISCORD_BOT_TOKEN
+  voice:
+    enabled: $voice_enabled_str
+    paired_with: telegram
+    asr_provider: dashscope
+    tts_provider: dashscope
+  jc-events:
+    enabled: true
+    watch_dir: state/events
+    poll_interval_seconds: 2
+  cron:
+    enabled: true
+    watch_dir: state/cron
+    poll_interval_seconds: 2
+YAML
+
+# --- watchdog runtime mode -----------------------------------------------
+
+if [[ -f "$WATCHDOG_CONF" ]]; then
+    cur_mode=$(awk -F= '$1=="RUNTIME_MODE" {gsub(/^["'"'"' ]+|["'"'"' ]+$/, "", $2); print $2; exit}' "$WATCHDOG_CONF" 2>/dev/null || true)
+    if [[ "$cur_mode" != "gateway" ]]; then
+        flip="$(yesno "Flip watchdog RUNTIME_MODE to gateway?" "yes")"
+        [[ "$flip" == "yes" ]] && set_watchdog_kv RUNTIME_MODE gateway
+    fi
+fi
+
+# --- post-write verification ---------------------------------------------
+
+echo
+echo "==> wrote $ENV_FILE (mode 600)"
+echo "==> wrote $GATEWAY_YAML"
+echo
+echo "Run 'jc doctor --instance-dir $INSTANCE_DIR' to verify."
+
+if command -v jc-gateway >/dev/null 2>&1; then
+    if (( RESTART )); then
+        jc-gateway --instance-dir "$INSTANCE_DIR" stop 2>/dev/null || true
+        jc-gateway --instance-dir "$INSTANCE_DIR" start
+        echo "==> gateway restarted"
+    else
+        jc-gateway --instance-dir "$INSTANCE_DIR" reload 2>/dev/null && echo "==> gateway reloaded (SIGHUP)" \
+            || echo "(gateway daemon not running — start with: jc gateway start)"
+    fi
+fi
+
+exit 0
