@@ -15,7 +15,9 @@ helper used by the runtime when `event.source == "voice"`.
 
 from __future__ import annotations
 
+import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -85,12 +87,43 @@ class VoiceChannel:
         return ""
 
     def _synthesize(self, text: str, meta: dict[str, Any]) -> str | None:
-        if self.tts_provider == "dashscope":
-            from importlib import import_module
+        """Render `text` as Rachel-voice OGG/Opus.
 
-            mod = import_module("voice.dashscope_tts") if (VOICE_ROOT / "dashscope_tts.py").exists() else None
-            if mod is None or not hasattr(mod, "speak"):
-                return None
-            out = mod.speak(text, instance_dir=str(self.instance_dir), meta=meta)
-            return str(out) if out else None
-        return None
+        Loads voice/references/voice.json from the instance, calls
+        voice.synth.synthesize, returns the OGG path. Returns None on
+        any missing config / library error so the runtime can fall back
+        to text-only delivery.
+        """
+        if self.tts_provider != "dashscope":
+            return None
+
+        ref_path = self.instance_dir / "voice" / "references" / "voice.json"
+        if not ref_path.exists():
+            self.log("voice tts skipped: voice/references/voice.json missing")
+            return None
+        try:
+            ref = json.loads(ref_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self.log(f"voice tts skipped: bad voice.json: {exc}")
+            return None
+
+        voice_id = ref.get("voice")
+        target_model = ref.get("target_model")
+        if not voice_id or not target_model:
+            self.log("voice tts skipped: voice.json missing voice or target_model")
+            return None
+
+        out_dir = self.instance_dir / "state" / "voice" / "outbound"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{uuid.uuid4().hex}.ogg"
+
+        from importlib import import_module
+
+        synth = import_module("voice.synth")
+        result = synth.synthesize(
+            text,
+            out_path,
+            voice_id=str(voice_id),
+            target_model=str(target_model),
+        )
+        return str(result) if result else None

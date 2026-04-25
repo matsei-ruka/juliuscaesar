@@ -328,6 +328,8 @@ class GatewayRuntime:
 
         response = result.response or "(no response)"
         meta.setdefault("delivery_channel", channel)
+        if meta.get("was_voice"):
+            self._render_voice_reply(response, meta)
         deliver(
             instance_dir=self.instance_dir,
             source=channel,
@@ -337,6 +339,28 @@ class GatewayRuntime:
             log=self.log,
         )
         return response
+
+    def _render_voice_reply(self, response: str, meta: dict[str, Any]) -> None:
+        """Synthesize Rachel-voice OGG for `response` and stash the path in `meta`.
+
+        Best-effort: any failure (missing voice config, TTS error, etc.) leaves
+        `meta` unchanged so delivery falls back to text.
+        """
+        from .channels.voice import VoiceChannel
+
+        cfg = self.config.channels.get("voice")
+        if cfg is None:
+            from .config import ChannelConfig
+
+            cfg = ChannelConfig()
+        try:
+            voice_channel = VoiceChannel(self.instance_dir, cfg, self.log)
+            ogg_path = voice_channel.send(response, meta)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"voice render error: {exc}")
+            return
+        if ogg_path:
+            meta["synthesized_audio_path"] = ogg_path
 
     # --- override + slash plumbing ----------------------------------------
 

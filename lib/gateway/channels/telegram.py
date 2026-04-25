@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import mimetypes
 import shutil
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -151,6 +154,12 @@ class TelegramChannel:
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
         if not self.ready() or not response.strip():
             return None
+        ogg_path = meta.get("synthesized_audio_path")
+        if ogg_path:
+            try:
+                return self.send_voice(str(ogg_path), meta)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"telegram sendVoice failed, falling back to text: {exc}")
         chat_id = str(
             meta.get("chat_id")
             or meta.get("notify_chat_id")
@@ -175,3 +184,73 @@ class TelegramChannel:
             raise RuntimeError(f"telegram send failed: {data}")
         result = data.get("result") or {}
         return str(result.get("message_id")) if result.get("message_id") is not None else None
+
+    def send_voice(self, ogg_path: str, meta: dict[str, Any]) -> str | None:
+        """Upload an OGG/Opus file and post it as a Telegram voice message."""
+        if not self.ready():
+            return None
+        chat_id = str(
+            meta.get("chat_id")
+            or meta.get("notify_chat_id")
+            or env_value(self.instance_dir, "TELEGRAM_CHAT_ID")
+            or ""
+        )
+        if not chat_id:
+            return None
+        path = Path(ogg_path)
+        if not path.exists():
+            raise RuntimeError(f"telegram sendVoice missing file: {ogg_path}")
+
+        fields: list[tuple[str, str]] = [("chat_id", chat_id)]
+        if meta.get("message_thread_id"):
+            fields.append(("message_thread_id", str(meta["message_thread_id"])))
+        files: list[tuple[str, str, bytes, str]] = [
+            ("voice", path.name, path.read_bytes(), "audio/ogg"),
+        ]
+        body, content_type = _encode_multipart(fields, files)
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/sendVoice",
+            data=body,
+            headers={"Content-Type": content_type},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw) if raw else {}
+        if not data.get("ok"):
+            raise RuntimeError(f"telegram sendVoice failed: {data}")
+        result = data.get("result") or {}
+        return str(result.get("message_id")) if result.get("message_id") is not None else None
+
+
+def _encode_multipart(
+    fields: list[tuple[str, str]],
+    files: list[tuple[str, str, bytes, str]],
+) -> tuple[bytes, str]:
+    """Build a `multipart/form-data` body for urllib.
+
+    `fields` is a list of (name, value) string pairs.
+    `files` is a list of (name, filename, data, content_type) tuples.
+    Returns (body_bytes, content_type_header).
+    """
+    boundary = f"----jcboundary{uuid.uuid4().hex}"
+    crlf = b"\r\n"
+    parts: list[bytes] = []
+    for name, value in fields:
+        parts.append(f"--{boundary}".encode("utf-8"))
+        parts.append(f'Content-Disposition: form-data; name="{name}"'.encode("utf-8"))
+        parts.append(b"")
+        parts.append(value.encode("utf-8"))
+    for name, filename, data, content_type in files:
+        parts.append(f"--{boundary}".encode("utf-8"))
+        parts.append(
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"'.encode(
+                "utf-8"
+            )
+        )
+        parts.append(f"Content-Type: {content_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'}".encode("utf-8"))
+        parts.append(b"")
+        parts.append(data)
+    parts.append(f"--{boundary}--".encode("utf-8"))
+    parts.append(b"")
+    body = crlf.join(parts)
+    return body, f"multipart/form-data; boundary={boundary}"

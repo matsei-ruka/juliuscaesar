@@ -17,6 +17,7 @@ from gateway.channels import telegram as telegram_module  # noqa: E402
 from gateway.channels.cron import CronChannel  # noqa: E402
 from gateway.channels.jc_events import JcEventsChannel  # noqa: E402
 from gateway.channels.telegram import TelegramChannel  # noqa: E402
+from gateway.channels.voice import VoiceChannel  # noqa: E402
 from gateway.config import ChannelConfig, ConfigError, load_config, render_default_config  # noqa: E402
 
 
@@ -243,6 +244,128 @@ class TelegramVoiceIngestionTests(unittest.TestCase):
             self.assertEqual(captured[0]["content"], "plain text")
             self.assertNotIn("was_voice", captured[0]["meta"])
             self.assertNotIn("audio_path", captured[0]["meta"])
+
+
+class VoiceChannelSynthTests(unittest.TestCase):
+    """Voice TTS adapter: load voice.json + call voice.synth.synthesize."""
+
+    def test_voice_send_returns_path_on_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ref_dir = instance / "voice" / "references"
+            ref_dir.mkdir(parents=True)
+            (ref_dir / "voice.json").write_text(
+                json.dumps(
+                    {
+                        "voice": "qwen-tts-vc-rachel-test",
+                        "target_model": "qwen3-tts-vc-realtime-test",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            captured: dict[str, Any] = {}
+
+            def fake_synthesize(text, out_path, *, voice_id, target_model, **_):
+                captured["text"] = text
+                captured["voice_id"] = voice_id
+                captured["target_model"] = target_model
+                # Touch the file to mimic real synth writing OGG bytes.
+                Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(out_path).write_bytes(b"OggS\x00\x00")
+                return Path(out_path)
+
+            fake_module = type(sys)("voice.synth")
+            fake_module.synthesize = fake_synthesize
+            saved = sys.modules.get("voice.synth")
+            sys.modules["voice.synth"] = fake_module
+            try:
+                channel = VoiceChannel(instance, ChannelConfig(enabled=True), _silent_log)
+                result = channel.send("hello luca", {"chat_id": "123"})
+            finally:
+                if saved is not None:
+                    sys.modules["voice.synth"] = saved
+                else:
+                    sys.modules.pop("voice.synth", None)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(Path(result).exists())
+            self.assertTrue(Path(result).is_relative_to(instance / "state" / "voice" / "outbound"))
+            self.assertEqual(captured["text"], "hello luca")
+            self.assertEqual(captured["voice_id"], "qwen-tts-vc-rachel-test")
+            self.assertEqual(captured["target_model"], "qwen3-tts-vc-realtime-test")
+
+    def test_voice_send_returns_none_on_missing_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)  # no voice/references/voice.json
+            channel = VoiceChannel(instance, ChannelConfig(enabled=True), _silent_log)
+            self.assertIsNone(channel.send("hello", {"chat_id": "123"}))
+
+
+class TelegramSendVoiceTests(unittest.TestCase):
+    """TelegramChannel.send_voice: multipart upload + message_id parsing."""
+
+    def test_telegram_send_voice_uploads_and_returns_message_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ogg = instance / "out.ogg"
+            ogg.write_bytes(b"OggS\x00\x00fakeopus")
+
+            cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+            channel = TelegramChannel(instance, cfg, _silent_log)
+            channel.token = "test-token"
+
+            captured: dict[str, Any] = {}
+
+            class FakeResp:
+                def __init__(self, payload: bytes):
+                    self._buf = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self, n=-1):
+                    if n is None or n < 0:
+                        out, self._buf = self._buf, b""
+                        return out
+                    out, self._buf = self._buf[:n], self._buf[n:]
+                    return out
+
+            def fake_urlopen(req, timeout=30):
+                captured["url"] = req.full_url
+                captured["headers"] = dict(req.headers)
+                captured["body"] = req.data
+                payload = json.dumps(
+                    {"ok": True, "result": {"message_id": 4906}}
+                ).encode("utf-8")
+                return FakeResp(payload)
+
+            orig_urlopen = telegram_module.urllib.request.urlopen
+            telegram_module.urllib.request.urlopen = fake_urlopen
+            try:
+                msg_id = channel.send_voice(
+                    str(ogg),
+                    {"chat_id": "28547271", "message_thread_id": 7},
+                )
+            finally:
+                telegram_module.urllib.request.urlopen = orig_urlopen
+
+            self.assertEqual(msg_id, "4906")
+            self.assertIn("/sendVoice", captured["url"])
+            content_type = captured["headers"].get("Content-type") or captured["headers"].get(
+                "Content-Type"
+            )
+            self.assertTrue(content_type.startswith("multipart/form-data"))
+            body = captured["body"]
+            self.assertIn(b'name="chat_id"', body)
+            self.assertIn(b"28547271", body)
+            self.assertIn(b'name="message_thread_id"', body)
+            self.assertIn(b'name="voice"', body)
+            self.assertIn(b'filename="out.ogg"', body)
+            self.assertIn(b"OggS\x00\x00fakeopus", body)
 
 
 class ConfigWebRejectionTests(unittest.TestCase):
