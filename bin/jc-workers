@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -334,6 +335,162 @@ def _send_notification(instance: Path, worker: Worker) -> None:
         pass
 
 
+# --- session id capture ------------------------------------------------------
+
+
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _parse_iso(ts: str) -> Optional[float]:
+    """Parse an ISO-ish timestamp to a UTC epoch seconds float, or None."""
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional[str]:
+    """Best-effort capture of the brain-native session id created during this run.
+
+    Returns the session id string for `--resume`, or None on any failure.
+    Never raises — a failed capture must not flip the worker to failed.
+    """
+    try:
+        t0 = _parse_iso(started_at)
+        if t0 is None:
+            return None
+
+        if brain == "claude":
+            # Claude project slug: replace `/` and `_` with `-`, keep leading dash.
+            # e.g. /home/lucamattei/rachel_zane → -home-lucamattei-rachel-zane
+            slug = str(instance).replace("/", "-").replace("_", "-")
+            proj_dir = Path.home() / ".claude" / "projects" / slug
+            if not proj_dir.is_dir():
+                return None
+            best = None
+            best_delta: Optional[float] = None
+            for f in proj_dir.glob("*.jsonl"):
+                try:
+                    mtime = f.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime < t0:
+                    continue
+                delta = mtime - t0
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best = f
+            return best.stem if best else None
+
+        if brain == "gemini":
+            try:
+                proc = subprocess.run(
+                    ["gemini", "--list-sessions", "--format", "json"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return None
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return None
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return None
+            sessions = data if isinstance(data, list) else data.get("sessions", [])
+            best = None
+            best_delta = None
+            for s in sessions:
+                if not isinstance(s, dict):
+                    continue
+                ts = s.get("created_at") or s.get("started_at") or s.get("start")
+                st = _parse_iso(ts) if isinstance(ts, str) else None
+                if st is None:
+                    continue
+                delta = abs(st - t0)
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best = s
+            if not best:
+                return None
+            sid = best.get("id") or best.get("session_id") or best.get("index")
+            return str(sid) if sid is not None else None
+
+        if brain == "codex":
+            codex_dir = Path.home() / ".codex"
+            if not codex_dir.is_dir():
+                return None
+            sessions_dir = codex_dir / "sessions"
+            search_root = sessions_dir if sessions_dir.is_dir() else codex_dir
+            best = None
+            best_delta = None
+            for f in search_root.rglob("*.jsonl"):
+                try:
+                    mtime = f.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime < t0:
+                    continue
+                delta = mtime - t0
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best = f
+            if not best:
+                return None
+            m = _UUID_RE.search(best.stem)
+            return m.group(0) if m else best.stem
+
+        if brain == "opencode":
+            try:
+                proc = subprocess.run(
+                    ["opencode", "session", "list", "--format", "json"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return None
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return None
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return None
+            sessions = data if isinstance(data, list) else data.get("sessions", [])
+            best = None
+            best_delta = None
+            for s in sessions:
+                if not isinstance(s, dict):
+                    continue
+                ts = s.get("created_at") or s.get("started_at") or s.get("start")
+                st = _parse_iso(ts) if isinstance(ts, str) else None
+                if st is None:
+                    continue
+                delta = abs(st - t0)
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best = s
+            if not best:
+                return None
+            sid = best.get("id") or best.get("session_id")
+            return str(sid) if sid is not None else None
+
+        return None
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"warning: session id capture failed for {brain}: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
 # --- _run (detached runner) --------------------------------------------------
 
 
@@ -472,6 +629,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
+    # Named workers: try to capture brain-native session id so the next
+    # spawn with the same name can --resume. Best-effort, never fatal.
+    if worker is not None and worker.name:
+        sid = _capture_session_id(
+            worker.brain, instance, worker.started_at or _now_iso()
+        )
+        if sid:
+            conn2 = connect(instance)
+            try:
+                conn2.execute(
+                    "UPDATE workers SET session_id=? WHERE id=?",
+                    (sid, worker_id),
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+            worker.session_id = sid
+
     if worker is not None:
         _send_notification(instance, worker)
     return 0
@@ -587,6 +762,44 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(body[:2000])
         if len(body) > 2000:
             print(f"... ({len(body) - 2000} more chars)")
+    return 0
+
+
+# --- history -----------------------------------------------------------------
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = connect(instance)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM workers WHERE name=? ORDER BY started_at DESC",
+            (args.name,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    workers = [Worker.from_row(r) for r in rows]
+    if not workers:
+        print(f"(no workers with name '{args.name}')")
+        return 0
+
+    def _trunc(s: str, width: int) -> str:
+        return s if len(s) <= width else s[: width - 1] + "…"
+
+    print(
+        f"{'ID':>6}  {'STATUS':<10}  {'TOPIC':<20}  {'BRAIN':<8}  "
+        f"{'STARTED':<19}  {'SESSION':<8}"
+    )
+    print("-" * 85)
+    for w in workers:
+        topic = _trunc(w.topic, 20)
+        started = (w.started_at or "")[:19]
+        sess = (w.session_id or "-")[:8]
+        print(
+            f"{w.id:>6}  {w.status:<10}  {topic:<20}  {w.brain:<8}  "
+            f"{started:<19}  {sess:<8}"
+        )
     return 0
 
 
@@ -828,6 +1041,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp = subs.add_parser("reconcile",
                          help="mark stale 'running' rows as failed if pid is dead")
 
+    hp = subs.add_parser("history",
+                         help="all runs for a named worker, newest first")
+    hp.add_argument("--name", required=True, help="named worker slug")
+
     return p
 
 
@@ -840,6 +1057,7 @@ HANDLERS = {
     "cancel": cmd_cancel,
     "gc": cmd_gc,
     "reconcile": cmd_reconcile,
+    "history": cmd_history,
 }
 
 
