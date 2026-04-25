@@ -269,6 +269,27 @@ class TelegramChannel:
         ident = ff.get("username") or ff.get("title") or ff.get("id") or "-"
         self.log(f"telegram forward update_id={update_id} from={ident}")
 
+    def send_typing(
+        self,
+        chat_id: str,
+        message_thread_id: int | None = None,
+    ) -> None:
+        """POST `sendChatAction` with `action=typing`. Best-effort; no return.
+
+        Telegram displays the indicator for ~5s, so callers refresh on a
+        ~4s cadence while a long-running operation is in flight.
+        """
+        if not self.ready() or not chat_id:
+            return
+        payload: dict[str, Any] = {"chat_id": str(chat_id), "action": "typing"}
+        if message_thread_id:
+            payload["message_thread_id"] = message_thread_id
+        http_json(
+            f"https://api.telegram.org/bot{self.token}/sendChatAction",
+            data=payload,
+            timeout=10,
+        )
+
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
         if not self.ready() or not response.strip():
             return None

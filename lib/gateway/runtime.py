@@ -12,10 +12,54 @@ from typing import Any, Callable
 from . import overrides, queue, router, sessions
 from .brains import invoke_brain
 from .channels import build_enabled_channels, deliver
-from .config import GatewayConfig, load_config
+from .channels.telegram import TelegramChannel
+from .config import ChannelConfig, GatewayConfig, load_config
 from .logging_setup import configure_logger
 from .triage import MetricsRecorder, TriageBackend, TriageCache, build_backend
 from .triage.base import TriageResult
+
+
+def typing_loop(
+    send_typing: Callable[[str, int | None], None],
+    stop_event: threading.Event,
+    *,
+    chat_id: str,
+    message_thread_id: int | None = None,
+    max_seconds: float = 60.0,
+    interval: float = 4.0,
+    monotonic: Callable[[], float] | None = None,
+    wait: Callable[[float], bool] | None = None,
+) -> None:
+    """Drive a typing indicator until `stop_event` is set or `max_seconds` elapse.
+
+    Calls `send_typing` once immediately, then again every `interval` seconds.
+    Telegram's typing animation expires after ~5 s, so the default cadence
+    keeps the indicator visible without spamming the API.
+
+    `monotonic` and `wait` are injected for tests; production uses the real
+    clock and the `stop_event.wait` blocking call.
+    """
+    if monotonic is None:
+        monotonic = time.monotonic
+    if wait is None:
+        wait = stop_event.wait
+
+    try:
+        send_typing(chat_id, message_thread_id)
+    except Exception:  # noqa: BLE001
+        pass
+    deadline = monotonic() + max_seconds
+    while not stop_event.is_set():
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
+        wait_for = min(interval, remaining)
+        if wait(wait_for):
+            break
+        try:
+            send_typing(chat_id, message_thread_id)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def decode_meta(event: queue.Event) -> dict[str, Any]:
@@ -315,16 +359,20 @@ class GatewayRuntime:
 
         resume_session = self._resume_id(channel, event.conversation_id, brain)
 
-        result = invoke_brain(
-            instance_dir=self.instance_dir,
-            event=event,
-            brain=brain,
-            model=model,
-            resume_session=resume_session,
-            timeout_seconds=self.config.adapter_timeout_seconds,
-            log_path=self.log_path,
-            config=self.config,
-        )
+        typing_stop = self._start_typing(channel, meta)
+        try:
+            result = invoke_brain(
+                instance_dir=self.instance_dir,
+                event=event,
+                brain=brain,
+                model=model,
+                resume_session=resume_session,
+                timeout_seconds=self.config.adapter_timeout_seconds,
+                log_path=self.log_path,
+                config=self.config,
+            )
+        finally:
+            typing_stop.set()
 
         if result.session_id:
             self._record_session(channel, event.conversation_id, brain, result.session_id)
@@ -347,6 +395,45 @@ class GatewayRuntime:
             log=self.log,
         )
         return response
+
+    def _start_typing(self, channel: str, meta: dict[str, Any]) -> threading.Event:
+        """Spawn a typing-indicator daemon for telegram channels.
+
+        Returns a `threading.Event` the caller MUST set once the brain has
+        finished, even on error. Returns an already-stopped event when typing
+        is unavailable (non-telegram channel, no chat_id, missing token, etc.)
+        so the caller never has to special-case the failure path.
+        """
+        stop = threading.Event()
+        is_telegram = channel == "telegram" or meta.get("delivery_channel") == "telegram"
+        if not is_telegram:
+            return stop
+        chat_id = meta.get("chat_id") or meta.get("notify_chat_id")
+        if not chat_id:
+            return stop
+        cfg = self.config.channels.get("telegram") or ChannelConfig()
+        try:
+            telegram_channel = TelegramChannel(self.instance_dir, cfg, self.log)
+        except Exception:  # noqa: BLE001
+            return stop
+        if not telegram_channel.ready():
+            return stop
+        thread_id = meta.get("message_thread_id")
+
+        def loop() -> None:
+            try:
+                typing_loop(
+                    telegram_channel.send_typing,
+                    stop,
+                    chat_id=str(chat_id),
+                    message_thread_id=thread_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        thread = threading.Thread(target=loop, daemon=True, name="gateway-typing")
+        thread.start()
+        return stop
 
     def _select_vision_brain(self) -> str | None:
         """Return the first vision-capable brain whose adapter validates.
