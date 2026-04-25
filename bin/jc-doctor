@@ -10,6 +10,14 @@
 set -uo pipefail
 
 FRAMEWORK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+VENV_PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar/venv/bin/python"
+if [[ -x "${JULIUSCAESAR_PYTHON:-}" ]]; then
+    JC_PYTHON="$JULIUSCAESAR_PYTHON"
+elif [[ -x "$VENV_PYTHON" ]]; then
+    JC_PYTHON="$VENV_PYTHON"
+else
+    JC_PYTHON="$(command -v python3 || true)"
+fi
 
 # --- Colors ---
 if [[ -t 1 ]]; then
@@ -174,7 +182,7 @@ for b in gemini opencode codex; do
     fi
 done
 
-if python3 - <<'PY' >/dev/null 2>&1
+if "$JC_PYTHON" - <<'PY' >/dev/null 2>&1
 import websocket
 PY
 then
@@ -242,7 +250,7 @@ if [[ -f "$INSTANCE_DIR/heartbeat/tasks.yaml" ]]; then
     ok "heartbeat/tasks.yaml: $TASK_COUNT task(s) defined"
 
     # Validate destinations if the block is present
-    DEST_CHECK=$(python3 - "$INSTANCE_DIR/heartbeat/tasks.yaml" <<'PY' 2>&1
+    DEST_CHECK=$("$JC_PYTHON" - "$INSTANCE_DIR/heartbeat/tasks.yaml" <<'PY' 2>&1
 import sys
 try:
     import yaml
@@ -320,7 +328,7 @@ fi
 # Voice
 if [[ -f "$INSTANCE_DIR/voice/references/voice.json" ]]; then
     if command -v python3 >/dev/null 2>&1; then
-        VOICE_ID=$(python3 -c "import json; d=json.load(open('$INSTANCE_DIR/voice/references/voice.json')); print(d.get('voice', '<malformed>'))" 2>/dev/null || echo '<unreadable>')
+        VOICE_ID=$("$JC_PYTHON" -c "import json; d=json.load(open('$INSTANCE_DIR/voice/references/voice.json')); print(d.get('voice', '<malformed>'))" 2>/dev/null || echo '<unreadable>')
         ok "voice enrolled: $VOICE_ID"
     else
         ok "voice enrolled (couldn't parse without python3)"
@@ -360,7 +368,7 @@ else
     if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         TG_RESP=$(curl -sS --max-time 5 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || echo '')
         if echo "$TG_RESP" | grep -q '"ok":true'; then
-            BOT_NAME=$(echo "$TG_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"].get("username","?"))' 2>/dev/null || echo '?')
+            BOT_NAME=$(echo "$TG_RESP" | "$JC_PYTHON" -c 'import sys,json; print(json.load(sys.stdin)["result"].get("username","?"))' 2>/dev/null || echo '?')
             ok "TELEGRAM_BOT_TOKEN valid (bot: @$BOT_NAME)"
         else
             fail "TELEGRAM_BOT_TOKEN set but getMe failed"
@@ -477,7 +485,7 @@ section "Gateway"
 GATEWAY_CONFIG="$INSTANCE_DIR/ops/gateway.yaml"
 if [[ -f "$GATEWAY_CONFIG" ]]; then
     ok "gateway config present: $GATEWAY_CONFIG"
-    GATEWAY_CONFIG_CHECK=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$INSTANCE_DIR" <<'PY' 2>&1
+    GATEWAY_CONFIG_CHECK=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
 from pathlib import Path
 import sys
 from gateway.config import load_config, SUPPORTED_BRAINS
@@ -504,7 +512,7 @@ PY
 else
     if [[ "$FIX" == 1 ]]; then
         mkdir -p "$INSTANCE_DIR/ops"
-        PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$INSTANCE_DIR" <<'PY'
+        PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY'
 from pathlib import Path
 import sys
 from gateway.config import render_default_config
@@ -522,7 +530,7 @@ GATEWAY_DB="$INSTANCE_DIR/state/gateway/queue.db"
 if [[ -f "$GATEWAY_DB" ]]; then
     SIZE=$(du -h "$GATEWAY_DB" | awk '{print $1}')
     ok "gateway queue present: $SIZE"
-    GATEWAY_COUNTS=$(python3 - "$GATEWAY_DB" <<'PY' 2>&1
+    GATEWAY_COUNTS=$("$JC_PYTHON" - "$GATEWAY_DB" <<'PY' 2>&1
 import sqlite3
 import sys
 
@@ -546,7 +554,7 @@ PY
     fi
 else
     if [[ "$FIX" == 1 ]]; then
-        GATEWAY_INIT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$INSTANCE_DIR" <<'PY' 2>&1
+        GATEWAY_INIT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
 from pathlib import Path
 import sys
 from gateway import queue
@@ -606,7 +614,7 @@ if [[ -f "$WORKER_DB" ]]; then
     ok "state/workers.db present ($SIZE)"
 
     # Count orphan candidates — non-terminal rows with dead/missing pid.
-    ORPHAN_CHECK=$(python3 - "$WORKER_DB" <<'PY' 2>/dev/null
+    ORPHAN_CHECK=$("$JC_PYTHON" - "$WORKER_DB" <<'PY' 2>/dev/null
 import os, sqlite3, sys
 try:
     conn = sqlite3.connect(sys.argv[1])

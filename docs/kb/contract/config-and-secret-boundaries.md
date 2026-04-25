@@ -76,6 +76,7 @@ Common keys:
 - `watchdog.conf` is sourced by bash, so it must stay shell-compatible.
 - `gateway.yaml` is parsed as data and must not contain secrets.
 - `jc doctor` supports both `--instance-dir <path>` and `--instance-dir=<path>`.
+- `jc doctor` should use the JuliusCaesar venv Python for installed framework dependency checks so bash shims and diagnostics agree.
 
 ## Open questions / known stale
 

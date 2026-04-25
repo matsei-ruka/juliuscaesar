@@ -25,3 +25,5 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-04-25] update | decision/native-cli-over-api-simulation.md - documented gateway-owned channels
 ## [2026-04-25] update | domain/personal-assistant-framework.md - documented Telegram/Slack gateway runtime model
 ## [2026-04-25] update | contract/instance-layout-and-resolution.md - documented ops/gateway.yaml and gateway start path
+## [2026-04-25] update | subsystem/installation-and-cli-routing.md - documented router empty-arg guard and doctor venv Python probes
+## [2026-04-25] update | contract/config-and-secret-boundaries.md - documented doctor venv Python diagnostic invariant

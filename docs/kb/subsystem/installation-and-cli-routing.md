@@ -30,6 +30,7 @@ The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`
 
 - Python dependencies are currently `pyyaml`, `python-dotenv`, `dashscope`, `requests`, and `websocket-client`.
 - Python 3.10+ is required because the library code uses modern type syntax.
+- `jc doctor` uses the installed JuliusCaesar venv Python for internal dependency probes and SQLite/YAML helper snippets when that venv exists.
 - The installer refuses to overwrite existing `~/.local/bin/jc-*` shims that point to a different JuliusCaesar clone unless run with `--force`.
 - Python binaries run through the venv wrapper with the framework `lib/` on `PYTHONPATH`.
 - Native bash binaries are invoked directly by their shim.
@@ -43,6 +44,7 @@ The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`
 - If `~/.local/bin` is missing from PATH, installation still writes shims but warns the user.
 - If a different clone already owns the shims, install fails until the user chooses the existing clone or forces overwrite.
 - If `jc` cannot find `jc-<subcommand>` on PATH, it exits 127 and tells the user to run `install.sh`.
+- The router must handle subcommands with no global flags on macOS Bash under `set -u`; empty global arg arrays are not expanded unconditionally.
 - If the target for `jc init` is non-empty, it refuses portably on macOS and Linux, except for `.git`, `.gitignore`, `README.md`, and `LICENSE`.
 
 ## Open questions / known stale

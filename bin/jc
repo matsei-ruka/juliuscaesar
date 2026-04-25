@@ -93,7 +93,11 @@ case "$SUB" in
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127
         fi
-        exec "jc-$SUB" "${GLOBAL_ARGS[@]}" "$@"
+        if (( ${#GLOBAL_ARGS[@]} )); then
+            exec "jc-$SUB" "${GLOBAL_ARGS[@]}" "$@"
+        else
+            exec "jc-$SUB" "$@"
+        fi
         ;;
     *)
         echo "Unknown subcommand: $SUB" >&2
