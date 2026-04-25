@@ -138,8 +138,10 @@ our_claude_pids() {
 # its PID to ~/.claude/channels/telegram/bot.pid. The plugin dies occasionally
 # under heavy subprocess load (claude -p spawns, pip installs, git pushes).
 # When it dies, inbound telegram messages silently queue at the API and
-# outbound tools fail. This check detects the dead-plugin-alive-claude case so
-# the watchdog restarts claude (which respawns the plugin via --channels).
+# outbound tools fail. It can also outlive a crashed claude process as an
+# orphan, keeping the bot long-poll and causing the next claude plugin startup
+# to fail with Telegram 409 conflicts. The watchdog handles both asymmetric
+# states before restart.
 #
 # Only runs when TELEGRAM_BOT_TOKEN is set — instances that don't use telegram
 # shouldn't trip this check.
@@ -157,6 +159,22 @@ telegram_plugin_alive() {
     kill -0 "$pid" 2>/dev/null
 }
 
+telegram_plugin_pid() {
+    local pidfile="$HOME/.claude/channels/telegram/bot.pid"
+    [[ -f "$pidfile" ]] || return 1
+    cat "$pidfile" 2>/dev/null
+}
+
+kill_telegram_plugin() {
+    local pidfile="$HOME/.claude/channels/telegram/bot.pid"
+    local pid
+    pid=$(telegram_plugin_pid || true)
+    if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+}
+
 start_rachel() {
     if [[ -z "$CLAUDE_BIN" ]]; then
         log "start: no claude binary found on PATH or fallbacks"
@@ -164,7 +182,11 @@ start_rachel() {
     fi
     log "Starting screen '$SCREEN_NAME' with claude ($CLAUDE_BIN)..."
     screen -dmS "$SCREEN_NAME" bash -c "cd '$INSTANCE_DIR' && exec '$CLAUDE_BIN' $CLAUDE_ARGS"
-    sleep 6
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        claude_alive && return 0
+        sleep 1
+    done
+    return 0
 }
 
 read_state() {
@@ -203,6 +225,16 @@ main() {
     fi
 
     log "down: screen_named_alive=$(screen_named_alive && echo y || echo n) claude_alive=$(claude_alive && echo y || echo n) plugin_alive=$(telegram_plugin_alive && echo y || echo n) claude_bin=${CLAUDE_BIN:-<none>}"
+
+    # Opposite degraded state: claude crashed, but its telegram plugin bun
+    # subprocess was reparented and kept polling the bot token. If we start a
+    # new claude while that orphan still owns the long-poll, plugin init can
+    # fail with Telegram 409 Conflict and the watchdog loops forever.
+    if telegram_plugin_expected && telegram_plugin_alive && ! claude_alive; then
+        log "killing orphan telegram plugin before restart"
+        kill_telegram_plugin
+        sleep 1
+    fi
 
     # Kill this instance's claude if it's still running but degraded (so the
     # restart below is clean; --resume from a new spawn would fight a stale

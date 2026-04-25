@@ -20,7 +20,7 @@ related:
 
 Watchdog supervises the live Claude Code session for an instance. It is meant to run from cron via `jc-watchdog tick`, keep the Telegram-connected Claude session alive, and restart with `--resume <session-id>` when configured.
 
-It also detects the degraded state where Claude is still alive but the Telegram plugin subprocess has died.
+It also detects asymmetric degraded states between Claude and the Telegram plugin subprocess.
 
 ## Components
 
@@ -41,6 +41,8 @@ It also detects the degraded state where Claude is still alive but the Telegram 
 ## Degraded plugin handling
 
 If Telegram credentials exist, watchdog expects `~/.claude/channels/telegram/bot.pid` to exist and point to a live process. If Claude is alive but the plugin is dead, watchdog marks `plugin-dead`, kills this instance's Claude process, quits the screen session, and restarts Claude so the channel plugin respawns.
+
+If Claude is dead but the plugin is still alive, watchdog treats the plugin as an orphan. It kills the plugin pid from `bot.pid`, removes the stale pidfile, waits briefly, then starts a new Claude session. This prevents Telegram 409 Conflict loops where two plugin processes long-poll the same bot token.
 
 ## Open questions / known stale
 
