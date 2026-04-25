@@ -17,13 +17,19 @@ from ._http import http_json
 from .base import EnqueueFn, LogFn
 
 
-_VOICE_MIME_EXT = {
+_AUDIO_MIME_EXT = {
     "audio/ogg": ".oga",
     "audio/mpeg": ".mp3",
     "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/webm": ".webm",
     "audio/x-wav": ".wav",
     "audio/wav": ".wav",
+    "video/mp4": ".mp4",
 }
+
+# Backwards-compat alias — older code referenced the voice-specific name.
+_VOICE_MIME_EXT = _AUDIO_MIME_EXT
 
 
 def _download_telegram_file(
@@ -95,26 +101,44 @@ class TelegramChannel:
                     if self.allowed and chat_id not in self.allowed:
                         self.log(f"telegram ignored disallowed chat_id={chat_id}")
                         continue
+                    update_id = update.get("update_id")
+                    self._log_forward(message, update_id)
                     text = message.get("text") or message.get("caption") or ""
                     voice = message.get("voice") if isinstance(message.get("voice"), dict) else None
+                    audio = message.get("audio") if isinstance(message.get("audio"), dict) else None
+                    video_note = (
+                        message.get("video_note")
+                        if isinstance(message.get("video_note"), dict)
+                        else None
+                    )
+                    attachment = voice or audio or video_note
+                    if voice:
+                        kind = "voice"
+                    elif audio:
+                        kind = "audio"
+                    elif video_note:
+                        kind = "video_note"
+                    else:
+                        kind = None
                     audio_path: Path | None = None
-                    if not text.strip() and voice:
-                        update_id = update.get("update_id")
+                    if not text.strip() and attachment is not None:
                         try:
-                            audio_path = self._ingest_voice(voice, update_id)
+                            audio_path = self._ingest_audio_attachment(
+                                attachment, kind, update_id
+                            )
                             text = _transcribe_audio(audio_path)
                         except Exception as exc:  # noqa: BLE001
                             self.log(
-                                f"telegram voice ingestion failed update_id={update_id}: {exc}"
+                                f"telegram {kind} ingestion failed update_id={update_id}: {exc}"
                             )
                             continue
                         if not text.strip():
                             self.log(
-                                f"telegram voice transcription empty update_id={update_id}"
+                                f"telegram {kind} transcription empty update_id={update_id}"
                             )
                             continue
                         self.log(
-                            f"telegram voice transcribed update_id={update_id} chars={len(text)}"
+                            f"telegram {kind} transcribed update_id={update_id} chars={len(text)}"
                         )
                     if not text.strip():
                         continue
@@ -127,8 +151,13 @@ class TelegramChannel:
                         "username": (message.get("from") or {}).get("username"),
                     }
                     if audio_path is not None:
+                        # `was_voice` keeps its name for downstream voice-reply
+                        # rendering — the trigger is "user sent something we
+                        # transcribed", regardless of whether it was a `voice`
+                        # bubble, music clip, or round video.
                         meta["was_voice"] = True
                         meta["audio_path"] = str(audio_path)
+                        meta["attachment_kind"] = kind
                     enqueue(
                         source="telegram",
                         source_message_id=str(update.get("update_id")),
@@ -142,14 +171,34 @@ class TelegramChannel:
                 time.sleep(5)
         self.log("telegram poller stopped")
 
-    def _ingest_voice(self, voice: dict[str, Any], update_id: Any) -> Path:
-        """Download a Telegram voice attachment to `state/voice/inbound/`."""
-        file_id = voice.get("file_id")
+    def _ingest_audio_attachment(
+        self,
+        payload: dict[str, Any],
+        kind: str | None,
+        update_id: Any,
+    ) -> Path:
+        """Download a transcribable Telegram attachment to `state/voice/inbound/`.
+
+        Handles `voice`, `audio`, and `video_note`. `video_note` is always MP4;
+        `audio` carries a free-form mime; `voice` defaults to OGG.
+        """
+        file_id = payload.get("file_id")
         if not file_id:
-            raise RuntimeError("voice payload missing file_id")
-        ext = _VOICE_MIME_EXT.get(str(voice.get("mime_type") or ""), ".oga")
+            raise RuntimeError(f"{kind or 'attachment'} payload missing file_id")
+        if kind == "video_note":
+            ext = ".mp4"
+        else:
+            ext = _AUDIO_MIME_EXT.get(str(payload.get("mime_type") or ""), ".oga")
         dest = self.instance_dir / "state" / "voice" / "inbound" / f"{update_id}{ext}"
         return _download_telegram_file(self.token, file_id, dest)
+
+    def _log_forward(self, message: dict[str, Any], update_id: Any) -> None:
+        """If the message is a forward, log a single audit line."""
+        ff = message.get("forward_from") or message.get("forward_from_chat")
+        if not isinstance(ff, dict):
+            return
+        ident = ff.get("username") or ff.get("title") or ff.get("id") or "-"
+        self.log(f"telegram forward update_id={update_id} from={ident}")
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
         if not self.ready() or not response.strip():
