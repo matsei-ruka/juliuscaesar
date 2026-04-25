@@ -111,7 +111,7 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         try:
             row = conn_lookup.execute(
                 "SELECT session_id FROM workers "
-                "WHERE name=? AND status IN ('done','failed','cancelled') "
+                "WHERE name=? AND status IN ('done','failed','cancelled','need_input') "
                 "AND session_id IS NOT NULL "
                 "ORDER BY started_at DESC, id DESC LIMIT 1",
                 (args.name,),
@@ -418,37 +418,22 @@ def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional
             return best.stem if best else None
 
         if brain == "gemini":
+            # `gemini --list-sessions` outputs plain text, newest at bottom:
+            #   Available sessions for this project (6):
+            #     1. <prompt> (13 hours ago) [b70b187d-...-...]
+            #     2. <prompt> (12 hours ago) [85878938-...-...]
+            # Older `--format json` flag is unknown to the CLI and always errors.
             try:
                 proc = subprocess.run(
-                    ["gemini", "--list-sessions", "--format", "json"],
+                    ["gemini", "--list-sessions"],
                     capture_output=True, text=True, timeout=5,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return None
             if proc.returncode != 0 or not proc.stdout.strip():
                 return None
-            try:
-                data = json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                return None
-            sessions = data if isinstance(data, list) else data.get("sessions", [])
-            best = None
-            best_delta = None
-            for s in sessions:
-                if not isinstance(s, dict):
-                    continue
-                ts = s.get("created_at") or s.get("started_at") or s.get("start")
-                st = _parse_iso(ts) if isinstance(ts, str) else None
-                if st is None:
-                    continue
-                delta = abs(st - t0)
-                if best_delta is None or delta < best_delta:
-                    best_delta = delta
-                    best = s
-            if not best:
-                return None
-            sid = best.get("id") or best.get("session_id") or best.get("index")
-            return str(sid) if sid is not None else None
+            uuids = _UUID_RE.findall(proc.stdout)
+            return uuids[-1] if uuids else None
 
         if brain == "codex":
             codex_dir = Path.home() / ".codex"
@@ -498,7 +483,9 @@ def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional
                 st = _parse_iso(ts) if isinstance(ts, str) else None
                 if st is None:
                     continue
-                delta = abs(st - t0)
+                if st < t0:
+                    continue
+                delta = st - t0
                 if best_delta is None or delta < best_delta:
                     best_delta = delta
                     best = s
@@ -611,8 +598,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         last_err = f"timeout after {worker.timeout_seconds}s"
     elif exit_code != 0:
         try:
-            log_tail = log_path.read_text(encoding="utf-8", errors="replace")
-            # Use last non-empty line.
+            # Read only the tail — log files can grow unbounded and a full
+            # read_text would OOM on multi-GB logs.
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 2000))
+                log_tail = f.read().decode("utf-8", errors="replace")
             for line in reversed(log_tail.splitlines()):
                 if line.strip():
                     last_err = line.strip()[:500]
