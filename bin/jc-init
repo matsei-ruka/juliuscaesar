@@ -70,6 +70,8 @@ fi
 
 # .env template
 if [[ ! -f "$TARGET/.env" ]]; then
+    OLD_UMASK="$(umask)"
+    umask 077
     cat > "$TARGET/.env" <<'EOF'
 # JuliusCaesar instance secrets. Do not commit.
 #
@@ -80,6 +82,7 @@ if [[ ! -f "$TARGET/.env" ]]; then
 # TELEGRAM_BOT_TOKEN=
 # TELEGRAM_CHAT_ID=
 EOF
+    umask "$OLD_UMASK"
     chmod 600 "$TARGET/.env"
 fi
 

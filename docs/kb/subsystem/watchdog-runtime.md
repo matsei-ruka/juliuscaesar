@@ -35,8 +35,9 @@ It also detects asymmetric degraded states between Claude and the Telegram plugi
 - Default screen name is `jc-<instance-basename>`.
 - Default Claude args include `--dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official`.
 - `SESSION_ID` from watchdog config adds `--resume <id>`.
-- Cron install writes both `@reboot` and `*/2 * * * *` entries tagged with the instance path.
+- Cron install writes both `@reboot` and `*/2 * * * *` entries tagged with the instance path, with command paths and instance paths shell-quoted for spaces.
 - Detection scopes Claude processes by working directory, which matters on multi-instance hosts.
+- Runtime startup passes the instance path and Claude binary as positional args to `bash -c`, not interpolated shell text.
 
 ## Degraded plugin handling
 

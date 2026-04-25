@@ -12,6 +12,32 @@
 # Exits non-zero on failure; stderr carries a short error note.
 set -euo pipefail
 
+load_env_file() {
+    local file="$1"
+    local line key value
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *"="* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        case "$key" in
+            TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID) ;;
+            *) continue ;;
+        esac
+        value="${value#"${value%%[![:space:]]*}"}"
+        if [[ "$value" == \'* && "$value" == *\' ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "$value" == \"* && "$value" == *\" ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+        export "$key=$value"
+    done < "$file"
+}
+
 resolve_instance_dir() {
     if [[ -n "${JC_INSTANCE_DIR:-}" && -d "$JC_INSTANCE_DIR" ]]; then
         echo "$JC_INSTANCE_DIR"
@@ -42,10 +68,7 @@ INSTANCE_DIR="$(resolve_instance_dir)" || {
 }
 ENV_FILE="$INSTANCE_DIR/.env"
 
-if [[ -f "$ENV_FILE" ]]; then
-    # shellcheck disable=SC1090
-    set -a; source "$ENV_FILE"; set +a
-fi
+load_env_file "$ENV_FILE"
 
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN not set (define in $ENV_FILE)}"
 

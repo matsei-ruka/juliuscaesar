@@ -44,14 +44,37 @@ if [[ -f "$CONF_FILE" ]]; then
     source "$CONF_FILE"
 fi
 
-# Source instance .env (telegram creds)
-if [[ -f "$ENV_FILE" ]]; then
-    # shellcheck disable=SC1090
-    set -a; source "$ENV_FILE"; set +a
-fi
-
 STATE_FILE="/tmp/jc-watchdog-${SCREEN_NAME}.state"
 LOG_FILE="/tmp/jc-watchdog-${SCREEN_NAME}.log"
+
+load_env_file() {
+    local file="$1"
+    local line key value
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *"="* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        case "$key" in
+            TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID) ;;
+            *) continue ;;
+        esac
+        value="${value#"${value%%[![:space:]]*}"}"
+        if [[ "$value" == \'* && "$value" == *\' ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "$value" == \"* && "$value" == *\" ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+        export "$key=$value"
+    done < "$file"
+}
+
+# Load instance .env data without sourcing shell code from the file.
+load_env_file "$ENV_FILE"
 
 # --- Claude binary resolution ---
 CLAUDE_BIN=""
@@ -181,7 +204,9 @@ start_rachel() {
         return 1
     fi
     log "Starting screen '$SCREEN_NAME' with claude ($CLAUDE_BIN)..."
-    screen -dmS "$SCREEN_NAME" bash -c "cd '$INSTANCE_DIR' && exec '$CLAUDE_BIN' $CLAUDE_ARGS"
+    # Pass the instance path and binary as positional args so paths containing
+    # quotes or spaces cannot break out of the shell command.
+    screen -dmS "$SCREEN_NAME" bash -c 'cd "$1" && shift && exec "$@"' _ "$INSTANCE_DIR" "$CLAUDE_BIN" $CLAUDE_ARGS
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         claude_alive && return 0
         sleep 1

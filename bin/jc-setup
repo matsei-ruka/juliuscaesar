@@ -84,6 +84,28 @@ prompt() {
     fi
 }
 
+secret_prompt() {
+    local label="$1"
+    local default="${2:-}"
+    local value
+    if [[ "$USE_DEFAULTS" == 1 ]]; then
+        printf '%s\n' "$default"
+        return 0
+    fi
+    if [[ -n "$default" ]]; then
+        printf '%s [keep existing]: ' "$label" >&2
+    else
+        printf '%s: ' "$label" >&2
+    fi
+    IFS= read -rs value || value=""
+    printf '\n' >&2
+    if [[ -z "$value" ]]; then
+        printf '%s\n' "$default"
+    else
+        printf '%s\n' "$value"
+    fi
+}
+
 yesno() {
     local label="$1"
     local default="${2:-no}"
@@ -104,37 +126,61 @@ yesno() {
     done
 }
 
+trim_value() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" == \'* && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+    elif [[ "$value" == \"* && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    printf '%s\n' "$value"
+}
+
 env_value() {
     local key="$1"
     local file="$TARGET/.env"
     [[ -f "$file" ]] || return 0
-    awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file"
+    local raw
+    raw=$(awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file")
+    trim_value "$raw"
+}
+
+shell_quote() {
+    local value="$1"
+    printf "'"
+    printf '%s' "$value" | sed "s/'/'\\\\''/g"
+    printf "'"
 }
 
 write_env() {
     local dashscope="$1"
     local telegram_token="$2"
     local telegram_chat="$3"
-    cat > "$TARGET/.env" <<EOF
-# JuliusCaesar instance secrets. Do not commit.
-DASHSCOPE_API_KEY=$dashscope
-TELEGRAM_BOT_TOKEN=$telegram_token
-TELEGRAM_CHAT_ID=$telegram_chat
-EOF
+    local tmp old_umask
+    old_umask=$(umask)
+    umask 077
+    tmp=$(mktemp "$TARGET/.env.tmp.XXXXXX")
+    {
+        printf '%s\n' "# JuliusCaesar instance secrets. Do not commit."
+        printf 'DASHSCOPE_API_KEY=%s\n' "$(shell_quote "$dashscope")"
+        printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(shell_quote "$telegram_token")"
+        printf 'TELEGRAM_CHAT_ID=%s\n' "$(shell_quote "$telegram_chat")"
+    } > "$tmp"
+    umask "$old_umask"
+    mv "$tmp" "$TARGET/.env"
     chmod 600 "$TARGET/.env"
 }
 
-write_l1() {
-    local assistant_name="$1"
-    local user_name="$2"
-    local timezone="$3"
+write_identity() {
+    local path="$1"
+    local today="$2"
+    local assistant_name="$3"
     local mission="$4"
     local style="$5"
-    local external_policy="$6"
-    local today
-    today="$(date +%F)"
-
-    cat > "$TARGET/memory/L1/IDENTITY.md" <<EOF
+    {
+        cat <<EOF
 ---
 slug: IDENTITY
 title: Identity
@@ -150,12 +196,14 @@ links: [USER, RULES]
 
 # Who this assistant is
 
-$assistant_name is a JuliusCaesar assistant running inside this instance. The assistant is persistent, practical, and expected to operate like a daemon-backed personal AI rather than a blank chat session.
-
+EOF
+        printf '%s\n\n' "$assistant_name is a JuliusCaesar assistant running inside this instance. The assistant is persistent, practical, and expected to operate like a daemon-backed personal AI rather than a blank chat session."
+        cat <<'EOF'
 ## Mission
 
-$mission
-
+EOF
+        printf '%s\n\n' "$mission"
+        cat <<'EOF'
 ## Operating posture
 
 - Use the local instance as source of truth for identity, memory, heartbeat tasks, voice, watchdog, and credentials.
@@ -166,10 +214,19 @@ $mission
 
 ## Voice and style
 
-$style
 EOF
+        printf '%s\n' "$style"
+    } > "$path"
+}
 
-    cat > "$TARGET/memory/L1/USER.md" <<EOF
+write_user_profile() {
+    local path="$1"
+    local today="$2"
+    local user_name="$3"
+    local timezone="$4"
+    local style="$5"
+    {
+        cat <<EOF
 ---
 slug: USER
 title: User profile
@@ -187,12 +244,15 @@ links: [IDENTITY, RULES]
 
 ## Identity
 
-- Name: $user_name
-- Timezone: $timezone
-
+EOF
+        printf -- '- Name: %s\n' "$user_name"
+        printf -- '- Timezone: %s\n\n' "$timezone"
+        cat <<'EOF'
 ## Communication preferences
 
-- Preferred style: $style
+EOF
+        printf -- '- Preferred style: %s\n' "$style"
+        cat <<'EOF'
 - Ask concise clarifying questions only when needed to avoid a bad action.
 
 ## Standing context
@@ -201,8 +261,15 @@ links: [IDENTITY, RULES]
 - Use jc doctor to inspect environment and runtime health.
 - Use jc memory rebuild after memory edits.
 EOF
+    } > "$path"
+}
 
-    cat > "$TARGET/memory/L1/RULES.md" <<EOF
+write_rules() {
+    local path="$1"
+    local today="$2"
+    local external_policy="$3"
+    {
+        cat <<EOF
 ---
 slug: RULES
 title: Standing Rules & Feedback
@@ -226,15 +293,22 @@ How to apply: Read this L1 memory at session start. Use jc memory search and jc 
 ## External actions
 
 Why: The assistant can affect real systems through CLI tools, Telegram, cron, and files.
-How to apply: $external_policy
-
+How to apply:
+EOF
+        printf ' %s\n\n' "$external_policy"
+        cat <<'EOF'
 ## Work routing
 
 Why: The live Claude session should stay responsive.
 How to apply: Do quick answers inline. For longer dev work, research, scaffolding, or test-heavy tasks, use jc workers spawn when available.
 EOF
+    } > "$path"
+}
 
-    cat > "$TARGET/memory/L1/HOT.md" <<EOF
+write_hot() {
+    local path="$1"
+    local today="$2"
+    cat > "$path" <<EOF
 ---
 slug: HOT
 title: Hot Cache (last 7 days)
@@ -258,6 +332,22 @@ links: [IDENTITY, USER, RULES]
 
 -
 EOF
+}
+
+write_l1() {
+    local assistant_name="$1"
+    local user_name="$2"
+    local timezone="$3"
+    local mission="$4"
+    local style="$5"
+    local external_policy="$6"
+    local today
+    today="$(date +%F)"
+
+    write_identity "$TARGET/memory/L1/IDENTITY.md" "$today" "$assistant_name" "$mission" "$style"
+    write_user_profile "$TARGET/memory/L1/USER.md" "$today" "$user_name" "$timezone" "$style"
+    write_rules "$TARGET/memory/L1/RULES.md" "$today" "$external_policy"
+    write_hot "$TARGET/memory/L1/HOT.md" "$today"
 }
 
 write_watchdog_conf() {
@@ -302,7 +392,10 @@ echo "==> JuliusCaesar guided setup"
 echo "Target: $TARGET"
 
 if [[ ! -f "$TARGET/.jc" ]]; then
-    "$JC_INIT" "$TARGET"
+    if ! "$JC_INIT" "$TARGET"; then
+        echo "jc setup: failed to initialize instance at $TARGET" >&2
+        exit 1
+    fi
 else
     echo "==> Existing JC instance detected; configuring in place."
     if [[ "$USE_DEFAULTS" != 1 ]]; then
@@ -327,8 +420,8 @@ if [[ "$WRITE_CONFIG" == "yes" ]]; then
     existing_telegram_token="$(env_value TELEGRAM_BOT_TOKEN)"
     existing_telegram_chat="$(env_value TELEGRAM_CHAT_ID)"
 
-    dashscope="$(prompt "DashScope API key (optional)" "$existing_dashscope")"
-    telegram_token="$(prompt "Telegram bot token (optional)" "$existing_telegram_token")"
+    dashscope="$(secret_prompt "DashScope API key (optional)" "$existing_dashscope")"
+    telegram_token="$(secret_prompt "Telegram bot token (optional)" "$existing_telegram_token")"
     telegram_chat="$(prompt "Telegram chat id (optional)" "$existing_telegram_chat")"
 
     write_env "$dashscope" "$telegram_token" "$telegram_chat"

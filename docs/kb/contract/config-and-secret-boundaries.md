@@ -36,7 +36,7 @@ Common keys:
 - `TELEGRAM_BOT_TOKEN` for Telegram delivery and watchdog notifications.
 - `TELEGRAM_CHAT_ID` for default delivery.
 
-`jc init` creates `.env` when missing and applies mode 600. `jc setup` rewrites `.env` from guided answers, preserving existing values as prompt defaults.
+`jc init` creates `.env` when missing under a restrictive umask and applies mode 600. `jc setup` rewrites `.env` from guided answers through a mode-600 temp file, preserving existing values as prompt defaults. Secret prompts do not echo typed values.
 
 ## Config files
 
@@ -67,6 +67,7 @@ Common keys:
 - Framework code should not contain instance credentials.
 - Telegram `getMe` validation is only possible when a token is present.
 - Voice calls fail fast when `DASHSCOPE_API_KEY` is missing.
+- Runtime scripts must not `source` `.env`. Bash consumers use an allowlisted key parser so values such as `$(...)` remain data, not shell code.
 - `watchdog.conf` is sourced by bash, so it must stay shell-compatible.
 - `jc doctor` supports both `--instance-dir <path>` and `--instance-dir=<path>`.
 
