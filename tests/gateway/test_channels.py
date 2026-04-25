@@ -13,8 +13,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
+from gateway.channels import telegram as telegram_module  # noqa: E402
 from gateway.channels.cron import CronChannel  # noqa: E402
 from gateway.channels.jc_events import JcEventsChannel  # noqa: E402
+from gateway.channels.telegram import TelegramChannel  # noqa: E402
 from gateway.config import ChannelConfig, ConfigError, load_config, render_default_config  # noqa: E402
 
 
@@ -127,6 +129,120 @@ class CronChannelTests(unittest.TestCase):
             self.assertEqual(kwargs["meta"]["brain"], "claude:opus-4-7-1m")
             self.assertEqual(kwargs["meta"]["model"], "opus-4-7-1m")
             self.assertEqual(kwargs["meta"]["delivery_channel"], "telegram")
+
+
+class TelegramVoiceIngestionTests(unittest.TestCase):
+    """Regression: Telegram voice messages must be transcribed and enqueued."""
+
+    def _drive_channel(self, instance: Path, updates, *, transcript: str):
+        served = {"done": False}
+
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            if "getUpdates" in url:
+                if served["done"]:
+                    return {"ok": True, "result": []}
+                served["done"] = True
+                return {"ok": True, "result": updates}
+            if "getFile" in url:
+                return {"ok": True, "result": {"file_path": "voice/file_1.oga"}}
+            return {"ok": True, "result": {}}
+
+        class FakeResp:
+            def __init__(self, payload: bytes):
+                self._buf = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n=-1):
+                if n is None or n < 0:
+                    out, self._buf = self._buf, b""
+                    return out
+                out, self._buf = self._buf[:n], self._buf[n:]
+                return out
+
+        captured: list[dict] = []
+
+        def enqueue(**kwargs):
+            captured.append(kwargs)
+
+        stop_after = {"done": False}
+
+        def should_stop() -> bool:
+            return stop_after["done"]
+
+        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN", chat_ids=["28547271"])
+        channel = TelegramChannel(instance, cfg, _silent_log)
+        channel.token = "test-token"  # bypass env_value lookup
+
+        orig_http_json = telegram_module.http_json
+        orig_urlopen = telegram_module.urllib.request.urlopen
+        orig_transcribe = telegram_module._transcribe_audio
+        telegram_module.http_json = fake_http_json
+        telegram_module.urllib.request.urlopen = lambda *_a, **_k: FakeResp(b"OggS\x00\x00")
+        telegram_module._transcribe_audio = lambda _path: transcript
+        try:
+            thread = threading.Thread(
+                target=channel.run, args=(enqueue, should_stop), daemon=True
+            )
+            thread.start()
+            for _ in range(20):
+                if served["done"] and captured:
+                    break
+                time.sleep(0.1)
+            stop_after["done"] = True
+            thread.join(timeout=3)
+        finally:
+            telegram_module.http_json = orig_http_json
+            telegram_module.urllib.request.urlopen = orig_urlopen
+            telegram_module._transcribe_audio = orig_transcribe
+        return captured
+
+    def test_voice_message_is_transcribed_and_enqueued(self):
+        update = {
+            "update_id": 99,
+            "message": {
+                "message_id": 17,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "voice": {"file_id": "AwACA-voice", "mime_type": "audio/ogg", "duration": 3},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = self._drive_channel(instance, [update], transcript="check the params")
+            self.assertEqual(len(captured), 1, "voice update should produce exactly one enqueue")
+            kwargs = captured[0]
+            self.assertEqual(kwargs["source"], "telegram")
+            self.assertEqual(kwargs["content"], "check the params")
+            self.assertTrue(kwargs["meta"]["was_voice"])
+            self.assertIn("audio_path", kwargs["meta"])
+            audio_path = Path(kwargs["meta"]["audio_path"])
+            self.assertTrue(audio_path.exists())
+            self.assertTrue(
+                audio_path.is_relative_to(instance / "state" / "voice" / "inbound")
+            )
+
+    def test_text_message_unchanged(self):
+        update = {
+            "update_id": 100,
+            "message": {
+                "message_id": 18,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "text": "plain text",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = self._drive_channel(instance, [update], transcript="unused")
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["content"], "plain text")
+            self.assertNotIn("was_voice", captured[0]["meta"])
+            self.assertNotIn("audio_path", captured[0]["meta"])
 
 
 class ConfigWebRejectionTests(unittest.TestCase):
