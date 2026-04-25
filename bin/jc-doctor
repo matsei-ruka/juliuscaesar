@@ -144,7 +144,7 @@ fi
 
 section "JuliusCaesar binaries"
 
-for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-setup jc-doctor; do
+for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor; do
     if command -v "$b" >/dev/null 2>&1; then
         ok "$b"
     else
@@ -392,6 +392,40 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
             fail "telegram plugin dead (pid $PID). Restart claude to respawn."
         fi
     fi
+fi
+
+# --- Gateway ---
+
+section "Gateway"
+
+GATEWAY_DB="$INSTANCE_DIR/state/gateway/queue.db"
+if [[ -f "$GATEWAY_DB" ]]; then
+    SIZE=$(du -h "$GATEWAY_DB" | awk '{print $1}')
+    ok "gateway queue present: $SIZE"
+    GATEWAY_COUNTS=$(python3 - "$GATEWAY_DB" <<'PY' 2>&1
+import sqlite3
+import sys
+
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    rows = conn.execute("SELECT status, COUNT(*) FROM events GROUP BY status").fetchall()
+except Exception as exc:
+    print(f"ERROR:{exc}")
+    sys.exit(0)
+
+if rows:
+    print(", ".join(f"{status}={count}" for status, count in rows))
+else:
+    print("empty")
+PY
+)
+    if [[ "$GATEWAY_COUNTS" == ERROR:* ]]; then
+        fail "gateway queue unreadable: ${GATEWAY_COUNTS#ERROR:}"
+    else
+        ok "gateway events: $GATEWAY_COUNTS"
+    fi
+else
+    info "gateway queue not initialized (optional — run: jc gateway init)"
 fi
 
 # --- Workers ---

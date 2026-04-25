@@ -10,6 +10,7 @@
 #   voice      TTS / ASR / voice enrollment.
 #   watchdog   Supervisor for the instance's live claude session.
 #   workers    On-demand background agents.
+#   gateway    Durable event queue and gateway runtime.
 #   init       Scaffold a new instance from templates.
 #   setup      Guided first-run configurator.
 #
@@ -31,6 +32,7 @@ Subcommands:
   voice        TTS / ASR / enrollment (jc-voice).
   watchdog     Live session supervisor (jc-watchdog).
   workers      On-demand background agents (jc-workers).
+  gateway      Durable event queue and gateway runtime (jc-gateway).
   init         Scaffold a new instance from templates.
   setup        Guided first-run configurator.
   doctor       Diagnose the instance + environment.
@@ -52,6 +54,31 @@ if [[ $# -eq 0 ]]; then
     usage; exit 0
 fi
 
+GLOBAL_ARGS=()
+while (( $# )); do
+    case "$1" in
+        --instance-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "--instance-dir requires a path" >&2
+                exit 2
+            fi
+            GLOBAL_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --instance-dir=*)
+            GLOBAL_ARGS+=("$1")
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [[ $# -eq 0 ]]; then
+    usage; exit 0
+fi
+
 SUB="$1"; shift
 
 case "$SUB" in
@@ -61,12 +88,12 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|init|setup|doctor)
+    memory|heartbeat|voice|watchdog|workers|gateway|init|setup|doctor)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127
         fi
-        exec "jc-$SUB" "$@"
+        exec "jc-$SUB" "${GLOBAL_ARGS[@]}" "$@"
         ;;
     *)
         echo "Unknown subcommand: $SUB" >&2

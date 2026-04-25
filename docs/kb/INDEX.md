@@ -36,6 +36,7 @@
 | Watchdog runtime supervision | subsystem/watchdog-runtime.md | Live Claude session supervision and plugin-death restart |
 | On-demand background workers | subsystem/workers-background-agents.md | Worker DB, detached lifecycle, named worker resume |
 | DashScope voice subsystem | subsystem/voice-dashscope.md | Voice enrollment, synthesis, transcription |
+| Gateway event queue | subsystem/gateway-queue.md | SQLite event queue foundation for unified gateway |
 
 ### contract
 

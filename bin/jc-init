@@ -64,6 +64,7 @@ if [[ ! -f "$TARGET/.gitignore" ]]; then
 **/index.sqlite
 **/index.sqlite-*
 heartbeat/state/
+state/
 voice/tmp/
 EOF
 fi
