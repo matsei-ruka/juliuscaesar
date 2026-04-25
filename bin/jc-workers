@@ -103,6 +103,24 @@ def cmd_spawn(args: argparse.Namespace) -> int:
     if not os.access(adapter, os.X_OK):
         raise SystemExit(f"adapter not executable: {adapter}")
 
+    # Sprint 3: if a name is given and --fresh is NOT set, look up the most
+    # recent terminal-state run for that name and resume its session.
+    resume_session_id: Optional[str] = None
+    if args.name and not getattr(args, "fresh", False):
+        conn_lookup = connect(instance)
+        try:
+            row = conn_lookup.execute(
+                "SELECT session_id FROM workers "
+                "WHERE name=? AND status IN ('done','failed','cancelled') "
+                "AND session_id IS NOT NULL "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (args.name,),
+            ).fetchone()
+            if row:
+                resume_session_id = row["session_id"]
+        finally:
+            conn_lookup.close()
+
     # Read the prompt.
     if args.prompt == "-" or args.prompt is None:
         prompt_text = sys.stdin.read()
@@ -185,6 +203,13 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         "read-only": "plan",
         "workspace-write": "true",
     }[args.sandbox]
+
+    # Sprint 3: pass the resume session id through to the adapter via env.
+    # Each adapter reads WORKER_RESUME_SESSION and maps to its brain-specific flag.
+    if resume_session_id:
+        os.environ["WORKER_RESUME_SESSION"] = resume_session_id
+    else:
+        os.environ.pop("WORKER_RESUME_SESSION", None)
 
     # Detached double-fork so the runner survives this shell AND our process.
     # The child re-execs `jc-workers _run <id>` with its own session.
@@ -997,11 +1022,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--telegram-msg-id", default=None, help="inbound msg that triggered the spawn")
     sp.add_argument("--prompt", default="-", help="prompt file path, or '-' for stdin")
     sp.add_argument("--name", default=None,
-                    help="persistent identity slug (enables session resume on next spawn)")
+                    help="persistent identity slug; resumes prior session if session_id was captured")
     sp.add_argument("--tag", action="append", default=None,
                     help="tag for filtering (repeatable)")
     sp.add_argument("--fresh", action="store_true",
-                    help="ignore prior session when resuming a named worker (Sprint 3)")
+                    help="ignore prior session when resuming a named worker")
     sandbox = sp.add_mutually_exclusive_group()
     sandbox.add_argument("--read-only", dest="sandbox", action="store_const", const="read-only",
                          help="codex + gemini: read files but don't edit them")

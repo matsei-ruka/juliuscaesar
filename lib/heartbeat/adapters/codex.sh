@@ -20,24 +20,47 @@ if ! command -v codex >/dev/null 2>&1; then
     exit 127
 fi
 
-ARGS=("exec")
-case "$SANDBOX" in
-    read-only|workspace-write)
-        ARGS+=("--sandbox" "$SANDBOX")
-        ;;
-    yolo|danger|danger-full-access)
-        ARGS+=("--dangerously-bypass-approvals-and-sandbox")
-        ;;
-    *)
-        echo "codex: unknown CODEX_SANDBOX value '$SANDBOX' (use: workspace-write|read-only|yolo)" >&2
-        exit 2
-        ;;
-esac
+# `codex exec` and `codex exec resume` differ on sandbox flags:
+#   exec        accepts -s/--sandbox <mode>
+#   exec resume does NOT — sandbox must be set via -c sandbox_mode=<mode>
+# Both accept --dangerously-bypass-approvals-and-sandbox.
+RESUME="${WORKER_RESUME_SESSION:-}"
 
-ARGS+=("-")
+if [[ -n "$RESUME" ]]; then
+    ARGS=("exec" "resume" "$RESUME")
+    case "$SANDBOX" in
+        read-only|workspace-write)
+            ARGS+=("-c" "sandbox_mode=\"$SANDBOX\"")
+            ;;
+        yolo|danger|danger-full-access)
+            ARGS+=("--dangerously-bypass-approvals-and-sandbox")
+            ;;
+        *)
+            echo "codex: unknown CODEX_SANDBOX value '$SANDBOX' (use: workspace-write|read-only|yolo)" >&2
+            exit 2
+            ;;
+    esac
+else
+    ARGS=("exec")
+    case "$SANDBOX" in
+        read-only|workspace-write)
+            ARGS+=("--sandbox" "$SANDBOX")
+            ;;
+        yolo|danger|danger-full-access)
+            ARGS+=("--dangerously-bypass-approvals-and-sandbox")
+            ;;
+        *)
+            echo "codex: unknown CODEX_SANDBOX value '$SANDBOX' (use: workspace-write|read-only|yolo)" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 if [[ -n "$MODEL" ]]; then
     ARGS+=("--model" "$MODEL")
 fi
+
+# Prompt comes from stdin via the `-` positional.
+ARGS+=("-")
 
 exec codex "${ARGS[@]}"
