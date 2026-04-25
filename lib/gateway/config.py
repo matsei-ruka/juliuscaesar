@@ -39,7 +39,7 @@ class TriageConfig:
     confidence_threshold: float = 0.7
     fallback_brain: str = "claude:sonnet-4-6"
     cache_ttl_seconds: int = 30
-    sticky_idle_seconds: int = 600
+    sticky_idle_seconds: int = 0
     routing: dict[str, str] = field(default_factory=dict)
     ollama_model: str = "phi3:mini"
     ollama_host: str = "http://localhost:11434"
@@ -290,7 +290,7 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
         confidence_threshold=float(_opt("triage_confidence_threshold", 0.7)),
         fallback_brain=str(_opt("default_fallback_brain", "claude:sonnet-4-6")),
         cache_ttl_seconds=int(_opt("triage_cache_ttl_seconds", 30)),
-        sticky_idle_seconds=int(_opt("sticky_brain_idle_timeout_seconds", 600)),
+        sticky_idle_seconds=int(_opt("sticky_brain_idle_timeout_seconds", 0)),
         routing=routing,
         ollama_model=str(_opt("ollama_model", "phi3:mini")),
         ollama_host=str(_opt("ollama_host", "http://localhost:11434")),
@@ -412,7 +412,7 @@ gateway:
 triage: {triage_backend}
 triage_confidence_threshold: 0.7
 default_fallback_brain: claude:sonnet-4-6
-sticky_brain_idle_timeout_seconds: 600
+sticky_brain_idle_timeout_seconds: 0
 triage_routing:
   smalltalk: claude:haiku-4-5
   quick: claude:sonnet-4-6

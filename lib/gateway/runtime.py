@@ -321,8 +321,10 @@ class GatewayRuntime:
         if result.session_id:
             self._record_session(channel, event.conversation_id, brain, result.session_id)
 
-        if event.conversation_id and self.config.triage.sticky_idle_seconds > 0:
-            self._update_sticky(channel, event.conversation_id, brain, model)
+        # Sticky brain is only set by an explicit user action: `/brain X` slash
+        # or `[brain] ...` inline prefix. Triage runs every message otherwise,
+        # so a "hi" followed immediately by "compare three providers" still
+        # routes the second message to the appropriate brain.
 
         response = result.response or "(no response)"
         meta.setdefault("delivery_channel", channel)
@@ -348,7 +350,9 @@ class GatewayRuntime:
             return event, meta
         new_meta = dict(meta)
         new_meta["brain_override"] = result.spec
-        # rewrite event.content + meta in-place via dataclass replace
+        # Inline `[brain] ...` is one-shot: route this message to the named
+        # brain but do NOT pin sticky — next message goes through triage as
+        # usual. To pin a brain across messages, use the `/brain X` slash.
         from dataclasses import replace
 
         event = replace(event, content=result.cleaned_content, meta=json.dumps(new_meta))
@@ -363,7 +367,15 @@ class GatewayRuntime:
     ) -> str:
         if slash.kind == "brain" and slash.spec and event.conversation_id:
             brain, _, model = slash.spec.partition(":")
-            self._update_sticky(channel, event.conversation_id, brain, model or None)
+            # Slash always pins sticky for a healthy default window even if
+            # global sticky_idle_seconds is 0 — the user explicitly asked.
+            self._update_sticky(
+                channel,
+                event.conversation_id,
+                brain,
+                model or None,
+                idle_override=max(self.config.triage.sticky_idle_seconds, 1800),
+            )
         reply = slash.reply or ""
         meta = dict(meta)
         meta.setdefault("delivery_channel", channel)
@@ -384,8 +396,10 @@ class GatewayRuntime:
         conversation_id: str,
         brain: str,
         model: str | None,
+        *,
+        idle_override: int | None = None,
     ) -> None:
-        idle = self.config.triage.sticky_idle_seconds
+        idle = idle_override if idle_override is not None else self.config.triage.sticky_idle_seconds
         if idle <= 0 or not conversation_id:
             return
         spec = f"{brain}:{model}" if model else brain
