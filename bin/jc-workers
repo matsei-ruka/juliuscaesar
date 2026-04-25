@@ -29,6 +29,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 # Allow running directly from a clone without install.
 _HERE = Path(__file__).resolve().parent
@@ -130,6 +131,7 @@ def cmd_spawn(args: argparse.Namespace) -> int:
     conn = connect(instance)
     try:
         # Placeholder paths — we fill them after we know the id.
+        tags_json = json.dumps(args.tag) if args.tag else None
         worker_id = create(
             conn,
             topic=args.topic,
@@ -141,6 +143,8 @@ def cmd_spawn(args: argparse.Namespace) -> int:
             telegram_msg_id=args.telegram_msg_id,
             notify_chat_id=args.notify,
             timeout_seconds=args.timeout,
+            name=args.name,
+            tags=tags_json,
         )
 
         wdir = _worker_dir(instance, worker_id)
@@ -480,22 +484,47 @@ def cmd_list(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
     conn = connect(instance)
     try:
-        rows = list_workers(conn, status=args.status, limit=args.limit)
+        rows = list_workers(
+            conn, status=args.status, name=args.name, limit=args.limit
+        )
     finally:
         conn.close()
+
+    # Tag filter applied post-fetch via JSON parse.
+    if args.tag:
+        filtered = []
+        for w in rows:
+            try:
+                tag_list = json.loads(w.tags or "[]")
+            except json.JSONDecodeError:
+                tag_list = []
+            if args.tag in tag_list:
+                filtered.append(w)
+        rows = filtered
 
     if not rows:
         print("(no workers)")
         return 0
 
-    # Tabular output.
-    print(f"{'ID':>4}  {'STATUS':<10}  {'BRAIN':<10}  {'MODEL':<22}  {'STARTED':<20}  TOPIC")
-    print("-" * 100)
+    def _trunc(s: str, width: int) -> str:
+        return s if len(s) <= width else s[: width - 1] + "…"
+
+    print(
+        f"{'ID':>4}  {'STATUS':<10}  {'BRAIN':<10}  {'MODEL':<22}  "
+        f"{'NAME':<15}  {'TAGS':<20}  {'STARTED':<20}  TOPIC"
+    )
+    print("-" * 130)
     for w in rows:
         started = (w.started_at or "")[:19]
+        name = _trunc(w.name or "-", 15)
+        try:
+            tag_list = json.loads(w.tags or "[]")
+        except json.JSONDecodeError:
+            tag_list = []
+        tags_str = _trunc(",".join(tag_list) if tag_list else "-", 20)
         print(
             f"{w.id:>4}  {w.status:<10}  {w.brain:<10}  {(w.model or '-'):<22}  "
-            f"{started:<20}  {w.topic}"
+            f"{name:<15}  {tags_str:<20}  {started:<20}  {w.topic}"
         )
     return 0
 
@@ -505,15 +534,39 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_show(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
+    if not args.worker_id and not args.name:
+        raise SystemExit("show requires either <id> or --name <slug>")
+
+    total_runs: Optional[int] = None
     conn = connect(instance)
     try:
-        w = get(conn, int(args.worker_id))
+        if args.name:
+            terminal = ("done", "failed", "cancelled", "need_input")
+            placeholders = ",".join("?" * len(terminal))
+            row = conn.execute(
+                f"SELECT * FROM workers WHERE name=? AND status IN ({placeholders}) "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (args.name, *terminal),
+            ).fetchone()
+            if not row:
+                raise SystemExit(
+                    f"no terminal-state worker found with name '{args.name}'"
+                )
+            w = Worker.from_row(row)
+            total_runs = conn.execute(
+                "SELECT COUNT(*) FROM workers WHERE name=?", (args.name,)
+            ).fetchone()[0]
+        else:
+            w = get(conn, int(args.worker_id))
     finally:
         conn.close()
     if not w:
         raise SystemExit(f"worker {args.worker_id} not found")
 
-    print(f"worker #{w.id}  [{w.status}]")
+    header = f"worker #{w.id}  [{w.status}]"
+    if total_runs is not None:
+        header += f"  ({total_runs} total runs for '{args.name}')"
+    print(header)
     print(f"  topic       {w.topic}")
     print(f"  brain       {w.brain}")
     print(f"  model       {w.model or '-'}")
@@ -730,6 +783,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--spawned-by", default="user", help="free-form origin label")
     sp.add_argument("--telegram-msg-id", default=None, help="inbound msg that triggered the spawn")
     sp.add_argument("--prompt", default="-", help="prompt file path, or '-' for stdin")
+    sp.add_argument("--name", default=None,
+                    help="persistent identity slug (enables session resume on next spawn)")
+    sp.add_argument("--tag", action="append", default=None,
+                    help="tag for filtering (repeatable)")
+    sp.add_argument("--fresh", action="store_true",
+                    help="ignore prior session when resuming a named worker (Sprint 3)")
     sandbox = sp.add_mutually_exclusive_group()
     sandbox.add_argument("--read-only", dest="sandbox", action="store_const", const="read-only",
                          help="codex + gemini: read files but don't edit them")
@@ -745,10 +804,14 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["queued", "running", "done", "failed", "cancelled",
                              "need_input", "all"],
                     help="filter by status")
+    lp.add_argument("--name", default=None, help="filter by name")
+    lp.add_argument("--tag", default=None, help="filter by tag (membership in tags JSON array)")
     lp.add_argument("--limit", type=int, default=20)
 
     shp = subs.add_parser("show", help="show one worker's details")
-    shp.add_argument("worker_id")
+    shp.add_argument("worker_id", nargs="?", default=None)
+    shp.add_argument("--name", default=None,
+                     help="show latest terminal-state run for this name")
 
     tp = subs.add_parser("tail", help="tail -f a worker's log")
     tp.add_argument("worker_id")

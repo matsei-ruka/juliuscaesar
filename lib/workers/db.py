@@ -35,11 +35,15 @@ CREATE TABLE IF NOT EXISTS workers (
     timeout_seconds INTEGER,
     started_at      TEXT NOT NULL,
     finished_at     TEXT,
-    error           TEXT
+    error           TEXT,
+    name            TEXT,
+    tags            TEXT,
+    session_id      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_started ON workers(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workers_name ON workers(name);
 """
 
 
@@ -84,6 +88,9 @@ class Worker:
     started_at: str
     finished_at: Optional[str]
     error: Optional[str]
+    name: Optional[str] = None
+    tags: Optional[str] = None
+    session_id: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Worker":
@@ -98,6 +105,13 @@ def connect(instance_dir: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path(instance_dir))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # Migrate older DBs lacking the named-workers columns.
+    for col, typedef in [("name", "TEXT"), ("tags", "TEXT"), ("session_id", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE workers ADD COLUMN {col} {typedef}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
     return conn
 
 
@@ -123,6 +137,8 @@ def create(
     telegram_msg_id: Optional[str] = None,
     notify_chat_id: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
+    name: Optional[str] = None,
+    tags: Optional[str] = None,
 ) -> int:
     """Insert a queued worker. Returns the new id."""
     cur = conn.execute(
@@ -130,11 +146,11 @@ def create(
         INSERT INTO workers (
             topic, brain, model, prompt_path, status,
             log_path, spawned_by, telegram_msg_id, notify_chat_id,
-            timeout_seconds, started_at
+            timeout_seconds, started_at, name, tags
         ) VALUES (
             :topic, :brain, :model, :prompt_path, 'queued',
             :log_path, :spawned_by, :telegram_msg_id, :notify_chat_id,
-            :timeout_seconds, :started_at
+            :timeout_seconds, :started_at, :name, :tags
         )
         """,
         {
@@ -148,6 +164,8 @@ def create(
             "notify_chat_id": notify_chat_id,
             "timeout_seconds": timeout_seconds,
             "started_at": _now_iso(),
+            "name": name,
+            "tags": tags,
         },
     )
     conn.commit()
@@ -197,16 +215,21 @@ def list_workers(
     conn: sqlite3.Connection,
     *,
     status: Optional[str] = None,
+    name: Optional[str] = None,
     limit: int = 20,
 ) -> list[Worker]:
+    where: list[str] = []
+    params: list = []
     if status and status != "all":
-        rows = conn.execute(
-            "SELECT * FROM workers WHERE status=? ORDER BY started_at DESC LIMIT ?",
-            (status, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM workers ORDER BY started_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        where.append("status = ?")
+        params.append(status)
+    if name:
+        where.append("name = ?")
+        params.append(name)
+    sql = "SELECT * FROM workers"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY started_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
     return [Worker.from_row(r) for r in rows]
