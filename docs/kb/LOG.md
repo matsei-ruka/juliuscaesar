@@ -1,0 +1,10 @@
+# Knowledge Base - Operation Log
+
+Append-only audit trail. Newest at bottom.
+
+Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
+
+---
+
+## [2026-04-25] init | docs/kb - scaffolded KB config and index
+## [2026-04-25] build | docs/kb - initial verified map of framework docs, binaries, and libraries

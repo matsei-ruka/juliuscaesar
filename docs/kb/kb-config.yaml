@@ -1,0 +1,30 @@
+# KB config - authoritative. The `/kb` skill reads this from <kb_root>/kb-config.yaml.
+# If this file is missing or malformed, the skill fails loudly. No fallback to defaults.
+
+kb_root: docs/kb                 # path relative to repo root (this file lives inside it)
+
+sections:                        # section folders under kb_root; add/remove freely
+  - domain                       # business logic
+  - subsystem                    # cross-cutting technical systems
+  - contract                     # stable external interfaces
+  - decision                     # architectural decision records (ADRs)
+  - source                       # summaries of ingested external sources
+
+staleness_days: 60               # warn when `last_verified` older than this
+
+anchor_verification: strict      # strict | warn | off
+                                 #   strict: failed anchor blocks writes
+                                 #   warn:   failed anchor prints warning, continues
+                                 #   off:    skip anchor verification (not recommended)
+
+languages: [en]                  # allowed body languages; frontmatter is always en
+
+log: true                        # append one line to <kb_root>/LOG.md per operation
+
+lint:
+  orphans: true                  # entries not linked from INDEX or any `related`
+  contradictions: true           # same anchor referenced with conflicting claims
+  missing_xrefs: true            # suggest `related` entries for co-anchored pages
+  stale: true                    # flag entries past staleness_days
+
+verified_by: ""                  # default frontmatter value; empty -> use `git config user.name`
