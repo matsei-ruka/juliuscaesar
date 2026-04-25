@@ -30,7 +30,7 @@ if [[ -n "$RESUME" ]]; then
     ARGS=("exec" "resume" "$RESUME")
     case "$SANDBOX" in
         read-only|workspace-write)
-            ARGS+=("-c" "sandbox_mode=\"$SANDBOX\"")
+            ARGS+=("-c" "sandbox_mode=$SANDBOX")
             ;;
         yolo|danger|danger-full-access)
             ARGS+=("--dangerously-bypass-approvals-and-sandbox")
