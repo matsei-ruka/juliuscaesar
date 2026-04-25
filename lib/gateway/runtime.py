@@ -300,6 +300,14 @@ class GatewayRuntime:
             fallback_brain=self.config.triage.fallback_brain,
         )
         brain, model = selection.brain, selection.model
+        if meta.get("image_path") and brain not in ("claude", "gemini"):
+            vision_brain = self._select_vision_brain()
+            if vision_brain and vision_brain != brain:
+                self.log(
+                    f"vision route id={event.id} forcing brain={vision_brain} "
+                    f"(was {brain}) reason=image_path"
+                )
+                brain, model = vision_brain, None
         self.log(
             f"route id={event.id} channel={channel} brain={brain} "
             f"model={model or '-'} reason={selection.reason}"
@@ -339,6 +347,25 @@ class GatewayRuntime:
             log=self.log,
         )
         return response
+
+    def _select_vision_brain(self) -> str | None:
+        """Return the first vision-capable brain whose adapter validates.
+
+        Preference order: claude → gemini. Returns None if neither is set up
+        on this host (caller falls back to the original routing decision).
+        """
+        from .brains.dispatch import _BRAIN_REGISTRY
+
+        for candidate in ("claude", "gemini"):
+            cls = _BRAIN_REGISTRY.get(candidate)
+            if cls is None:
+                continue
+            try:
+                cls(self.instance_dir).validate()
+            except (FileNotFoundError, PermissionError):
+                continue
+            return candidate
+        return None
 
     def _render_voice_reply(self, response: str, meta: dict[str, Any]) -> None:
         """Synthesize Rachel-voice OGG for `response` and stash the path in `meta`.
