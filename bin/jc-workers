@@ -397,7 +397,7 @@ def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional
 
         if brain == "claude":
             # Claude project slug: replace `/` and `_` with `-`, keep leading dash.
-            # e.g. /home/lucamattei/rachel_zane → -home-lucamattei-rachel-zane
+            # e.g. /home/lucamattei/julius_instance -> -home-lucamattei-julius-instance
             slug = str(instance).replace("/", "-").replace("_", "-")
             proj_dir = Path.home() / ".claude" / "projects" / slug
             if not proj_dir.is_dir():

@@ -5,7 +5,7 @@
 **Framework** (this repo — `juliuscaesar`):
 Reusable code. Zero user data. Published as open source.
 
-**Instance** (separate private repo per user — e.g. `rachel_zane`):
+**Instance** (separate private repo per user, for example `julius_instance`):
 User identity, memory contents, skill configs, credentials. Owned and version-controlled by the user.
 
 ## Process model

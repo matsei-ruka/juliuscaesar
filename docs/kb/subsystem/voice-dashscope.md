@@ -41,6 +41,7 @@ The CLI handles instance resolution and `.env` loading. Library functions take e
 ## Implementation notes
 
 - Enrollment calls the DashScope customization endpoint and returns `{voice, target_model, preferred_name}`.
+- Enrollment defaults `--name` to `julius` when no preferred voice name is supplied.
 - Synthesis uses the international realtime WebSocket endpoint, writes raw PCM to a temporary file, then converts it with ffmpeg to OGG/Opus.
 - Transcription base64-embeds the audio file in a multimodal generation request.
 

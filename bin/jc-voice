@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pe = sub.add_parser("enroll", help="Enroll a voice sample; writes to voice/references/voice.json")
     pe.add_argument("audio")
-    pe.add_argument("--name", default="rachel")
+    pe.add_argument("--name", default="julius")
     pe.add_argument("--target-model", default="qwen3-tts-vc-realtime-2026-01-15")
     pe.set_defaults(func=cmd_enroll)
 

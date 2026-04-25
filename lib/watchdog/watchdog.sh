@@ -198,7 +198,7 @@ kill_telegram_plugin() {
     rm -f "$pidfile"
 }
 
-start_rachel() {
+start_julius() {
     if [[ -z "$CLAUDE_BIN" ]]; then
         log "start: no claude binary found on PATH or fallbacks"
         return 1
@@ -287,7 +287,7 @@ main() {
     screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1 || true
     sleep 1
 
-    if ! start_rachel; then
+    if ! start_julius; then
         write_state "restart-failed"
         if [[ "$prev" == "ok" || "$prev" == "unknown" ]]; then
             notify "⚠️ $SCREEN_NAME watchdog cannot locate the claude binary. Check $LOG_FILE"

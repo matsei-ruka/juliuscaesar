@@ -1,7 +1,7 @@
 """DashScope Qwen TTS realtime → PCM → OGG/Opus.
 
-Ported from rachel_zane/voice/scripts/tts_to_ogg.py with the voice-json
-dependency removed: the caller passes voice_id + target_model explicitly.
+The caller passes voice_id + target_model explicitly; this module only handles
+the TTS realtime stream and OGG/Opus conversion.
 """
 
 from __future__ import annotations

@@ -2,17 +2,17 @@
 
 ## 0.1.0 — "It walks" ✅ shipped 2026-04-23
 
-Extract the self-contained pieces from the Rachel reference instance into a working framework.
+Extract the self-contained pieces from the original reference instance into a working framework.
 
 - [x] `bin/jc` — CLI router with subcommand dispatch (#4)
 - [x] `jc init` — scaffold a new instance dir from `templates/init-instance/` (#4)
-- [x] `jc memory` — extract rachel_zane/memory/cli → lib/memory + bin/jc-memory (#1)
-- [x] `jc heartbeat run <task>` — extract rachel_zane/heartbeat → lib + bin (#2)
-- [x] `jc voice speak <text>` — extract rachel_zane/voice → lib + bin (#3)
-- [x] `jc watchdog install` — extract rachel_zane/ops/watchdog.sh → bin + config template (#4)
+- [x] `jc memory` — extract reference memory CLI -> lib/memory + bin/jc-memory (#1)
+- [x] `jc heartbeat run <task>` — extract reference heartbeat runner -> lib + bin (#2)
+- [x] `jc voice speak <text>` — extract reference voice subsystem -> lib + bin (#3)
+- [x] `jc watchdog install` — extract reference watchdog -> bin + config template (#4)
 - [x] `install.sh` — one-liner install to `~/.local/bin/` (#1, refined through #4)
 - [x] Smoke tests per component (validated during each PR)
-- [x] Rachel instance migrated to consume JC 0.1 (3 rachel_zane commits mirror the PRs)
+- [x] First production instance migrated to consume JC 0.1
 
 ## 0.1.1 — Hardening for external users ✅ shipped 2026-04-23
 
@@ -37,7 +37,7 @@ Extract the self-contained pieces from the Rachel reference instance into a work
 - [ ] Config schema validator
 - [ ] Documentation site
 - [ ] Consolidation / "auto-dream" for L1 HOT.md pruning
-- [ ] Second production instance (not Rachel)
+- [ ] Second production instance
 
 ## 1.0.0 — "It's public"
 

@@ -1,8 +1,8 @@
 """DashScope Qwen voice enrollment (clone a sample → persistent voice id).
 
-Ported from rachel_zane/voice/scripts/enroll_voice.py. Returns a dict
-containing {voice, target_model, preferred_name}; caller is responsible
-for persisting (typically to <instance>/voice/references/voice.json).
+Voice enrollment helper. Returns a dict containing {voice, target_model,
+preferred_name}; caller is responsible for persisting it, typically to
+<instance>/voice/references/voice.json.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ DEFAULT_TARGET_MODEL = "qwen3-tts-vc-realtime-2026-01-15"
 def enroll(
     audio_path: Path,
     *,
-    preferred_name: str = "rachel",
+    preferred_name: str = "julius",
     target_model: str = DEFAULT_TARGET_MODEL,
     url: str = CUSTOMIZATION_URL_INTL,
     timeout_s: float = 120.0,

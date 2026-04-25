@@ -1,8 +1,7 @@
 """Audio transcription via DashScope qwen2.5-omni (multimodal).
 
-Ported from rachel_zane/voice/scripts/transcribe.py. The OpenAI Whisper
-path used in the original Rachel setup was dead (401 since early March);
-Qwen omni replaces it and works with the same DASHSCOPE_API_KEY.
+DashScope qwen omni handles transcription and works with the same
+DASHSCOPE_API_KEY used by the rest of the voice subsystem.
 """
 
 from __future__ import annotations

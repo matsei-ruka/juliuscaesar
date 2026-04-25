@@ -1,7 +1,7 @@
 # Spec: `jc workers` — on-demand background agents
 
 **Status:** draft
-**Author:** Rachel (under Luca's direction)
+**Author:** JuliusCaesar maintainers
 **Created:** 2026-04-24
 **Branch:** `workers`
 **Tracking PR:** _not yet opened_
@@ -236,7 +236,7 @@ Workers run with the same permissions as the main session (currently `--dangerou
 
 ### Sprint 4 — Main-thread integration (1-2h)
 - Document spawn heuristic in `docs/ARCHITECTURE.md`
-- Add L1 memory rule to Rachel (and `jc init` template) teaching main session when to spawn
+- Add L1 memory rule to the main session (and `jc init` template) teaching it when to spawn
 - Add `need_input` sentinel parsing (promote from MVP=failed to proper status)
 
 ### Sprint 5 — Polish + docs (1-2h)
