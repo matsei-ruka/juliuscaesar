@@ -2,7 +2,7 @@
 
 An [OpenClaw](https://openclaw.com)-inspired assistant framework built **natively** on [Claude Code](https://www.anthropic.com/claude-code).
 
-> Status: **0.1.1 — walks.** Usable for a single-instance personal assistant. See [ROADMAP.md](./ROADMAP.md).
+> Status: **0.3.0 foundation in progress.** Usable for a single-instance personal assistant, with the first unified-gateway queue/runtime primitives landing. See [ROADMAP.md](./ROADMAP.md).
 
 ## Why
 
@@ -25,7 +25,8 @@ cd ~/juliuscaesar && ./install.sh
 jc setup ~/my-assistant
 cd ~/my-assistant
 jc heartbeat run hello --dry-run
-jc doctor
+jc doctor --fix
+jc gateway status
 # start live runtime when ready:
 claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official
 ```
@@ -38,9 +39,10 @@ Full walkthrough: [QUICKSTART.md](./QUICKSTART.md).
 - `jc heartbeat`  — YAML-driven task runner, cron-triggered, per-task tool+model routing (claude, gemini, opencode, minimax), with pre_fetch → hash-delta → synthesis pipeline and MCP-independent Telegram delivery
 - `jc voice`      — TTS + ASR + enrollment via DashScope Qwen (Singapore/intl endpoint)
 - `jc watchdog`   — supervisor for the live `claude` session. Detects claude auto-update crashes AND telegram plugin deaths, restarts with `--resume` so conversation memory survives
+- `jc gateway`    — unified-gateway foundation: local SQLite event queue, daemon lifecycle (`start`, `stop`, `restart`, `status`, `tail`), event enqueue/claim/complete/fail primitives
 - `jc init`       — scaffold a new instance from `templates/init-instance/`
 - `jc setup`      — guided first-run configurator that writes `.env`, L1 memory, watchdog config, and runs diagnostics
-- `jc doctor`     — 29 pre-flight checks (binaries, instance structure, credentials, runtime)
+- `jc doctor`     — pre-flight checks (binaries, instance structure, credentials, runtime, gateway) plus `--fix` for conservative local repairs
 - `jc`            — top-level router
 
 ## Components (planned — 0.2.0+)
@@ -57,6 +59,7 @@ See [ROADMAP.md](./ROADMAP.md).
 - **Instance dir resolution** (same for every `jc-*` binary): `--instance-dir <path>` → `$JC_INSTANCE_DIR` → walk up for a `.jc` marker → cwd.
 - **Secrets live in `<instance>/.env`**, mode 600. Never in the framework repo.
 - **SQLite FTS5 index is derived**, never authoritative. Rebuild from the markdown files with `jc memory rebuild`.
+- **Gateway queue is runtime state**, stored at `<instance>/state/gateway/queue.db`. Initialize with `jc gateway init` or `jc doctor --fix`.
 - **Adapter contract**: framework adapters are stdin → stdout shell scripts. Model passed as `$1`. `tasks.yaml` points at them by name.
 - **Framework has no knowledge of specific instances** — everything flows through `instance_dir`.
 

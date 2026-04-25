@@ -4,7 +4,7 @@ section: subsystem
 status: active
 code_anchors:
   - path: install.sh
-    symbol: "BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-setup jc-doctor)"
+    symbol: "BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor)"
   - path: bin/jc
     symbol: "case \"$SUB\" in"
 last_verified: 2026-04-25
@@ -17,7 +17,7 @@ related:
 
 `install.sh` installs JuliusCaesar by creating a venv at `~/.local/share/juliuscaesar/venv`, installing Python dependencies, and writing executable shims into `~/.local/bin`. The shims call the binaries in the current framework checkout, so `git pull` updates behavior without reinstalling.
 
-The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `init`, `setup`, and `doctor` to matching `jc-*` binaries on PATH.
+The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, and `doctor` to matching `jc-*` binaries on PATH.
 
 ## Source of truth
 
@@ -33,7 +33,10 @@ The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`
 - The installer refuses to overwrite existing `~/.local/bin/jc-*` shims that point to a different JuliusCaesar clone unless run with `--force`.
 - Python binaries run through the venv wrapper with the framework `lib/` on `PYTHONPATH`.
 - Native bash binaries are invoked directly by their shim.
+- The router preserves `--instance-dir <path>` or `--instance-dir=<path>` when placed before the subcommand.
 - `jc setup` uses `jc init` underneath, writes `.env`, L1 memory, watchdog config, rebuilds the memory index, and runs `jc doctor`.
+- `jc gateway` owns the first unified-gateway surface: durable SQLite queue initialization, daemon lifecycle, enqueue, claim, complete/fail, and status/list inspection.
+- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, remove stale gateway pidfiles, and create `state/`.
 
 ## Failure modes
 

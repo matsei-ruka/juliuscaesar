@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""jc-gateway - gateway queue foundation for JuliusCaesar.
+
+This first slice intentionally implements the durable queue and inspection
+surface before channel adapters and brain invocation land.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from gateway import queue  # type: ignore  # noqa: E402
+
+
+RUNNING = True
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    if arg:
+        p = Path(arg).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"--instance-dir does not exist: {p}")
+        return p
+    env = os.environ.get("JC_INSTANCE_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
+        return p
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ".jc").exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    cwd = Path.cwd().resolve()
+    if (cwd / "memory").exists():
+        return cwd
+    raise SystemExit(
+        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
+        "or run from a directory containing memory/ or a .jc marker."
+    )
+
+
+def print_json(data: object) -> None:
+    print(json.dumps(data, indent=2, sort_keys=True))
+
+
+def parse_meta(raw: str | None) -> dict | None:
+    if raw in (None, ""):
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--meta must be valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit("--meta must decode to a JSON object")
+    return data
+
+
+def read_text_arg(value: str | None) -> str:
+    if value in (None, "-"):
+        return sys.stdin.read()
+    return value
+
+
+def pid_path(instance_dir: Path) -> Path:
+    return queue.queue_dir(instance_dir) / "jc-gateway.pid"
+
+
+def log_path(instance_dir: Path) -> Path:
+    return queue.queue_dir(instance_dir) / "gateway.log"
+
+
+def now_line() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def log_line(instance_dir: Path, message: str) -> None:
+    path = log_path(instance_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{now_line()}] {message}\n")
+
+
+def read_pid(instance_dir: Path) -> int | None:
+    try:
+        raw = pid_path(instance_dir).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def pid_alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def remove_stale_pid(instance_dir: Path) -> None:
+    pid = read_pid(instance_dir)
+    if pid is None or not pid_alive(pid):
+        pid_path(instance_dir).unlink(missing_ok=True)
+
+
+def install_signal_handlers() -> None:
+    def _handle(_signum: int, _frame: object) -> None:
+        global RUNNING
+        RUNNING = False
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    conn.close()
+    print(f"gateway queue initialized: {queue.queue_path(instance)}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    counts = queue.counts(conn)
+    conn.close()
+    pid = read_pid(instance)
+    print(f"instance: {instance}")
+    print(f"queue:    {queue.queue_path(instance)}")
+    print(f"pidfile:  {pid_path(instance)}")
+    print(f"log:      {log_path(instance)}")
+    if pid_alive(pid):
+        print(f"daemon:   running (pid {pid})")
+    elif pid is not None:
+        print(f"daemon:   stale pidfile (pid {pid})")
+    else:
+        print("daemon:   stopped")
+    if counts:
+        for status in sorted(counts):
+            print(f"{status}: {counts[status]}")
+    else:
+        print("events:   0")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    conn.close()
+    queue.queue_dir(instance).mkdir(parents=True, exist_ok=True)
+    existing = read_pid(instance)
+    if pid_alive(existing) and existing != os.getpid():
+        raise SystemExit(f"gateway already running (pid {existing})")
+    remove_stale_pid(instance)
+    pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
+    install_signal_handlers()
+    log_line(instance, f"gateway daemon started pid={os.getpid()}")
+    try:
+        while RUNNING:
+            conn = queue.connect(instance)
+            try:
+                requeued = queue.requeue_expired(conn)
+                conn.commit()
+            finally:
+                conn.close()
+            if requeued:
+                log_line(instance, f"requeued expired events count={requeued}")
+            time.sleep(args.interval_seconds)
+    finally:
+        pid_path(instance).unlink(missing_ok=True)
+        log_line(instance, "gateway daemon stopped")
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    conn.close()
+    existing = read_pid(instance)
+    if pid_alive(existing):
+        print(f"gateway already running (pid {existing})")
+        return 0
+    remove_stale_pid(instance)
+    queue.queue_dir(instance).mkdir(parents=True, exist_ok=True)
+    log_handle = log_path(instance).open("a", encoding="utf-8")
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--instance-dir",
+        str(instance),
+        "run",
+        "--interval-seconds",
+        str(args.interval_seconds),
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(instance),
+        stdin=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=log_handle,
+        start_new_session=True,
+    )
+    log_handle.close()
+    pid_path(instance).write_text(f"{proc.pid}\n", encoding="utf-8")
+    log_line(instance, f"gateway daemon launch requested pid={proc.pid}")
+    print(f"gateway started (pid {proc.pid})")
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    pid = read_pid(instance)
+    if not pid_alive(pid):
+        remove_stale_pid(instance)
+        print("gateway already stopped")
+        return 0
+    assert pid is not None
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + args.timeout_seconds
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            remove_stale_pid(instance)
+            print(f"gateway stopped (pid {pid})")
+            return 0
+        time.sleep(0.2)
+    if args.kill:
+        os.kill(pid, signal.SIGKILL)
+        remove_stale_pid(instance)
+        print(f"gateway killed (pid {pid})")
+        return 0
+    raise SystemExit(f"gateway did not stop within {args.timeout_seconds}s (pid {pid})")
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    stop_args = argparse.Namespace(
+        instance_dir=args.instance_dir,
+        timeout_seconds=args.timeout_seconds,
+        kill=args.kill,
+    )
+    cmd_stop(stop_args)
+    start_args = argparse.Namespace(
+        instance_dir=args.instance_dir,
+        interval_seconds=args.interval_seconds,
+    )
+    return cmd_start(start_args)
+
+
+def cmd_tail(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    path = log_path(instance)
+    if not path.exists():
+        print(f"log does not exist yet: {path}")
+        return 1
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in lines[-args.lines :]:
+        print(line)
+    if not args.follow:
+        return 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(0, os.SEEK_END)
+        while True:
+            line = handle.readline()
+            if line:
+                print(line, end="")
+            else:
+                time.sleep(0.5)
+
+
+def cmd_enqueue(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    event, inserted = queue.enqueue(
+        conn,
+        source=args.source,
+        source_message_id=args.source_message_id,
+        user_id=args.user_id,
+        conversation_id=args.conversation_id,
+        content=read_text_arg(args.content),
+        meta=parse_meta(args.meta),
+    )
+    conn.close()
+    data = event.to_dict()
+    data["inserted"] = inserted
+    print_json(data)
+    return 0
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    event = queue.claim_next(conn, worker_id=args.worker_id, lease_seconds=args.lease_seconds)
+    conn.close()
+    if event is None:
+        print("no ready events")
+        return 1
+    print_json(event.to_dict())
+    return 0
+
+
+def cmd_complete(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    event = queue.complete(conn, args.event_id, response=read_text_arg(args.response))
+    conn.close()
+    print_json(event.to_dict())
+    return 0
+
+
+def cmd_fail(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    event = queue.fail(conn, args.event_id, error=args.error, max_retries=args.max_retries)
+    conn.close()
+    print_json(event.to_dict())
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    events = queue.recent(conn, limit=args.limit)
+    conn.close()
+    if args.json:
+        print_json([event.to_dict() for event in events])
+        return 0
+    for event in events:
+        content = event.content.replace("\n", " ")
+        if len(content) > 80:
+            content = content[:77] + "..."
+        print(f"{event.id:>4} {event.status:<8} {event.source:<12} {event.received_at} {content}")
+    return 0
+
+
+def cmd_work_once(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    conn = queue.connect(instance)
+    event = queue.claim_next(conn, worker_id=args.worker_id, lease_seconds=args.lease_seconds)
+    if event is None:
+        conn.close()
+        print("no ready events")
+        return 1
+    if args.mode == "echo":
+        response = event.content
+    else:
+        conn.close()
+        raise SystemExit(f"unsupported work mode: {args.mode}")
+    event = queue.complete(conn, event.id, response=response)
+    conn.close()
+    print_json(event.to_dict())
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-gateway")
+    p.add_argument("--instance-dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pi = sub.add_parser("init", help="Create or migrate the gateway queue database")
+    pi.set_defaults(func=cmd_init)
+
+    ps = sub.add_parser("status", help="Show queue path and event counts")
+    ps.set_defaults(func=cmd_status)
+
+    pr = sub.add_parser("run", help="Run the gateway maintenance loop in the foreground")
+    pr.add_argument("--interval-seconds", type=float, default=5.0)
+    pr.set_defaults(func=cmd_run)
+
+    pstart = sub.add_parser("start", help="Start the gateway daemon")
+    pstart.add_argument("--interval-seconds", type=float, default=5.0)
+    pstart.set_defaults(func=cmd_start)
+
+    pstop = sub.add_parser("stop", help="Stop the gateway daemon")
+    pstop.add_argument("--timeout-seconds", type=float, default=10.0)
+    pstop.add_argument("--kill", action="store_true", help="SIGKILL if SIGTERM timeout expires")
+    pstop.set_defaults(func=cmd_stop)
+
+    prestart = sub.add_parser("restart", help="Restart the gateway daemon")
+    prestart.add_argument("--interval-seconds", type=float, default=5.0)
+    prestart.add_argument("--timeout-seconds", type=float, default=10.0)
+    prestart.add_argument("--kill", action="store_true", help="SIGKILL if SIGTERM timeout expires")
+    prestart.set_defaults(func=cmd_restart)
+
+    ptail = sub.add_parser("tail", help="Print gateway log tail")
+    ptail.add_argument("-n", "--lines", type=int, default=40)
+    ptail.add_argument("-f", "--follow", action="store_true")
+    ptail.set_defaults(func=cmd_tail)
+
+    pe = sub.add_parser("enqueue", help="Enqueue a gateway event")
+    pe.add_argument("content", nargs="?", help="Event content. Omit or use '-' to read stdin.")
+    pe.add_argument("--source", default="manual")
+    pe.add_argument("--source-message-id")
+    pe.add_argument("--user-id")
+    pe.add_argument("--conversation-id")
+    pe.add_argument("--meta", help="JSON object")
+    pe.set_defaults(func=cmd_enqueue)
+
+    pc = sub.add_parser("claim", help="Claim one ready event")
+    pc.add_argument("--worker-id", default=f"manual-{os.getpid()}")
+    pc.add_argument("--lease-seconds", type=int, default=300)
+    pc.set_defaults(func=cmd_claim)
+
+    pd = sub.add_parser("complete", help="Mark an event done")
+    pd.add_argument("event_id", type=int)
+    pd.add_argument("--response", default="-", help="Response text. Default reads stdin.")
+    pd.set_defaults(func=cmd_complete)
+
+    pf = sub.add_parser("fail", help="Mark an event failed or queued for retry")
+    pf.add_argument("event_id", type=int)
+    pf.add_argument("--error", required=True)
+    pf.add_argument("--max-retries", type=int, default=3)
+    pf.set_defaults(func=cmd_fail)
+
+    pl = sub.add_parser("list", help="List recent events")
+    pl.add_argument("--limit", type=int, default=20)
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_list)
+
+    pw = sub.add_parser("work-once", help="Claim and process one event with a test worker")
+    pw.add_argument("--worker-id", default=f"worker-{os.getpid()}")
+    pw.add_argument("--lease-seconds", type=int, default=300)
+    pw.add_argument("--mode", choices=["echo"], default="echo")
+    pw.set_defaults(func=cmd_work_once)
+
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -13,3 +13,5 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-04-25] update | contract/config-and-secret-boundaries.md - documented safe env parsing and setup secret handling
 ## [2026-04-25] update | subsystem/voice-dashscope.md - documented default voice enrollment name
 ## [2026-04-25] update | subsystem/watchdog-runtime.md - documented Telegram plugin ownership checks
+## [2026-04-25] new | subsystem/gateway-queue.md - documented SQLite gateway queue foundation
+## [2026-04-25] update | subsystem/gateway-queue.md - documented gateway daemon lifecycle and doctor fix behavior
