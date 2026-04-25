@@ -140,8 +140,37 @@ class TelegramChannel:
                         self.log(
                             f"telegram {kind} transcribed update_id={update_id} chars={len(text)}"
                         )
-                    if not text.strip():
+                    photo = message.get("photo") if isinstance(message.get("photo"), list) else None
+                    document = (
+                        message.get("document")
+                        if isinstance(message.get("document"), dict)
+                        else None
+                    )
+                    image_path: Path | None = None
+                    if photo:
+                        try:
+                            image_path = self._ingest_photo(photo, update_id)
+                        except Exception as exc:  # noqa: BLE001
+                            self.log(
+                                f"telegram photo ingestion failed update_id={update_id}: {exc}"
+                            )
+                    file_path: Path | None = None
+                    if document:
+                        try:
+                            file_path = self._ingest_document(document, update_id)
+                        except Exception as exc:  # noqa: BLE001
+                            self.log(
+                                f"telegram document ingestion failed update_id={update_id}: {exc}"
+                            )
+                    has_media = image_path is not None or file_path is not None
+                    if not text.strip() and not has_media:
                         continue
+                    if not text.strip() and has_media:
+                        if image_path is not None and file_path is None:
+                            text = "[image]"
+                        elif file_path is not None:
+                            name = (document or {}).get("file_name") or file_path.name
+                            text = f"[document: {name}]"
                     thread_id = message.get("message_thread_id")
                     conversation_id = f"{chat_id}:{thread_id}" if thread_id else chat_id
                     meta: dict[str, Any] = {
@@ -158,6 +187,12 @@ class TelegramChannel:
                         meta["was_voice"] = True
                         meta["audio_path"] = str(audio_path)
                         meta["attachment_kind"] = kind
+                    if image_path is not None:
+                        meta["image_path"] = str(image_path)
+                    if file_path is not None:
+                        meta["file_path"] = str(file_path)
+                        if document and document.get("file_name"):
+                            meta["file_name"] = document.get("file_name")
                     enqueue(
                         source="telegram",
                         source_message_id=str(update.get("update_id")),
@@ -190,6 +225,40 @@ class TelegramChannel:
         else:
             ext = _AUDIO_MIME_EXT.get(str(payload.get("mime_type") or ""), ".oga")
         dest = self.instance_dir / "state" / "voice" / "inbound" / f"{update_id}{ext}"
+        return _download_telegram_file(self.token, file_id, dest)
+
+    def _ingest_photo(self, photos: list[Any], update_id: Any) -> Path:
+        """Download the largest photo size to `state/voice/inbound/photos/`."""
+        if not photos:
+            raise RuntimeError("photo payload empty")
+        largest = photos[-1]
+        if not isinstance(largest, dict):
+            raise RuntimeError("photo payload malformed")
+        file_id = largest.get("file_id")
+        if not file_id:
+            raise RuntimeError("photo payload missing file_id")
+        dest = (
+            self.instance_dir / "state" / "voice" / "inbound" / "photos" / f"{update_id}.jpg"
+        )
+        return _download_telegram_file(self.token, file_id, dest)
+
+    def _ingest_document(self, document: dict[str, Any], update_id: Any) -> Path:
+        """Download a Telegram document to `state/voice/inbound/docs/`.
+
+        Preserves the original file extension when present; falls back to a
+        MIME-derived extension; finally `.bin` if neither is available.
+        """
+        file_id = document.get("file_id")
+        if not file_id:
+            raise RuntimeError("document payload missing file_id")
+        original = document.get("file_name") or ""
+        ext = Path(original).suffix
+        if not ext:
+            mime = str(document.get("mime_type") or "")
+            ext = mimetypes.guess_extension(mime) or ".bin"
+        dest = (
+            self.instance_dir / "state" / "voice" / "inbound" / "docs" / f"{update_id}{ext}"
+        )
         return _download_telegram_file(self.token, file_id, dest)
 
     def _log_forward(self, message: dict[str, Any], update_id: Any) -> None:
