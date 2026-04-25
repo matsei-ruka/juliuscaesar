@@ -43,8 +43,10 @@ CREATE TABLE IF NOT EXISTS workers (
 
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_started ON workers(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_workers_name ON workers(name);
 """
+
+# idx_workers_name is created post-migration (after name column is guaranteed present).
+_SCHEMA_NAME_INDEX = "CREATE INDEX IF NOT EXISTS idx_workers_name ON workers(name);"
 
 
 # --- Path helpers ------------------------------------------------------------
@@ -105,13 +107,15 @@ def connect(instance_dir: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path(instance_dir))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    # Migrate older DBs lacking the named-workers columns.
+    # Migrate older DBs lacking the named-workers columns (Sprint 1).
+    # Must run BEFORE creating idx_workers_name so the column exists.
     for col, typedef in [("name", "TEXT"), ("tags", "TEXT"), ("session_id", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE workers ADD COLUMN {col} {typedef}")
             conn.commit()
         except sqlite3.OperationalError:
-            pass
+            pass  # column already present
+    conn.executescript(_SCHEMA_NAME_INDEX)
     return conn
 
 
