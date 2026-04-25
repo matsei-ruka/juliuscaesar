@@ -79,7 +79,7 @@ You should see the router listing `memory`, `heartbeat`, `voice`, `watchdog`, `i
 
 ---
 
-## 4. Scaffold an instance
+## 4. Configure an instance
 
 Pick a directory for your assistant. Anywhere you have write access works. Common choices:
 
@@ -88,17 +88,28 @@ Pick a directory for your assistant. Anywhere you have write access works. Commo
 
 ```bash
 # Option A — home dir
-jc init ~/my-assistant
+jc setup ~/my-assistant
 cd ~/my-assistant
 
 # Option B — /opt (requires sudo for the mkdir)
 sudo mkdir -p /opt/my-assistant
 sudo chown $(id -u):$(id -g) /opt/my-assistant
-jc init /opt/my-assistant
+jc setup /opt/my-assistant
 cd /opt/my-assistant
 ```
 
-`jc init` creates:
+`jc setup` asks for assistant name, user profile, timezone, communication style,
+optional Telegram credentials, optional DashScope key, and whether to start the
+live runtime or install watchdog. It uses `jc init` underneath when the target is
+not already a JC instance.
+
+For automation or tests, use safe defaults:
+
+```bash
+jc setup ~/my-assistant --defaults
+```
+
+The configured instance contains:
 
 ```
 my-assistant/
@@ -106,7 +117,7 @@ my-assistant/
 ├── .env               # secrets (mode 600) — fill in next step
 ├── .gitignore
 ├── memory/
-│   ├── L1/{IDENTITY,USER,RULES,HOT}.md    # seed these
+│   ├── L1/{IDENTITY,USER,RULES,HOT}.md    # seeded by setup
 │   ├── L2/{people,business,projects,learnings,reference}/
 │   ├── LOG.md
 │   └── raw/
@@ -122,47 +133,26 @@ my-assistant/
 
 ---
 
-## 5. Fill in credentials
+## 5. Review credentials and identity
+
+`jc setup` writes `.env` and L1 memory from your answers. You can edit them
+afterward:
 
 ```bash
 vim .env
+vim memory/L1/IDENTITY.md
+vim memory/L1/USER.md
+vim memory/L1/RULES.md
 ```
 
-Set whatever you'll use:
-
-```
-# Voice (TTS + ASR via DashScope Qwen, Singapore/intl endpoint)
-DASHSCOPE_API_KEY=sk-...
-
-# Telegram notifications
-TELEGRAM_BOT_TOKEN=123456789:ABC...
-TELEGRAM_CHAT_ID=<chat id from step 2.5>
-```
-
-File should be mode 600 (auto-set by `jc init`; re-apply with `chmod 600 .env` if you copied it).
+`.env` should be mode 600 (auto-set by `jc setup`; re-apply with `chmod 600 .env` if you copied it).
 
 ---
 
-## 6. Seed identity
-
-Edit the L1 files to describe who this assistant is and who they help:
-
-```bash
-vim memory/L1/IDENTITY.md   # personality, voice, boundaries
-vim memory/L1/USER.md       # user profile, preferences, context
-vim memory/L1/RULES.md      # standing rules, corrections, feedback
-# HOT.md can stay as-is; it's a rolling 7-day cache
-```
-
-Then index:
+## 6. Rebuild and verify
 
 ```bash
 jc memory rebuild
-```
-
-Verify:
-
-```bash
 jc doctor
 ```
 
@@ -233,7 +223,8 @@ You should see a message on your phone within a few seconds.
 ## 9. Start the live runtime
 
 ```bash
-screen -dmS myassistant bash -c "cd $(pwd) && claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official"
+INSTANCE_DIR="$(pwd)"
+screen -dmS myassistant bash -c 'cd "$1" && exec claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official' _ "$INSTANCE_DIR"
 ```
 
 Wait ~10s, then:

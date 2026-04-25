@@ -13,16 +13,25 @@ links: []
 
 # Who the assistant is helping
 
-Replace with the user's identity, role, family, business, preferences.
+This file should describe the user, preferences, and durable operating context.
+`jc setup` fills it during the guided first run.
 
 ## Identity
 
-- Name, call-name, timezone, role
+- Name:
+- Call-name:
+- Timezone:
+- Role:
 
 ## Communication preferences
 
-- Format, cadence, quiet hours, language mirroring
+- Format:
+- Cadence:
+- Quiet hours:
+- Language mirroring:
 
 ## Standing rules
 
-- Anti-repeat, verification requirements, external-action policy
+- Anti-repeat:
+- Verification requirements:
+- External-action policy:

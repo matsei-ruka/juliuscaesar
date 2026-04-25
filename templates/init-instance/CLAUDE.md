@@ -1,8 +1,13 @@
 # JuliusCaesar instance
 
-Claude Code auto-loads this file whenever a session starts in this directory. It imports the L1 memory so every session wakes up with identity + user profile + standing rules loaded.
+Claude Code auto-loads this file whenever a session starts in this directory.
+This is a JuliusCaesar assistant instance: user-owned memory, scheduled tasks,
+voice config, watchdog config, and credentials live here; reusable framework
+code lives outside this instance and is invoked through the `jc` CLI.
 
-The imports below resolve to `<instance>/memory/L1/*.md`. Edit those files to change who this assistant is — not this one.
+The imports below resolve to `<instance>/memory/L1/*.md`. `jc setup` fills these
+with concrete first-run context. If this instance was created with low-level
+`jc init`, edit those files before starting the live assistant.
 
 @memory/L1/IDENTITY.md
 @memory/L1/USER.md
@@ -25,10 +30,22 @@ The routing table is in `memory/INDEX.md` (auto-generated).
 
 ## Framework
 
-This instance runs on [JuliusCaesar](https://github.com/matsei-ruka/juliuscaesar). The runner code lives at `~/juliuscaesar/` and is invoked via the `jc-*` binaries in `~/.local/bin/`. This repo contains only instance-specific data: identity, memory content, configurations.
+This instance runs on [JuliusCaesar](https://github.com/matsei-ruka/juliuscaesar). The runner code is invoked via the `jc-*` binaries in `~/.local/bin/`. This repo contains only instance-specific data: identity, memory content, configurations.
 
 - Framework: https://github.com/matsei-ruka/juliuscaesar
 - Docs: see `QUICKSTART.md` and `docs/ARCHITECTURE.md` in the framework repo.
+
+Useful commands:
+
+```bash
+jc doctor
+jc memory search "<query>"
+jc memory read <slug>
+jc memory rebuild
+jc heartbeat run hello --dry-run
+jc workers list
+jc watchdog status
+```
 
 ## Token efficiency (caveman mode)
 

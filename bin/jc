@@ -11,6 +11,7 @@
 #   watchdog   Supervisor for the instance's live claude session.
 #   workers    On-demand background agents.
 #   init       Scaffold a new instance from templates.
+#   setup      Guided first-run configurator.
 #
 # All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
 
@@ -31,6 +32,7 @@ Subcommands:
   watchdog     Live session supervisor (jc-watchdog).
   workers      On-demand background agents (jc-workers).
   init         Scaffold a new instance from templates.
+  setup        Guided first-run configurator.
   doctor       Diagnose the instance + environment.
 
 Global flags:
@@ -38,6 +40,7 @@ Global flags:
 
 Examples:
   jc init ~/my-new-instance
+  jc setup ~/my-new-instance
   jc memory search "query"
   jc heartbeat run morning_briefing
   jc voice speak "hello world"
@@ -58,7 +61,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|init|doctor)
+    memory|heartbeat|voice|watchdog|workers|init|setup|doctor)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

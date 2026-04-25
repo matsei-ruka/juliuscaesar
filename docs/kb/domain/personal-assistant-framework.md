@@ -24,7 +24,7 @@ The core product shape is daemon-like rather than chat-app-like: persistent memo
 
 - Framework code lives in this repo.
 - Instance data lives in a separate private repo or directory owned by the user.
-- An instance is the runtime workspace. `jc init` scaffolds it, and `jc <subcommand>` resolves and operates on it.
+- An instance is the runtime workspace. `jc setup` configures it for first run, `jc init` is the low-level scaffold, and `jc <subcommand>` resolves and operates on it.
 - Framework binaries are installed globally as `jc-*` shims, but they point back to the checked-out framework repo.
 
 ## Operational model
@@ -32,8 +32,8 @@ The core product shape is daemon-like rather than chat-app-like: persistent memo
 Typical bootstrapping:
 
 1. Install framework with `./install.sh`.
-2. Create an instance with `jc init <path>`.
-3. Fill `<instance>/.env` and L1 memory files.
+2. Configure an instance with `jc setup <path>`.
+3. Review `<instance>/.env` and L1 memory files.
 4. Rebuild memory with `jc memory rebuild`.
 5. Validate with `jc doctor`.
 6. Run scheduled tasks with `jc heartbeat run`, live Telegram via Claude Code, and optional watchdog.

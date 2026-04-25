@@ -85,8 +85,6 @@ case "$SUBCMD" in
         TMP_CRON="$(mktemp)"
         trap 'rm -f "$TMP_CRON"' EXIT
         crontab -l 2>/dev/null | grep -vF "$TAG" > "$TMP_CRON" || true
-        # Strip trailing blank lines so reinstalls don't accumulate gaps.
-        sed -i -e :a -e '/^$/{$d;N;ba' -e '}' "$TMP_CRON"
         {
             echo ""
             echo "$ENTRY_REBOOT"
@@ -102,7 +100,6 @@ case "$SUBCMD" in
         TMP_CRON="$(mktemp)"
         trap 'rm -f "$TMP_CRON"' EXIT
         crontab -l 2>/dev/null | grep -vF "$TAG" > "$TMP_CRON" || true
-        sed -i -e :a -e '/^$/{$d;N;ba' -e '}' "$TMP_CRON"
         crontab "$TMP_CRON"
         echo "Removed cron entries for $INSTANCE_DIR"
         ;;

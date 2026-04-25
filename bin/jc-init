@@ -30,10 +30,17 @@ if [[ -f "$TARGET/.jc" ]]; then
     exit 1
 fi
 
-# Refuse if dir isn't empty (except for .git, .gitignore, README.md, LICENSE)
-LEFTOVER=$(find "$TARGET" -mindepth 1 -maxdepth 1 \
-    ! -name .git ! -name .gitignore ! -name README.md ! -name LICENSE \
-    -printf '%f\n' 2>/dev/null | head -1 || true)
+# Refuse if dir isn't empty (except for .git, .gitignore, README.md, LICENSE).
+# Keep this portable: BSD/macOS find does not support GNU find's -printf.
+LEFTOVER=""
+for item in "$TARGET"/* "$TARGET"/.[!.]* "$TARGET"/..?*; do
+    [[ -e "$item" ]] || continue
+    name="$(basename "$item")"
+    case "$name" in
+        .git|.gitignore|README.md|LICENSE) ;;
+        *) LEFTOVER="$name"; break ;;
+    esac
+done
 if [[ -n "$LEFTOVER" ]]; then
     echo "Refusing: $TARGET is not empty (contains '$LEFTOVER'). Use a fresh directory." >&2
     exit 1

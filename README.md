@@ -15,19 +15,19 @@ OpenClaw proved that a personal AI assistant works best when it's a daemon, not 
 - **Framework** (this repo): scheduler, supervisor, memory CLI, voice, installer. No user data.
 - **Instance** (separate private repo per user): identity, memory contents, skill configs, credentials. Owned and controlled by the user.
 
-An instance directory is the "workspace." `jc init` scaffolds one. `jc <subcommand>` reads config from the current instance and invokes framework tooling.
+An instance directory is the "workspace." `jc setup` configures one for first run, `jc init` is the low-level scaffold, and `jc <subcommand>` reads config from the current instance and invokes framework tooling.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/matsei-ruka/juliuscaesar ~/juliuscaesar
 cd ~/juliuscaesar && ./install.sh
-jc init ~/my-assistant
+jc setup ~/my-assistant
 cd ~/my-assistant
-# edit .env and memory/L1/*.md
-jc memory rebuild
 jc heartbeat run hello --dry-run
 jc doctor
+# start live runtime when ready:
+claude --dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official
 ```
 
 Full walkthrough: [QUICKSTART.md](./QUICKSTART.md).
@@ -39,6 +39,7 @@ Full walkthrough: [QUICKSTART.md](./QUICKSTART.md).
 - `jc voice`      — TTS + ASR + enrollment via DashScope Qwen (Singapore/intl endpoint)
 - `jc watchdog`   — supervisor for the live `claude` session. Detects claude auto-update crashes AND telegram plugin deaths, restarts with `--resume` so conversation memory survives
 - `jc init`       — scaffold a new instance from `templates/init-instance/`
+- `jc setup`      — guided first-run configurator that writes `.env`, L1 memory, watchdog config, and runs diagnostics
 - `jc doctor`     — 29 pre-flight checks (binaries, instance structure, credentials, runtime)
 - `jc`            — top-level router
 

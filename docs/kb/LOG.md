@@ -8,3 +8,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 
 ## [2026-04-25] init | docs/kb - scaffolded KB config and index
 ## [2026-04-25] build | docs/kb - initial verified map of framework docs, binaries, and libraries
+## [2026-04-25] update | subsystem/installation-and-cli-routing.md - added jc setup first-run configurator behavior

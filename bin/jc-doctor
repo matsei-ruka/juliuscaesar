@@ -24,11 +24,40 @@ fail() { printf '%s✗%s %s\n' "$RED" "$RST" "$*"; FAIL=$((FAIL+1)); }
 info() { printf '%s·%s %s\n' "$DIM" "$RST" "$*"; }
 section() { printf '\n%s%s%s\n' "$GRN" "$*" "$RST"; }
 
+file_mode() {
+    local path="$1"
+    stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null || echo "unknown"
+}
+
+proc_cwd() {
+    local pid="$1"
+    local cwd=""
+    cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+    if [[ -n "$cwd" ]]; then
+        echo "$cwd"
+        return 0
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); exit }'
+    fi
+}
+
+version_probe() {
+    local bin="$1"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 3 "$bin" --version 2>/dev/null | head -1 || true
+    else
+        "$bin" --version 2>/dev/null | head -1 || true
+    fi
+}
+
 # --- Instance resolution ---
 INSTANCE_DIR=""
-for arg in "$@"; do
-    case "$arg" in
-        --instance-dir=*) INSTANCE_DIR="${arg#*=}" ;;
+while (( $# )); do
+    case "$1" in
+        --instance-dir) INSTANCE_DIR="${2:-}"; shift 2 ;;
+        --instance-dir=*) INSTANCE_DIR="${1#*=}"; shift ;;
+        *) shift ;;
     esac
 done
 
@@ -69,7 +98,7 @@ fi
 
 section "JuliusCaesar binaries"
 
-for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-doctor; do
+for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-init jc-setup jc-doctor; do
     if command -v "$b" >/dev/null 2>&1; then
         ok "$b"
     else
@@ -83,7 +112,7 @@ section "Adapter CLIs (optional — only needed per your tasks.yaml)"
 
 for b in gemini opencode codex; do
     if command -v "$b" >/dev/null 2>&1; then
-        ver=$(timeout 3 "$b" --version 2>/dev/null | head -1 || true)
+        ver=$(version_probe "$b")
         if [[ -n "$ver" ]]; then
             ok "$b: $(command -v "$b") ($ver)"
         else
@@ -238,7 +267,7 @@ section "Credentials"
 if [[ ! -f "$INSTANCE_DIR/.env" ]]; then
     fail ".env missing at $INSTANCE_DIR/.env"
 else
-    ok ".env exists ($(stat -c '%a' "$INSTANCE_DIR/.env") permissions)"
+    ok ".env exists ($(file_mode "$INSTANCE_DIR/.env") permissions)"
     # shellcheck disable=SC1091
     set -a; source "$INSTANCE_DIR/.env"; set +a
 
@@ -286,7 +315,7 @@ fi
 # hosts can have several unrelated claude sessions running; count only ours.
 OUR_CLAUDE_PID=""
 for pid in $(pgrep -f "claude .*--channels plugin:telegram" 2>/dev/null); do
-    cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+    cwd=$(proc_cwd "$pid")
     if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
         OUR_CLAUDE_PID="$pid"
         break

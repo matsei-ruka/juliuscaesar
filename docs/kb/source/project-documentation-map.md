@@ -36,7 +36,7 @@ related:
 The docs split by audience and stability:
 
 - `README.md`: project pitch, shipped components, contracts, quick start, and architecture pointer.
-- `QUICKSTART.md`: end-to-end setup from machine prerequisites to live runtime, Telegram, voice, heartbeat, workers, watchdog, and troubleshooting.
+- `QUICKSTART.md`: end-to-end setup using `jc setup`, from machine prerequisites to live runtime, Telegram, voice, heartbeat, workers, watchdog, and troubleshooting.
 - `docs/ARCHITECTURE.md`: compact system model and component relationships.
 - `ROADMAP.md`: shipped milestones and future work.
 - `docs/specs/workers.md`: design spec for on-demand background workers.
@@ -44,7 +44,7 @@ The docs split by audience and stability:
 
 ## Current shipped picture
 
-README marks version 0.1.1 as usable for a single-instance personal assistant. Roadmap shows 0.1.0 and 0.1.1 shipped on 2026-04-23, and 0.2.0 partially complete with Codex adapter and workers checked off.
+README marks version 0.1.1 as usable for a single-instance personal assistant and now presents `jc setup` as the quick-start path. Roadmap shows 0.1.0 and 0.1.1 shipped on 2026-04-23, and 0.2.0 partially complete with Codex adapter and workers checked off.
 
 ## Where to look first
 

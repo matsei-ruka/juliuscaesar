@@ -93,6 +93,19 @@ screen_named_alive() {
     screen -ls 2>/dev/null | grep -qE "^[[:space:]]+[0-9]+\.${SCREEN_NAME}([[:space:]]|$)"
 }
 
+proc_cwd() {
+    local pid="$1"
+    local cwd
+    cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+    if [[ -n "$cwd" ]]; then
+        echo "$cwd"
+        return 0
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); exit }'
+    fi
+}
+
 claude_alive() {
     # Scope to THIS instance only: an interactive claude process whose
     # working directory is INSTANCE_DIR. Previously matched any claude
@@ -100,7 +113,7 @@ claude_alive() {
     # multi-instance hosts as ours — breaks both detection and restart.
     local pid cwd
     for pid in $(pgrep -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null); do
-        cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+        cwd=$(proc_cwd "$pid")
         if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
             return 0
         fi
@@ -112,7 +125,7 @@ our_claude_pids() {
     # Emit PIDs of claude processes scoped to this instance (one per line).
     local pid cwd
     for pid in $(pgrep -u "$(id -un)" -f "claude .*--channels plugin:telegram" 2>/dev/null); do
-        cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+        cwd=$(proc_cwd "$pid")
         if [[ "$cwd" == "$INSTANCE_DIR" ]]; then
             echo "$pid"
         fi
