@@ -13,6 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
+from gateway import runtime as runtime_module  # noqa: E402
 from gateway.channels import telegram as telegram_module  # noqa: E402
 from gateway.channels.cron import CronChannel  # noqa: E402
 from gateway.channels.jc_events import JcEventsChannel  # noqa: E402
@@ -132,75 +133,94 @@ class CronChannelTests(unittest.TestCase):
             self.assertEqual(kwargs["meta"]["delivery_channel"], "telegram")
 
 
+def _drive_telegram(
+    instance: Path,
+    updates,
+    *,
+    transcript: str | None = None,
+    urlopen_payload: bytes = b"FAKE",
+    log=None,
+    expect_capture: bool = True,
+):
+    """Drive `TelegramChannel.run` through one fake getUpdates batch.
+
+    Returns the list of `enqueue(**kwargs)` calls. Mocks `http_json`,
+    `urlopen`, and (when `transcript` is provided) `_transcribe_audio`.
+    """
+    served = {"done": False}
+
+    def fake_http_json(url, *, data=None, timeout=15, **_):
+        if "getUpdates" in url:
+            if served["done"]:
+                return {"ok": True, "result": []}
+            served["done"] = True
+            return {"ok": True, "result": updates}
+        if "getFile" in url:
+            return {"ok": True, "result": {"file_path": "x/file"}}
+        return {"ok": True, "result": {}}
+
+    class FakeResp:
+        def __init__(self, payload: bytes):
+            self._buf = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            if n is None or n < 0:
+                out, self._buf = self._buf, b""
+                return out
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+
+    captured: list[dict] = []
+
+    def enqueue(**kwargs):
+        captured.append(kwargs)
+
+    stop_after = {"done": False}
+
+    def should_stop() -> bool:
+        return stop_after["done"]
+
+    cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN", chat_ids=["28547271"])
+    channel = TelegramChannel(instance, cfg, log or _silent_log)
+    channel.token = "test-token"
+
+    orig_http_json = telegram_module.http_json
+    orig_urlopen = telegram_module.urllib.request.urlopen
+    orig_transcribe = telegram_module._transcribe_audio
+    telegram_module.http_json = fake_http_json
+    telegram_module.urllib.request.urlopen = lambda *_a, **_k: FakeResp(urlopen_payload)
+    if transcript is not None:
+        telegram_module._transcribe_audio = lambda _path: transcript
+    try:
+        thread = threading.Thread(
+            target=channel.run, args=(enqueue, should_stop), daemon=True
+        )
+        thread.start()
+        for _ in range(40):
+            if served["done"] and (not expect_capture or captured):
+                break
+            time.sleep(0.1)
+        stop_after["done"] = True
+        thread.join(timeout=3)
+    finally:
+        telegram_module.http_json = orig_http_json
+        telegram_module.urllib.request.urlopen = orig_urlopen
+        if transcript is not None:
+            telegram_module._transcribe_audio = orig_transcribe
+    return captured
+
+
 class TelegramVoiceIngestionTests(unittest.TestCase):
     """Regression: Telegram voice messages must be transcribed and enqueued."""
 
     def _drive_channel(self, instance: Path, updates, *, transcript: str):
-        served = {"done": False}
-
-        def fake_http_json(url, *, data=None, timeout=15, **_):
-            if "getUpdates" in url:
-                if served["done"]:
-                    return {"ok": True, "result": []}
-                served["done"] = True
-                return {"ok": True, "result": updates}
-            if "getFile" in url:
-                return {"ok": True, "result": {"file_path": "voice/file_1.oga"}}
-            return {"ok": True, "result": {}}
-
-        class FakeResp:
-            def __init__(self, payload: bytes):
-                self._buf = payload
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def read(self, n=-1):
-                if n is None or n < 0:
-                    out, self._buf = self._buf, b""
-                    return out
-                out, self._buf = self._buf[:n], self._buf[n:]
-                return out
-
-        captured: list[dict] = []
-
-        def enqueue(**kwargs):
-            captured.append(kwargs)
-
-        stop_after = {"done": False}
-
-        def should_stop() -> bool:
-            return stop_after["done"]
-
-        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN", chat_ids=["28547271"])
-        channel = TelegramChannel(instance, cfg, _silent_log)
-        channel.token = "test-token"  # bypass env_value lookup
-
-        orig_http_json = telegram_module.http_json
-        orig_urlopen = telegram_module.urllib.request.urlopen
-        orig_transcribe = telegram_module._transcribe_audio
-        telegram_module.http_json = fake_http_json
-        telegram_module.urllib.request.urlopen = lambda *_a, **_k: FakeResp(b"OggS\x00\x00")
-        telegram_module._transcribe_audio = lambda _path: transcript
-        try:
-            thread = threading.Thread(
-                target=channel.run, args=(enqueue, should_stop), daemon=True
-            )
-            thread.start()
-            for _ in range(20):
-                if served["done"] and captured:
-                    break
-                time.sleep(0.1)
-            stop_after["done"] = True
-            thread.join(timeout=3)
-        finally:
-            telegram_module.http_json = orig_http_json
-            telegram_module.urllib.request.urlopen = orig_urlopen
-            telegram_module._transcribe_audio = orig_transcribe
-        return captured
+        return _drive_telegram(instance, updates, transcript=transcript, urlopen_payload=b"OggS\x00\x00")
 
     def test_voice_message_is_transcribed_and_enqueued(self):
         update = {
@@ -244,6 +264,289 @@ class TelegramVoiceIngestionTests(unittest.TestCase):
             self.assertEqual(captured[0]["content"], "plain text")
             self.assertNotIn("was_voice", captured[0]["meta"])
             self.assertNotIn("audio_path", captured[0]["meta"])
+
+
+class TelegramAudioVideoIngestionTests(unittest.TestCase):
+    """`audio` (music) and `video_note` (round videos) follow the voice path."""
+
+    def test_audio_message_is_transcribed_and_enqueued(self):
+        update = {
+            "update_id": 201,
+            "message": {
+                "message_id": 31,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "audio": {
+                    "file_id": "AwACA-audio",
+                    "mime_type": "audio/mpeg",
+                    "duration": 12,
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive_telegram(instance, [update], transcript="great track")
+            self.assertEqual(len(captured), 1)
+            kwargs = captured[0]
+            self.assertEqual(kwargs["content"], "great track")
+            self.assertTrue(kwargs["meta"]["was_voice"])
+            self.assertEqual(kwargs["meta"]["attachment_kind"], "audio")
+            audio_path = Path(kwargs["meta"]["audio_path"])
+            self.assertTrue(audio_path.exists())
+            self.assertEqual(audio_path.suffix, ".mp3")
+
+    def test_video_note_is_transcribed_and_enqueued(self):
+        update = {
+            "update_id": 202,
+            "message": {
+                "message_id": 32,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "video_note": {"file_id": "AwACA-vn", "duration": 4, "length": 240},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive_telegram(instance, [update], transcript="hi from the round")
+            self.assertEqual(len(captured), 1)
+            kwargs = captured[0]
+            self.assertEqual(kwargs["content"], "hi from the round")
+            self.assertEqual(kwargs["meta"]["attachment_kind"], "video_note")
+            video_path = Path(kwargs["meta"]["audio_path"])
+            self.assertTrue(video_path.exists())
+            self.assertEqual(video_path.suffix, ".mp4")
+
+
+class TelegramPhotoDocumentTests(unittest.TestCase):
+    """Photos and documents enqueue with their local path threaded through meta."""
+
+    def test_photo_largest_size_saved_with_caption(self):
+        update = {
+            "update_id": 301,
+            "message": {
+                "message_id": 41,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "caption": "look at this",
+                "photo": [
+                    {"file_id": "small", "width": 90, "height": 90},
+                    {"file_id": "medium", "width": 320, "height": 320},
+                    {"file_id": "large", "width": 1280, "height": 1280},
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive_telegram(instance, [update])
+            self.assertEqual(len(captured), 1)
+            kwargs = captured[0]
+            self.assertEqual(kwargs["content"], "look at this")
+            self.assertNotIn("was_voice", kwargs["meta"])
+            image_path = Path(kwargs["meta"]["image_path"])
+            self.assertTrue(image_path.exists())
+            self.assertTrue(
+                image_path.is_relative_to(
+                    instance / "state" / "voice" / "inbound" / "photos"
+                )
+            )
+            self.assertEqual(image_path.suffix, ".jpg")
+
+    def test_photo_without_caption_uses_placeholder(self):
+        update = {
+            "update_id": 302,
+            "message": {
+                "message_id": 42,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "photo": [{"file_id": "tiny", "width": 90, "height": 90}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive_telegram(instance, [update])
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["content"], "[image]")
+            self.assertIn("image_path", captured[0]["meta"])
+
+    def test_document_saved_with_meta_file_path(self):
+        update = {
+            "update_id": 303,
+            "message": {
+                "message_id": 43,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "caption": "Q4 numbers",
+                "document": {
+                    "file_id": "DocAAAQ",
+                    "file_name": "report.pdf",
+                    "mime_type": "application/pdf",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive_telegram(instance, [update])
+            self.assertEqual(len(captured), 1)
+            kwargs = captured[0]
+            self.assertEqual(kwargs["content"], "Q4 numbers")
+            file_path = Path(kwargs["meta"]["file_path"])
+            self.assertTrue(file_path.exists())
+            self.assertEqual(file_path.suffix, ".pdf")
+            self.assertTrue(
+                file_path.is_relative_to(
+                    instance / "state" / "voice" / "inbound" / "docs"
+                )
+            )
+            self.assertEqual(kwargs["meta"]["file_name"], "report.pdf")
+
+
+class TelegramForwardDetectionTests(unittest.TestCase):
+    def test_forward_logged_and_event_still_enqueued(self):
+        update = {
+            "update_id": 401,
+            "message": {
+                "message_id": 51,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "forward_from": {"id": 999, "username": "source_user"},
+                "text": "look what they said",
+            },
+        }
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive_telegram(instance, [update], log=logs.append)
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["content"], "look what they said")
+            self.assertTrue(
+                any("forward" in line and "source_user" in line for line in logs),
+                f"forward log missing in {logs!r}",
+            )
+
+
+class TelegramSendTypingTests(unittest.TestCase):
+    def test_send_typing_posts_chat_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+            channel = TelegramChannel(instance, cfg, _silent_log)
+            channel.token = "test-token"
+
+            seen: list[dict[str, Any]] = []
+
+            def fake_http_json(url, *, data=None, timeout=15, **_):
+                seen.append({"url": url, "data": data, "timeout": timeout})
+                return {"ok": True, "result": True}
+
+            orig = telegram_module.http_json
+            telegram_module.http_json = fake_http_json
+            try:
+                channel.send_typing("28547271", message_thread_id=7)
+            finally:
+                telegram_module.http_json = orig
+
+            self.assertEqual(len(seen), 1)
+            call = seen[0]
+            self.assertIn("/sendChatAction", call["url"])
+            self.assertEqual(call["data"]["chat_id"], "28547271")
+            self.assertEqual(call["data"]["action"], "typing")
+            self.assertEqual(call["data"]["message_thread_id"], 7)
+
+
+class TypingLoopTests(unittest.TestCase):
+    """`typing_loop` is the testable core of the runtime typing thread."""
+
+    def test_calls_immediately_and_after_each_interval(self):
+        stop = threading.Event()
+        calls: list[float] = []
+        clock = [0.0]
+
+        def mono() -> float:
+            return clock[0]
+
+        wait_count = [0]
+
+        def fake_wait(seconds: float) -> bool:
+            clock[0] += seconds
+            wait_count[0] += 1
+            if wait_count[0] >= 2:
+                stop.set()
+                return True
+            return False
+
+        def send(chat_id, thread_id):
+            calls.append(clock[0])
+
+        runtime_module.typing_loop(
+            send,
+            stop,
+            chat_id="123",
+            message_thread_id=None,
+            monotonic=mono,
+            wait=fake_wait,
+        )
+
+        self.assertEqual(calls, [0.0, 4.0])
+
+    def test_caps_at_max_seconds(self):
+        stop = threading.Event()  # never set
+        calls: list[float] = []
+        clock = [0.0]
+
+        def mono() -> float:
+            return clock[0]
+
+        def fake_wait(seconds: float) -> bool:
+            clock[0] += seconds
+            return False
+
+        def send(chat_id, thread_id):
+            calls.append(clock[0])
+
+        runtime_module.typing_loop(
+            send,
+            stop,
+            chat_id="123",
+            message_thread_id=None,
+            max_seconds=60.0,
+            interval=4.0,
+            monotonic=mono,
+            wait=fake_wait,
+        )
+
+        # Immediate (t=0) + one call after each successful 4s wait, until the
+        # 60s deadline is reached. That's 1 + (60/4) = 16 sends.
+        self.assertEqual(len(calls), 16)
+        self.assertLessEqual(clock[0], 60.0)
+
+    def test_silent_when_send_raises(self):
+        stop = threading.Event()
+        clock = [0.0]
+        wait_count = [0]
+
+        def mono() -> float:
+            return clock[0]
+
+        def fake_wait(seconds: float) -> bool:
+            clock[0] += seconds
+            wait_count[0] += 1
+            if wait_count[0] >= 2:
+                stop.set()
+                return True
+            return False
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("network down")
+
+        # Must not raise.
+        runtime_module.typing_loop(
+            boom,
+            stop,
+            chat_id="123",
+            message_thread_id=None,
+            monotonic=mono,
+            wait=fake_wait,
+        )
 
 
 class VoiceChannelSynthTests(unittest.TestCase):
