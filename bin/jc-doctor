@@ -9,6 +9,8 @@
 
 set -uo pipefail
 
+FRAMEWORK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+
 # --- Colors ---
 if [[ -t 1 ]]; then
     RED=$'\033[0;31m'; YEL=$'\033[0;33m'; GRN=$'\033[0;32m'; DIM=$'\033[0;37m'; RST=$'\033[0m'
@@ -17,12 +19,14 @@ else
 fi
 
 FAIL=0
+FIX=0
 
 ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*"; }
 fail() { printf '%s✗%s %s\n' "$RED" "$RST" "$*"; FAIL=$((FAIL+1)); }
 info() { printf '%s·%s %s\n' "$DIM" "$RST" "$*"; }
 section() { printf '\n%s%s%s\n' "$GRN" "$*" "$RST"; }
+fixed() { printf '%s→%s fixed: %s\n' "$GRN" "$RST" "$*"; }
 
 file_mode() {
     local path="$1"
@@ -101,6 +105,7 @@ load_env_file() {
 INSTANCE_DIR=""
 while (( $# )); do
     case "$1" in
+        --fix) FIX=1; shift ;;
         --instance-dir) INSTANCE_DIR="${2:-}"; shift 2 ;;
         --instance-dir=*) INSTANCE_DIR="${1#*=}"; shift ;;
         *) shift ;;
@@ -210,7 +215,16 @@ if [[ -f "$INSTANCE_DIR/memory/index.sqlite" ]]; then
     SIZE=$(du -h "$INSTANCE_DIR/memory/index.sqlite" | awk '{print $1}')
     ok "memory/index.sqlite: $SIZE"
 else
-    warn "memory/index.sqlite missing — run: jc memory rebuild"
+    if [[ "$FIX" == 1 && -d "$INSTANCE_DIR/memory" && -x "$FRAMEWORK_ROOT/bin/jc-memory" ]]; then
+        if "$FRAMEWORK_ROOT/bin/jc-memory" --instance-dir "$INSTANCE_DIR" rebuild >/dev/null 2>&1; then
+            SIZE=$(du -h "$INSTANCE_DIR/memory/index.sqlite" 2>/dev/null | awk '{print $1}')
+            fixed "memory/index.sqlite rebuilt${SIZE:+ ($SIZE)}"
+        else
+            fail "memory/index.sqlite missing and rebuild failed"
+        fi
+    else
+        warn "memory/index.sqlite missing — run: jc memory rebuild"
+    fi
 fi
 
 # Heartbeat
@@ -313,7 +327,16 @@ section "Credentials"
 if [[ ! -f "$INSTANCE_DIR/.env" ]]; then
     fail ".env missing at $INSTANCE_DIR/.env"
 else
-    ok ".env exists ($(file_mode "$INSTANCE_DIR/.env") permissions)"
+    ENV_MODE=$(file_mode "$INSTANCE_DIR/.env")
+    if [[ "$ENV_MODE" != "600" ]]; then
+        if [[ "$FIX" == 1 ]]; then
+            chmod 600 "$INSTANCE_DIR/.env" && fixed ".env permissions set to 600"
+            ENV_MODE=$(file_mode "$INSTANCE_DIR/.env")
+        else
+            warn ".env exists ($ENV_MODE permissions; expected 600)"
+        fi
+    fi
+    ok ".env exists ($ENV_MODE permissions)"
     load_env_file "$INSTANCE_DIR/.env"
 
     # DashScope
@@ -425,7 +448,39 @@ PY
         ok "gateway events: $GATEWAY_COUNTS"
     fi
 else
-    info "gateway queue not initialized (optional — run: jc gateway init)"
+    if [[ "$FIX" == 1 ]]; then
+        GATEWAY_INIT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+from gateway import queue
+
+instance = Path(sys.argv[1])
+conn = queue.connect(instance)
+conn.close()
+print(queue.queue_path(instance))
+PY
+)
+        if [[ "$GATEWAY_INIT" == *"Traceback"* || -z "$GATEWAY_INIT" ]]; then
+            fail "gateway queue initialization failed: $GATEWAY_INIT"
+        else
+            fixed "gateway queue initialized at $GATEWAY_INIT"
+        fi
+    else
+        info "gateway queue not initialized (optional — run: jc gateway init)"
+    fi
+fi
+
+GATEWAY_PIDFILE="$INSTANCE_DIR/state/gateway/jc-gateway.pid"
+if [[ -f "$GATEWAY_PIDFILE" ]]; then
+    GATEWAY_PID=$(cat "$GATEWAY_PIDFILE" 2>/dev/null)
+    if [[ -n "$GATEWAY_PID" ]] && kill -0 "$GATEWAY_PID" 2>/dev/null; then
+        ok "gateway daemon running (pid $GATEWAY_PID)"
+    elif [[ "$FIX" == 1 ]]; then
+        rm -f "$GATEWAY_PIDFILE"
+        fixed "removed stale gateway pidfile"
+    else
+        warn "gateway pidfile is stale: $GATEWAY_PIDFILE"
+    fi
 fi
 
 # --- Workers ---
@@ -440,7 +495,12 @@ if [[ -d "$STATE_DIR" ]]; then
         fail "state/ not writable"
     fi
 else
-    info "state/ not yet created (first spawn creates it)"
+    if [[ "$FIX" == 1 ]]; then
+        mkdir -p "$STATE_DIR"
+        fixed "state/ created"
+    else
+        info "state/ not yet created (first spawn creates it)"
+    fi
 fi
 
 WORKER_DB="$STATE_DIR/workers.db"

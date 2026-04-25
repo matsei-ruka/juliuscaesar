@@ -35,7 +35,8 @@ The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`
 - Native bash binaries are invoked directly by their shim.
 - The router preserves `--instance-dir <path>` or `--instance-dir=<path>` when placed before the subcommand.
 - `jc setup` uses `jc init` underneath, writes `.env`, L1 memory, watchdog config, rebuilds the memory index, and runs `jc doctor`.
-- `jc gateway` owns the first unified-gateway surface: durable SQLite queue initialization, enqueue, claim, complete/fail, and status/list inspection.
+- `jc gateway` owns the first unified-gateway surface: durable SQLite queue initialization, daemon lifecycle, enqueue, claim, complete/fail, and status/list inspection.
+- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, remove stale gateway pidfiles, and create `state/`.
 
 ## Failure modes
 
