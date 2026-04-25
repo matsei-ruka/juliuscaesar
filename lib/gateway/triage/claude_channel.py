@@ -41,13 +41,16 @@ class ClaudeChannelTriage(TriageBackend):
             payload = {"text": raw}
         text = payload.get("text") if isinstance(payload, dict) else str(payload)
         result = parse_triage_json(str(text or "")) or parse_triage_json(raw)
-        return result or _failure("jc-triage unparseable output")
+        if result is not None:
+            return result
+        return _failure("jc-triage unparseable output", raw=str(text or raw))
 
 
-def _failure(reason: str) -> TriageResult:
+def _failure(reason: str, *, raw: str | None = None) -> TriageResult:
     return TriageResult(
         class_="quick",
         brain="claude:sonnet-4-6",
         confidence=0.0,
         reasoning=reason,
+        raw=(raw or "")[:400] if raw else None,
     )

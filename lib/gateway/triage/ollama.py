@@ -46,13 +46,16 @@ class OllamaTriage(TriageBackend):
             return _failure(f"ollama bad response: {exc}")
         text = str(payload.get("response") or "")
         result = parse_triage_json(text)
-        return result or _failure("ollama unparseable triage output")
+        if result is not None:
+            return result
+        return _failure("ollama unparseable triage output", raw=text)
 
 
-def _failure(reason: str) -> TriageResult:
+def _failure(reason: str, *, raw: str | None = None) -> TriageResult:
     return TriageResult(
         class_="quick",
         brain="claude:sonnet-4-6",
         confidence=0.0,
         reasoning=reason,
+        raw=(raw or "")[:400] if raw else None,
     )

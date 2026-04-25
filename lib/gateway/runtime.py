@@ -166,22 +166,45 @@ class GatewayRuntime:
             return None
         cached = self.triage_cache.get(event.content)
         if cached is not None:
+            self.log(
+                f"triage cache hit id={event.id} class={cached.class_} "
+                f"brain={cached.brain} conf={cached.confidence:.2f}",
+                event_id=event.id,
+                kind="triage",
+            )
             return self._triage_to_hint(cached)
         try:
             result = backend.classify(event.content)
         except Exception as exc:  # noqa: BLE001
-            self.log(f"triage error backend={backend.name}: {exc}")
+            self.log(
+                f"triage error backend={backend.name} id={event.id}: {exc}",
+                event_id=event.id,
+                kind="triage_error",
+            )
             return None
         self.triage_cache.put(event.content, result)
+        threshold = self.config.triage.confidence_threshold
+        below = result.confidence < threshold
+        raw_preview = (result.raw or "")[:120].replace("\n", " ")
+        reasoning = (result.reasoning or "")[:120]
+        self.log(
+            f"triage id={event.id} backend={backend.name} class={result.class_} "
+            f"brain={result.brain} conf={result.confidence:.2f} "
+            f"threshold={threshold} below={below} "
+            f"reason={reasoning!r} raw={raw_preview!r}",
+            event_id=event.id,
+            kind="triage",
+        )
         try:
-            self.metrics.record(
-                result,
-                fallback=result.confidence < self.config.triage.confidence_threshold,
-            )
+            self.metrics.record(result, fallback=below)
         except Exception:  # noqa: BLE001
             pass
         if result.is_unsafe():
-            self.log(f"triage rejected event id={event.id} as unsafe")
+            self.log(
+                f"triage rejected event id={event.id} as unsafe",
+                event_id=event.id,
+                kind="triage_unsafe",
+            )
             return None
         return self._triage_to_hint(result)
 

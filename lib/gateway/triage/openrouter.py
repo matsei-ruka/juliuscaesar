@@ -67,13 +67,16 @@ class OpenRouterTriage(TriageBackend):
         message_data = choices[0].get("message") or {}
         text = str(message_data.get("content") or "")
         result = parse_triage_json(text)
-        return result or _failure("openrouter unparseable triage output")
+        if result is not None:
+            return result
+        return _failure("openrouter unparseable triage output", raw=text)
 
 
-def _failure(reason: str) -> TriageResult:
+def _failure(reason: str, *, raw: str | None = None) -> TriageResult:
     return TriageResult(
         class_="quick",
         brain="claude:sonnet-4-6",
         confidence=0.0,
         reasoning=reason,
+        raw=(raw or "")[:400] if raw else None,
     )
