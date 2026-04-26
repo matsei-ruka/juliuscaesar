@@ -1,0 +1,37 @@
+# Watchdog v2 — generic process supervisor.
+# Read by `python3 -m watchdog.supervisor`. Falls back to ops/watchdog.conf +
+# the legacy bash supervisor when this file is absent — opt in with
+# `jc watchdog migrate` on existing instances.
+
+children:
+  - name: jc-gateway
+    type: daemon
+    enabled: true
+    start: jc-gateway --instance-dir $INSTANCE_DIR start
+    pidfile: state/gateway/jc-gateway.pid
+    health:
+      pid_alive: true
+      cwd_match: $INSTANCE_DIR
+      heartbeat_file: state/gateway/heartbeat
+      heartbeat_max_age_seconds: 30
+    restart:
+      backoff: [5, 10, 30, 60, 300]
+      max_in_window: 5
+      window_seconds: 600
+      start_grace_seconds: 15
+
+  # Legacy entry — uncomment only on instances pre-0.3.0 that still need the
+  # screen + claude + bun-plugin path. Slated for removal in 0.5.0.
+  #
+  # - name: claude-session
+  #   type: legacy-claude
+  #   enabled: false
+  #   screen_name: jc-instance
+  #   session_id: ""
+  #   health:
+  #     cwd_match: $INSTANCE_DIR
+  #     proc_match: "claude .*--channels plugin:telegram"
+  #   restart:
+  #     backoff: [5, 10, 30, 60, 300]
+  #     max_in_window: 5
+  #     window_seconds: 600

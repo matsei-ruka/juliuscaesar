@@ -94,9 +94,31 @@ SUBCMD="${1:-}"
 shift || true
 INSTANCE_DIR="$(resolve_instance_dir "$INSTANCE_DIR_ARG")"
 
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+WATCHDOG_YAML="$INSTANCE_DIR/ops/watchdog.yaml"
+
+run_v2_cli() {
+    JC_LIB_DIR="$LIB_DIR" PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        "$PYTHON_BIN" -m watchdog.cli --instance-dir "$INSTANCE_DIR" "$@"
+}
+
 case "$SUBCMD" in
     tick|"")
+        if [[ -f "$WATCHDOG_YAML" ]]; then
+            JC_LIB_DIR="$LIB_DIR" PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+                exec "$PYTHON_BIN" -m watchdog.supervisor "$INSTANCE_DIR"
+        fi
         exec bash "$WATCHDOG_SH" "$INSTANCE_DIR"
+        ;;
+
+    status-v2)
+        run_v2_cli status "$@"
+        exit $?
+        ;;
+
+    tail|reset|reload|migrate)
+        run_v2_cli "$SUBCMD" "$@"
+        exit $?
         ;;
 
     install)
@@ -191,7 +213,12 @@ Subcommands:
   tick          Run one supervisor tick (intended for cron).
   install       Install @reboot + */2 cron entries for this instance.
   uninstall     Remove this instance's cron entries.
-  status        Show state, cron entries, recent log.
+  status        Show legacy state, cron entries, recent log.
+  status-v2     Show v2 child status table (uses ops/watchdog.yaml).
+  tail <child>  Tail a v2 child's log file.
+  reset <child> Clear alert mode + restart counters (v2).
+  reload        Re-read ops/watchdog.yaml and run one tick (v2).
+  migrate       Generate ops/watchdog.yaml from ops/watchdog.conf.
   test-notify   Send a Telegram message to validate credentials.
 EOF
         ;;

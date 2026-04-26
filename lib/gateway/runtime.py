@@ -73,6 +73,8 @@ def decode_meta(event: queue.Event) -> dict[str, Any]:
 
 
 class GatewayRuntime:
+    HEARTBEAT_INTERVAL_SECONDS = 5.0
+
     def __init__(
         self,
         instance_dir: Path,
@@ -96,6 +98,59 @@ class GatewayRuntime:
             max_bytes=self.config.reliability.log_max_bytes,
             backups=self.config.reliability.log_backups,
         )
+        self._heartbeat_path = queue.queue_dir(self.instance_dir) / "heartbeat"
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._recovery = self._build_recovery_dispatcher()
+
+    def _build_recovery_dispatcher(self):
+        try:
+            from .recovery import RecoveryDispatcher
+
+            return RecoveryDispatcher(self)
+        except Exception as exc:  # noqa: BLE001
+            self._json_logger.warning(f"recovery dispatcher unavailable: {exc}")
+            return None
+
+    def _touch_heartbeat(self) -> None:
+        """Bump the heartbeat file mtime — supervisor reads this for liveness."""
+        try:
+            self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            self._heartbeat_path.touch(exist_ok=True)
+        except OSError:
+            pass
+
+    def start_heartbeat(self) -> None:
+        """Spawn the heartbeat ticker thread. Idempotent.
+
+        Separate from the dispatch loop so an in-flight adapter call (which
+        can take minutes) does not look wedged to the watchdog. Joined on
+        `stop_heartbeat`.
+        """
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_stop.clear()
+        self._touch_heartbeat()
+
+        def loop() -> None:
+            while not self._heartbeat_stop.is_set():
+                self._touch_heartbeat()
+                if self._heartbeat_stop.wait(self.HEARTBEAT_INTERVAL_SECONDS):
+                    return
+
+        thread = threading.Thread(
+            target=loop,
+            daemon=True,
+            name="gateway-heartbeat",
+        )
+        thread.start()
+        self._heartbeat_thread = thread
+
+    def stop_heartbeat(self) -> None:
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2)
+            self._heartbeat_thread = None
 
     def _get_triage_backend(self) -> TriageBackend | None:
         with self._triage_lock:
@@ -139,6 +194,7 @@ class GatewayRuntime:
         )
 
     def start_channels(self) -> None:
+        self.start_heartbeat()
         for channel in build_enabled_channels(self.instance_dir, self.config, self.log):
             thread = threading.Thread(
                 target=channel.run,
@@ -156,6 +212,7 @@ class GatewayRuntime:
             self.dispatch_once()
             time.sleep(self.config.poll_interval_seconds)
         self.log("dispatcher stopping")
+        self.stop_heartbeat()
         for thread in self.threads:
             thread.join(timeout=2)
 
@@ -171,6 +228,18 @@ class GatewayRuntime:
             conn.close()
         if event is None:
             return False
+        from .brains import AdapterFailure
+
+        # Pre-triage hook for outstanding auth-token round-trips. Returns True
+        # iff the message was consumed by the recovery flow.
+        if self._recovery is not None and self._recovery.maybe_consume_auth_token(event):
+            conn_t = queue.connect(self.instance_dir)
+            try:
+                queue.complete(conn_t, event.id, response="(auth token consumed)")
+            finally:
+                conn_t.close()
+            self.log(f"event auth-token consumed id={event.id}")
+            return True
         try:
             response = self.process_event(event)
             conn2 = queue.connect(self.instance_dir)
@@ -179,6 +248,8 @@ class GatewayRuntime:
             finally:
                 conn2.close()
             self.log(f"event done id={event.id} source={event.source}")
+        except AdapterFailure as failure:
+            self._handle_adapter_failure(event, failure)
         except Exception as exc:  # noqa: BLE001
             conn3 = queue.connect(self.instance_dir)
             try:
@@ -192,6 +263,84 @@ class GatewayRuntime:
                 conn3.close()
             self.log(f"event {failed.status} id={event.id} error={exc}")
         return True
+
+    def _handle_adapter_failure(self, event: queue.Event, failure) -> None:
+        """Route an adapter rc!=0 through the recovery dispatcher.
+
+        On classifier outage / handler error, fall back to the existing blind
+        retry behavior so we never regress on the prior contract.
+        """
+        from .recovery import Defer, Fail, Retry
+
+        if self._recovery is None:
+            self._fallback_blind_retry(event, str(failure))
+            return
+        try:
+            decision = self._recovery.handle(event, failure)
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                f"recovery dispatcher error id={event.id} brain={failure.brain} "
+                f"reason={exc!r} — falling back to blind retry"
+            )
+            self._fallback_blind_retry(event, str(failure))
+            return
+        if isinstance(decision, Retry):
+            conn = queue.connect(self.instance_dir)
+            try:
+                failed = queue.fail(
+                    conn,
+                    event.id,
+                    error=f"recovery: retry ({decision.reason})"[:1000],
+                    max_retries=self.config.max_retries,
+                    backoff_seconds=(int(decision.delay_seconds),),
+                )
+            finally:
+                conn.close()
+            self.log(
+                f"recovery retry id={event.id} brain={failure.brain} "
+                f"delay={decision.delay_seconds}s status={failed.status}"
+            )
+        elif isinstance(decision, Fail):
+            conn = queue.connect(self.instance_dir)
+            try:
+                queue.fail(
+                    conn,
+                    event.id,
+                    error=f"recovery: {decision.reason}"[:1000],
+                    max_retries=0,
+                )
+            finally:
+                conn.close()
+            self.log(
+                f"recovery fail id={event.id} brain={failure.brain} reason={decision.reason}"
+            )
+        elif isinstance(decision, Defer):
+            self.log(
+                f"recovery defer id={event.id} brain={failure.brain} reason={decision.reason}"
+            )
+            # Handler owns re-enqueue; nothing else to do here.
+        else:
+            self.log(
+                f"recovery unknown decision id={event.id} type={type(decision).__name__} — failing event"
+            )
+            conn = queue.connect(self.instance_dir)
+            try:
+                queue.fail(conn, event.id, error="recovery: unknown decision", max_retries=0)
+            finally:
+                conn.close()
+
+    def _fallback_blind_retry(self, event: queue.Event, error: str) -> None:
+        conn = queue.connect(self.instance_dir)
+        try:
+            failed = queue.fail(
+                conn,
+                event.id,
+                error=error[:1000],
+                max_retries=self.config.max_retries,
+            )
+        finally:
+            conn.close()
+        self.log(f"event {failed.status} id={event.id} error={error}")
 
     def _maybe_triage(
         self,
