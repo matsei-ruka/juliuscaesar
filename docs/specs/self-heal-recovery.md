@@ -6,7 +6,7 @@
 
 ## Goal
 
-When an adapter exits non-zero, the gateway dispatcher currently retries up to 4× with backoff regardless of the failure mode. Recent stability data: 5 events permanently failed (all image-related, all bad input retried 4× wastefully); zero events recovered from `claude` session expiry because nothing detects it. This spec makes the dispatcher classify the failure first, then route to the correct recovery: retry, fail-fast, or trigger a human-in-the-loop re-auth flow. The login-recovery flow is the headline feature: a Telegram round-trip that lets the operator paste a token without leaving the chat.
+When an adapter exits non-zero, the gateway dispatcher currently retries up to 4× with backoff regardless of the failure mode. Recent stability data: 5 events permanently failed (all image-related, all bad input retried 4× wastefully); zero events recovered from `claude` session expiry because nothing detects it; and resumes against deleted/missing session-ids loop quietly until they hit `max_retries`. This spec makes the dispatcher classify the failure first, then route to the correct recovery: retry, fail-fast, silently drop a dead session-id and start fresh, or trigger a human-in-the-loop re-auth flow. The login-recovery flow is the headline feature: a Telegram round-trip that lets the operator paste a token without leaving the chat.
 
 ## Architecture
 
@@ -25,6 +25,7 @@ lib/gateway/recovery/
     transient.py       # delegates to existing retry path
     bad_input.py       # mark failed, no retry
     session_expired.py # triggers login-recovery flow
+    session_missing.py # clears sticky session-id, redispatches once fresh
     unknown.py         # 1 retry then fail; full stderr to log
   state.py             # auth_pending CRUD on queue.db
 ```
@@ -34,9 +35,10 @@ Classification calls the same OpenRouter triage backend already configured in `l
 ```python
 @dataclass(frozen=True)
 class Classification:
-    kind: Literal["transient", "session_expired", "bad_input", "unknown"]
+    kind: Literal["transient", "session_expired", "session_missing", "bad_input", "unknown"]
     confidence: float
     extracted: dict  # e.g. {"login_url": "https://..."} for session_expired
+                    #      {"session_id": "<uuid>"} for session_missing
     raw: str
 ```
 
@@ -116,6 +118,15 @@ Kinds:
                      a URL of the form https://claude.ai/... or
                      https://console.anthropic.com/... in the stderr.
                      If a login URL is present, return it as extracted.login_url.
+- session_missing  → --resume <id> rejected because the session does not exist
+                     (file deleted, account switched, fresh install). Look for:
+                     "No conversation found with session ID <uuid>",
+                     "Session <uuid> not found", "Failed to resume",
+                     "unknown session". Auth itself is fine — only the resume
+                     target is gone. Extract the uuid into extracted.session_id
+                     when present. Distinguish from session_expired: if both
+                     auth-failure markers AND missing-session markers appear,
+                     pick session_expired (re-auth covers both).
 - bad_input        → malformed event, oversized payload, unsupported file type,
                      image too large, MIME mismatch, "invalid base64", schema
                      violation. Retrying will not help; the input itself is wrong.
@@ -135,12 +146,27 @@ stderr: "Your session has expired. Please run: claude /login\nVisit https://clau
 stderr: "Image exceeds maximum size of 5MB (got 12MB)"
 → {"kind":"bad_input","confidence":0.97,"extracted":{}}
 
+stderr: "Error: No conversation found with session ID 7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46"
+→ {"kind":"session_missing","confidence":0.97,"extracted":{"session_id":"7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46"}}
+
 Now classify:
 EVENT: {event_content}
 STDERR: {stderr_tail}
 ```
 
 Same parser as `lib/gateway/triage/base.py:parse_triage_json` (one-line JSON regex).
+
+## session_missing recovery (no operator)
+
+Silent, automatic, no Telegram round-trip. Triggered when the classifier returns `session_missing` (or as a fallback when `--resume <uuid>` returns rc≠0 with stderr matching the regex `(no conversation found|session .*(not found|unknown))`, even on classifier outage):
+
+1. Extract `session_id` from `extracted.session_id`; fall back to a regex over the stderr tail if absent.
+2. `sessions.clear(conversation_id, brain, session_id)` — remove the sticky-brain mapping in `state/gateway/sessions.db` (or wherever `lib/gateway/sessions.py` persists it) so the dispatcher no longer passes `--resume <dead_uuid>`.
+3. Re-enqueue the same event with `available_at = now` and a meta flag `meta.session_missing_redispatch = True`. The next dispatch runs `claude -p` without `--resume`, claude generates a new session-id, the gateway records it as the new sticky for `(conversation_id, brain)`.
+4. If the redispatched event ALSO returns `session_missing`: log error, fail the event with reason `session_missing_recovery_failed`, alert operator (one DM, throttled). Means the sticky-clear didn't take, or the brain itself is broken — needs human eyes.
+5. The DM-the-operator-after-silent-recovery question is in Open Questions; default is silent on first occurrence per `(conversation_id, day)`.
+
+This handler is the simplest one — no state table, no operator interaction, no token. Implementation cost is low and it eliminates a known silent failure mode (a stale `SESSION_ID` in `ops/watchdog.conf` after a `~/.claude/projects/` cleanup currently produces N retries × M events of pure noise).
 
 ## Login-recovery state machine
 
@@ -203,6 +229,9 @@ def maybe_handle_auth_token(event: queue.Event) -> bool:
 - **Multiple events pile up while waiting.** Each new failure that classifies as `session_expired` while a row is `waiting`: do **not** create a second row (unique index would reject). Append the new event_id to a `pending_events` JSON column on the existing row. On successful redemption, replay all queued event_ids in order.
 - **Token format false positives.** Plain English phrases like "antidisestablishmentarianism" pass the length+charset check. Mitigation: the `active pending` gate plus the "single line, no whitespace" rule. A genuine collision (operator pastes a 20+ char no-space alphanumeric string that is not a token, while a pending exists) → `claude /login` rc!=0 → operator sees "re-auth failed" and pastes the real token. Acceptable.
 - **`claude /login` opens a browser interactively.** In headless contexts (no DISPLAY, no `--no-browser` support) it can hang. Mitigation: the subprocess call has a 30s timeout; on timeout we kill the process tree, mark `failed`, and DM the operator with "re-auth tool blocked on browser; run `claude /login` in your screen session and tell me when done." We then wait for the operator to send the literal string `done` (or `/auth-done`) which clears the pending and replays.
+- **`session_missing` while sticky-clear is racing.** Two events for the same `(conversation_id, brain)` fail concurrently with `session_missing`. The first handler clears the sticky and redispatches; the second handler reads an empty sticky, treats its own redispatch as already covered, and fails fast with `session_missing_racing`. Re-enqueue the second event behind the first. Implement via a per-conversation lock in `sessions.py`.
+- **`session_missing` after operator-driven re-auth.** Possible if the operator authed under a different account whose `~/.claude/projects/` has none of the resumed session-ids. The dispatcher's sticky-clear + retry path covers it; the operator never sees a separate prompt.
+- **Stale `SESSION_ID` in `ops/watchdog.conf`** (legacy-claude only). Not the gateway's problem — the legacy-claude child in watchdog v2 is what consumes that file. Watchdog spec calls this out; gateway-mode instances do not read `SESSION_ID` from disk.
 - **Operator's chat is a group, not a DM.** Auth flow only fires for `chat.type == 'private'` chats with the configured operator user_id. Group chats with a session expiry are silenced (the failed event is marked failed with reason `auth_required_in_group`); the operator must trigger re-auth from their DM.
 - **The classifier itself fails.** If OpenRouter returns 5xx or times out, treat as `transient`; the existing retry path runs. We never block the dispatcher waiting on the classifier.
 - **The classifier hallucinates a login_url.** Validate `extracted.login_url`: must be `https://`, must be on a known host (`claude.ai`, `console.anthropic.com`, `openrouter.ai`). Otherwise drop the URL, fall through to a generic prompt: "Claude session expired. Run `claude /login` in your screen session and reply with the token here."
@@ -223,3 +252,5 @@ def maybe_handle_auth_token(event: queue.Event) -> bool:
 - **Should `bad_input` notify the operator?** Today's silent fail-fast keeps the chat clean; but if every image the operator sends gets quietly dropped, that is also bad. Proposal: DM the operator on the *first* `bad_input` per conversation per hour, then silence for the rest of that hour.
 - **Per-brain re-auth.** If we add an OpenRouter-specific session expiry handler later, the recovery handler interface needs a `brain` dimension in the registry. Punt until OpenRouter actually expires us.
 - **Idempotency on replay.** When we re-enqueue the failed event after re-auth, does the original Telegram message get a second response sent? Need to confirm the dispatcher's de-dup keys cover the re-enqueue path.
+- **Notify on silent `session_missing` recovery?** Default proposed: silent on first occurrence per `(conversation_id, day)`; DM if it repeats within an hour (signals a real bug, not a one-off cleanup). Worth one DM the very first time per conversation so the operator knows their conversation memory in that brain has reset?
+- **Where does `session_missing` get classified?** Stderr signature is stable enough that a regex prefilter could short-circuit the LLM call (saves ~1s of classifier latency on a known failure mode). Proposal: cheap regex prefilter for the four most common stderr signatures (`session_missing`, `session_expired`, OOM `bad_input`, ECONNRESET `transient`); LLM only on miss. Kills classifier cost for the most common failures.
