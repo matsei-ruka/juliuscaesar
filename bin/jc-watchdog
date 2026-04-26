@@ -163,11 +163,21 @@ case "$SUBCMD" in
         fi
         : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN not set in $INSTANCE_DIR/.env}"
         : "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID not set in $INSTANCE_DIR/.env}"
-        RESP=$(curl -sS --max-time 10 -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=jc-watchdog test-notify: $(date +'%FT%T%z')")
-        printf '%s\n' "$RESP"
+        # Route through the canonical sender so test-notify exercises the
+        # same MarkdownV2 path that production traffic does — easier to
+        # spot escaper bugs early.
+        SENDER="$(dirname "$0")/../lib/heartbeat/lib/send_telegram.sh"
+        if [[ ! -x "$SENDER" ]]; then
+            SENDER="$(realpath "$(dirname "$0")/..")/lib/heartbeat/lib/send_telegram.sh"
+        fi
+        if [[ -x "$SENDER" ]]; then
+            JC_INSTANCE_DIR="$INSTANCE_DIR" \
+            printf 'jc-watchdog test-notify: %s' "$(date +'%FT%T%z')" \
+                | JC_INSTANCE_DIR="$INSTANCE_DIR" "$SENDER"
+        else
+            echo "jc-watchdog: send_telegram.sh not found at $SENDER" >&2
+            exit 1
+        fi
         ;;
 
     -h|--help|help)

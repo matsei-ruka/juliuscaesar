@@ -107,10 +107,20 @@ notify() {
         log "notify: telegram creds missing in $ENV_FILE, suppressing notification: $msg"
         return 1
     fi
-    curl -sS --max-time 10 -X POST \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=${msg}" >>"$LOG_FILE" 2>&1
+    # Route through the canonical sender so MarkdownV2 escaping is consistent
+    # with the gateway. Falls back to plain text on parse errors. The sender
+    # resolves the instance dir from $JC_INSTANCE_DIR (set by the watchdog).
+    local sender
+    sender="$(dirname "${BASH_SOURCE[0]}")/../heartbeat/lib/send_telegram.sh"
+    if [[ -x "$sender" ]]; then
+        printf '%s' "$msg" | "$sender" >>"$LOG_FILE" 2>&1 || true
+    else
+        # Fallback if the framework layout has been rearranged.
+        curl -sS --max-time 10 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${msg}" >>"$LOG_FILE" 2>&1
+    fi
 }
 
 screen_named_alive() {
