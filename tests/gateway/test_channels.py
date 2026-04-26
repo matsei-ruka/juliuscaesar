@@ -671,6 +671,148 @@ class TelegramSendVoiceTests(unittest.TestCase):
             self.assertIn(b"OggS\x00\x00fakeopus", body)
 
 
+class TelegramSendParseModeTests(unittest.TestCase):
+    """`TelegramChannel.send` posts MarkdownV2 with escaped text + 400 retry."""
+
+    def _make_channel(self, instance: Path):
+        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+        channel = TelegramChannel(instance, cfg, _silent_log)
+        channel.token = "test-token"
+        return channel
+
+    def _patch_http(self, captured: list[dict[str, Any]], result_id: int = 9999):
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            captured.append({"url": url, "data": data})
+            return {"ok": True, "result": {"message_id": result_id}}
+
+        return fake_http_json
+
+    def test_send_sets_parse_mode_v2_and_escapes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            captured: list[dict[str, Any]] = []
+            orig = telegram_module.http_json
+            telegram_module.http_json = self._patch_http(captured)
+            try:
+                channel.send("Hello, world.", {"chat_id": "28547271"})
+            finally:
+                telegram_module.http_json = orig
+        self.assertEqual(len(captured), 1)
+        payload = captured[0]["data"]
+        self.assertEqual(payload["parse_mode"], "MarkdownV2")
+        # Period must arrive as `\.` so MarkdownV2 parses cleanly.
+        self.assertEqual(payload["text"], "Hello, world\\.")
+        self.assertTrue(payload["disable_web_page_preview"])
+
+    def test_send_rewrites_bold_to_v2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            captured: list[dict[str, Any]] = []
+            orig = telegram_module.http_json
+            telegram_module.http_json = self._patch_http(captured)
+            try:
+                channel.send("**bold** text", {"chat_id": "28547271"})
+            finally:
+                telegram_module.http_json = orig
+        self.assertEqual(captured[0]["data"]["text"], "*bold* text")
+        self.assertEqual(captured[0]["data"]["parse_mode"], "MarkdownV2")
+
+    def test_parse_error_via_ok_false_retries_plain(self):
+        original = "weird **stuff"  # malformed; pretend escaper bug
+        calls: list[dict[str, Any]] = []
+
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            calls.append(data)
+            if data.get("parse_mode") == "MarkdownV2":
+                return {
+                    "ok": False,
+                    "description": "Bad Request: can't parse entities",
+                }
+            return {"ok": True, "result": {"message_id": 7777}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            orig = telegram_module.http_json
+            telegram_module.http_json = fake_http_json
+            try:
+                msg_id = channel.send(original, {"chat_id": "28547271"})
+            finally:
+                telegram_module.http_json = orig
+        self.assertEqual(msg_id, "7777")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["parse_mode"], "MarkdownV2")
+        self.assertNotIn("parse_mode", calls[1])
+        self.assertEqual(calls[1]["text"], original)
+
+    def test_parse_error_via_http_400_retries_plain(self):
+        from urllib.error import HTTPError
+
+        original = "Hello, world."
+        calls: list[dict[str, Any]] = []
+
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            calls.append(data)
+            if data.get("parse_mode") == "MarkdownV2":
+                body = json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "Bad Request: can't parse entities: at byte 12",
+                    }
+                ).encode("utf-8")
+                raise HTTPError(
+                    url=url,
+                    code=400,
+                    msg="Bad Request",
+                    hdrs=None,
+                    fp=__import__("io").BytesIO(body),
+                )
+            return {"ok": True, "result": {"message_id": 8888}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            orig = telegram_module.http_json
+            telegram_module.http_json = fake_http_json
+            try:
+                msg_id = channel.send(original, {"chat_id": "28547271"})
+            finally:
+                telegram_module.http_json = orig
+        self.assertEqual(msg_id, "8888")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("parse_mode", calls[1])
+        self.assertEqual(calls[1]["text"], original)
+
+    def test_non_parse_400_raises(self):
+        from urllib.error import HTTPError
+
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            body = json.dumps(
+                {"ok": False, "error_code": 400, "description": "Forbidden chat"}
+            ).encode("utf-8")
+            raise HTTPError(
+                url=url,
+                code=400,
+                msg="Forbidden",
+                hdrs=None,
+                fp=__import__("io").BytesIO(body),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            orig = telegram_module.http_json
+            telegram_module.http_json = fake_http_json
+            try:
+                with self.assertRaises(RuntimeError):
+                    channel.send("hi", {"chat_id": "28547271"})
+            finally:
+                telegram_module.http_json = orig
+
+
 class ConfigWebRejectionTests(unittest.TestCase):
     def test_web_channel_rejected_with_helpful_error(self):
         with tempfile.TemporaryDirectory() as tmp:
