@@ -56,6 +56,15 @@ Three-layer runner:
 
 Output is sent via a raw-API channel client (Telegram, etc.) that does **not** depend on the live Claude session being alive. `sent.log` records every sent message so the live session can resolve user replies to past cron messages by context lookup.
 
+## Telegram outbound formatting
+
+Outbound text on Telegram is sent with `parse_mode=MarkdownV2` so brain responses render formatting natively (bold, italic, monospace, fenced code, clickable links, strikethrough). Brains write plain markdown; the gateway's escaper (`lib/gateway/format/escaper.py:to_markdown_v2`) handles every V2 reserved character (`_*[]()~``>#+-=|{}.!`) deterministically.
+
+- Two-pass converter: extracts intentional spans (code, links, bold, italic, strike) into placeholders, escapes all reserved chars in the remaining text, then restores spans with V2 syntax.
+- Headings (`# `, `## `) → ALL-CAPS lines; bullets (`- `, `* `) → `•` (no native V2 equivalent).
+- Safety net: if Telegram returns 400 (parse_error), the gateway retries once without `parse_mode` using the original text — messages always ship.
+- Spec: [`docs/specs/telegram-md-rewriter.md`](./specs/telegram-md-rewriter.md).
+
 ## Watchdog
 
 Cron-triggered supervisor for the live Claude session. Detects crashes (including Claude CLI auto-updates that kill the running process), restarts with `--resume <session-id>` from a conf file, pings the user via Telegram on state transitions.

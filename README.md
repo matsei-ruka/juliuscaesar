@@ -38,7 +38,7 @@ Full walkthrough: [QUICKSTART.md](./QUICKSTART.md).
 - `jc heartbeat`  — YAML-driven task runner, cron-triggered, per-task tool+model routing (claude, gemini, opencode, minimax), with pre_fetch → hash-delta → synthesis pipeline and MCP-independent Telegram delivery
 - `jc voice`      — TTS + ASR + enrollment via DashScope Qwen (Singapore/intl endpoint)
 - `jc watchdog`   — supervisor for the gateway daemon by default, with a legacy live-Claude fallback mode for old Telegram-plugin deployments
-- `jc gateway`    — unified runtime: local SQLite queue, Telegram long polling, Slack Socket Mode, brain dispatch through `claude`/`codex`/`opencode`/`gemini`, retries, delivery, logs, events, and restart/status commands
+- `jc gateway`    — unified runtime: local SQLite queue, Telegram long polling (MarkdownV2 outbound — bold/italic/code/links/strike render natively, gateway escapes reserved chars), Slack Socket Mode, brain dispatch through `claude`/`codex`/`opencode`/`gemini`, retries, delivery, logs, events, and restart/status commands
 - `jc init`       — scaffold a new instance from `templates/init-instance/`
 - `jc setup`      — guided first-run configurator that writes `.env`, L1 memory, watchdog config, and runs diagnostics
 - `jc doctor`     — pre-flight checks (binaries, instance structure, credentials, runtime, gateway) plus `--fix` for conservative local repairs
