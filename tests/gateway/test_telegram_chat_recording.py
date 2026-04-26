@@ -158,6 +158,29 @@ class TelegramChatRecordingTests(unittest.TestCase):
             self.assertEqual(row.title, "Cardcentric")
             self.assertEqual(row.username, "cardcentric_chat")
 
+    def test_group_recorded_even_when_not_mentioned(self):
+        """Group messages without @-mention are not dispatched but should
+        still appear in the chats directory (observability)."""
+        update = {
+            "update_id": 7,
+            "message": {
+                "message_id": 23,
+                "chat": {"id": -200, "type": "group", "title": "Random chatter"},
+                "from": {"id": 1, "username": "luca"},
+                "text": "hello world",  # no mention, no reply-to-bot
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = _drive(instance, [update])
+            # Not enqueued — _should_process_message rejected it.
+            self.assertEqual(captured, [])
+            # But still recorded in the chats table.
+            row = chats.get_chat(instance, channel="telegram", chat_id="-200")
+            self.assertIsNotNone(row)
+            self.assertEqual(row.chat_type, "group")
+            self.assertEqual(row.title, "Random chatter")
+
     def test_channel_recorded(self):
         update = {
             "update_id": 5,
