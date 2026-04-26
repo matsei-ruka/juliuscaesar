@@ -17,6 +17,7 @@ from .config import ChannelConfig, GatewayConfig, load_config
 from .logging_setup import configure_logger
 from .triage import MetricsRecorder, TriageBackend, TriageCache, build_backend
 from .triage.base import TriageResult
+from .warm_pool import PoolManager, PoolProcess
 
 
 def typing_loop(
@@ -96,6 +97,8 @@ class GatewayRuntime:
             max_bytes=self.config.reliability.log_max_bytes,
             backups=self.config.reliability.log_backups,
         )
+        self._warm_pool_lock = threading.Lock()
+        self._warm_pool: PoolManager | None = None
 
     def _get_triage_backend(self) -> TriageBackend | None:
         with self._triage_lock:
@@ -109,6 +112,48 @@ class GatewayRuntime:
         with self._triage_lock:
             self._triage_backend = None
         self.triage_cache = TriageCache(ttl_seconds=self.config.triage.cache_ttl_seconds)
+        self._teardown_warm_pool_if_disabled()
+
+    def _get_warm_pool(self) -> PoolManager | None:
+        cfg = self.config.warm_pool
+        if not cfg.enabled:
+            return None
+        with self._warm_pool_lock:
+            if self._warm_pool is not None:
+                return self._warm_pool
+            instance_dir = self.instance_dir
+            startup = float(cfg.startup_timeout_seconds)
+            claude_bin = os.environ.get("JC_CLAUDE_BIN") or "claude"
+
+            def factory(key: tuple[str, str, str | None]) -> PoolProcess:
+                _conv, _brain, model = key
+                return PoolProcess(
+                    claude_bin=claude_bin,
+                    instance_dir=instance_dir,
+                    model=model,
+                    startup_timeout_seconds=startup,
+                )
+
+            self._warm_pool = PoolManager(
+                factory,
+                max_size=cfg.max_size,
+                idle_timeout_seconds=float(cfg.idle_timeout_seconds),
+            )
+            self.log(
+                f"warm_pool initialized max_size={cfg.max_size} "
+                f"idle_timeout={cfg.idle_timeout_seconds}s"
+            )
+            return self._warm_pool
+
+    def _teardown_warm_pool_if_disabled(self) -> None:
+        if self.config.warm_pool.enabled:
+            return
+        with self._warm_pool_lock:
+            pool = self._warm_pool
+            self._warm_pool = None
+        if pool is not None:
+            pool.shutdown()
+            self.log("warm_pool torn down (config disabled)")
 
     def log(self, message: str, **fields: Any) -> None:
         # Drop reserved LogRecord field names to avoid clashes.
@@ -152,12 +197,19 @@ class GatewayRuntime:
     def run_forever(self) -> None:
         self.start_channels()
         self.log("dispatcher started")
-        while not self.stop_requested():
-            self.dispatch_once()
-            time.sleep(self.config.poll_interval_seconds)
-        self.log("dispatcher stopping")
-        for thread in self.threads:
-            thread.join(timeout=2)
+        try:
+            while not self.stop_requested():
+                self.dispatch_once()
+                time.sleep(self.config.poll_interval_seconds)
+            self.log("dispatcher stopping")
+            for thread in self.threads:
+                thread.join(timeout=2)
+        finally:
+            with self._warm_pool_lock:
+                pool = self._warm_pool
+                self._warm_pool = None
+            if pool is not None:
+                pool.shutdown()
 
     def dispatch_once(self) -> bool:
         conn = queue.connect(self.instance_dir)
@@ -368,6 +420,7 @@ class GatewayRuntime:
         )
 
         typing_stop = self._start_typing(channel, meta)
+        warm_pool = self._get_warm_pool() if brain == "claude" else None
         try:
             result = invoke_brain(
                 instance_dir=self.instance_dir,
@@ -379,6 +432,7 @@ class GatewayRuntime:
                 log_path=self.log_path,
                 config=self.config,
                 log_event=self.log,
+                warm_pool=warm_pool,
             )
         except Exception as exc:  # noqa: BLE001
             self.log(

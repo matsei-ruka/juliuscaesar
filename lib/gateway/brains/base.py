@@ -167,7 +167,10 @@ class Brain:
         timeout_seconds: int,
         log_path: Path,
         log_event: Callable[[str], None] | None = None,
+        warm_pool: object | None = None,
     ) -> BrainResult:
+        # `warm_pool` is consumed by ClaudeBrain only; default brains ignore it.
+        del warm_pool
         self.validate()
         prompt = self.prompt_for_event(event)
         env = os.environ.copy()
