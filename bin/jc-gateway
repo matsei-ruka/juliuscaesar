@@ -191,6 +191,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     log_line(instance, f"gateway daemon started pid={os.getpid()}")
     runtime = GatewayRuntime(instance, log_path=log_path(instance), stop_requested=lambda: not RUNNING)
     runtime.start_channels()
+    runtime.start_heartbeat()
     try:
         global RELOAD_REQUESTED
         while RUNNING:
@@ -217,6 +218,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             runtime.dispatch_once()
             time.sleep(args.interval_seconds)
     finally:
+        runtime.stop_heartbeat()
         pid_path(instance).unlink(missing_ok=True)
         log_line(instance, "gateway daemon stopped")
     return 0

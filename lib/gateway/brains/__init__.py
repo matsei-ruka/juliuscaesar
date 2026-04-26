@@ -8,7 +8,7 @@ package while preserving the same call signature.
 
 from .aider import AiderBrain
 from .aliases import resolve_alias
-from .base import Brain, BrainResult
+from .base import AdapterFailure, Brain, BrainResult
 from .claude import ClaudeBrain
 from .codex import CodexBrain
 from .dispatch import invoke_brain, supported_brains
@@ -17,6 +17,7 @@ from .opencode import OpencodeBrain
 
 
 __all__ = [
+    "AdapterFailure",
     "AiderBrain",
     "Brain",
     "BrainResult",

@@ -37,6 +37,21 @@ class BrainResult:
     session_id: str | None = None
 
 
+class AdapterFailure(RuntimeError):
+    """Raised when an adapter exits non-zero.
+
+    Carries the tail of stderr (capped) so the recovery classifier can route
+    the failure without re-reading the gateway log. Subclass of RuntimeError
+    for backwards compat with existing dispatcher catches.
+    """
+
+    def __init__(self, brain: str, rc: int, stderr_tail: str):
+        super().__init__(f"adapter {brain} failed with exit {rc}")
+        self.brain = brain
+        self.rc = rc
+        self.stderr_tail = stderr_tail or ""
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -73,6 +88,25 @@ def killpg(pid: int, sig: int) -> None:
         os.killpg(pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+_STDERR_TAIL_LINES = 80
+_STDERR_TAIL_BYTES = 8 * 1024
+
+
+def _read_tail(path: Path) -> str:
+    """Return the last 80 lines / 8KB of the adapter stderr file. Best-effort."""
+    try:
+        data = path.read_bytes()
+    except (OSError, FileNotFoundError):
+        return ""
+    if len(data) > _STDERR_TAIL_BYTES:
+        data = data[-_STDERR_TAIL_BYTES:]
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if len(lines) > _STDERR_TAIL_LINES:
+        lines = lines[-_STDERR_TAIL_LINES:]
+    return "\n".join(lines)
 
 
 class Brain:
@@ -183,6 +217,13 @@ class Brain:
         start = now_iso()
         wall_start = time.monotonic()
         log = log_event or (lambda _msg: None)
+        # Stderr goes to a per-invocation scratch file so we can extract a tail
+        # for the recovery classifier on rc!=0. We append the full contents to
+        # the gateway log on completion (success or failure) so log forensics
+        # are unchanged.
+        stderr_dir = self.instance_dir / "state" / "gateway" / "adapter_stderr"
+        stderr_dir.mkdir(parents=True, exist_ok=True)
+        stderr_path = stderr_dir / f"{event.id}-{os.getpid()}-{int(wall_start)}.log"
         with log_path.open("ab") as binlog:
             binlog.write(
                 f"[{start}] adapter start event={event.id} brain={self.name} model={model or '-'}\n".encode()
@@ -196,48 +237,60 @@ class Brain:
                 os.fsync(binlog.fileno())
             except OSError:
                 pass
+            stderr_handle = stderr_path.open("wb")
             try:
-                proc = subprocess.Popen(
-                    [str(self.adapter_path()), model or ""],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=binlog,
-                    cwd=str(self.instance_dir),
-                    env=env,
-                    start_new_session=True,
-                    text=True,
-                )
-            except Exception as exc:  # noqa: BLE001
+                try:
+                    proc = subprocess.Popen(
+                        [str(self.adapter_path()), model or ""],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=stderr_handle,
+                        cwd=str(self.instance_dir),
+                        env=env,
+                        start_new_session=True,
+                        text=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        f"adapter spawn failed event={event.id} brain={self.name} reason={exc}"
+                    )
+                    raise
                 log(
-                    f"adapter spawn failed event={event.id} brain={self.name} reason={exc}"
+                    f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
+                    f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
                 )
-                raise
-            log(
-                f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
-                f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
-            )
-            try:
-                stdout, _ = proc.communicate(prompt, timeout=timeout)
-            except subprocess.TimeoutExpired:
+                try:
+                    stdout, _ = proc.communicate(prompt, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    duration = time.monotonic() - wall_start
+                    log(
+                        f"adapter timeout event={event.id} brain={self.name} "
+                        f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                    )
+                    killpg(proc.pid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                    raise TimeoutError(f"adapter timeout after {timeout}s")
                 duration = time.monotonic() - wall_start
                 log(
-                    f"adapter timeout event={event.id} brain={self.name} "
-                    f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                    f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
+                    f"rc={proc.returncode} duration={duration:.1f}s"
                 )
-                killpg(proc.pid, signal.SIGTERM)
+            finally:
+                stderr_handle.close()
                 try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
-                raise TimeoutError(f"adapter timeout after {timeout}s")
-            duration = time.monotonic() - wall_start
-            log(
-                f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
-                f"rc={proc.returncode} duration={duration:.1f}s"
-            )
+                    binlog.write(stderr_path.read_bytes())
+                except OSError:
+                    pass
             if proc.returncode != 0:
-                raise RuntimeError(f"adapter {self.name} failed with exit {proc.returncode}")
+                raise AdapterFailure(self.name, proc.returncode, _read_tail(stderr_path))
+        try:
+            stderr_path.unlink()
+        except OSError:
+            pass
         session_id = None
         try:
             session_id = self.capture_session_id(start)
