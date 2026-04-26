@@ -424,6 +424,77 @@ class TelegramForwardDetectionTests(unittest.TestCase):
             )
 
 
+class TelegramGroupMentionTests(unittest.TestCase):
+    """`_should_process_message` filters group/supergroup to @-mentions only."""
+
+    def _channel(self, instance: Path, *, bot_username="rachelbot", bot_user_id=42):
+        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+        channel = TelegramChannel(instance, cfg, _silent_log)
+        channel.token = "test-token"
+        channel.bot_username = bot_username
+        channel.bot_user_id = bot_user_id
+        return channel
+
+    def test_dm_replied_always(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            msg = {"chat": {"id": 28547271, "type": "private"}, "text": "hi"}
+            self.assertTrue(channel._should_process_message(msg))
+
+    def test_group_message_ignored_if_not_mentioned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            msg = {"chat": {"id": -100, "type": "group"}, "text": "lunch later?"}
+            self.assertFalse(channel._should_process_message(msg))
+
+    def test_group_message_replied_if_mentioned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "hey @rachelbot hi",
+                "entities": [{"type": "mention", "offset": 4, "length": 10}],
+            }
+            self.assertTrue(channel._should_process_message(msg))
+
+    def test_supergroup_mention_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp), bot_username="rachelbot", bot_user_id=42)
+            msg = {
+                "chat": {"id": -1001, "type": "supergroup"},
+                "text": "Rachel can you check this",
+                "entities": [
+                    {
+                        "type": "text_mention",
+                        "offset": 0,
+                        "length": 6,
+                        "user": {"id": 42, "first_name": "Rachel"},
+                    }
+                ],
+            }
+            self.assertTrue(channel._should_process_message(msg))
+
+    def test_group_no_username_resolved_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp), bot_username=None, bot_user_id=None)
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "hey @rachelbot hi",
+                "entities": [{"type": "mention", "offset": 4, "length": 10}],
+            }
+            self.assertFalse(channel._should_process_message(msg))
+
+    def test_group_mention_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            # No entities supplied — exercises the substring fallback.
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "hi @RachelBot",
+            }
+            self.assertTrue(channel._should_process_message(msg))
+
+
 class TelegramSendTypingTests(unittest.TestCase):
     def test_send_typing_posts_chat_action(self):
         with tempfile.TemporaryDirectory() as tmp:
