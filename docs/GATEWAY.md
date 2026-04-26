@@ -94,6 +94,27 @@ jc gateway metrics --hours 24
 | Discord channel idle                       | `pip install discord.py`; intent on; bot in server    |
 | Worker completes but no Telegram message   | `state/events/` accumulating? jc-events disabled?     |
 
+## Warm pool (claude brain, opt-in)
+
+Cold-start of `claude -p` (CLAUDE.md load + MCP init + session resume) costs
+3-8s per event. The warm pool keeps a persistent
+`claude -p --input-format=stream-json --output-format=stream-json` subprocess
+per `(conversation_id, brain, model)` and reuses it across events. Disabled by
+default; enable in `ops/gateway.yaml`:
+
+```yaml
+warm_pool:
+  enabled: true
+  max_size: 20                  # cap concurrent live members
+  idle_timeout_seconds: 300     # evict members idle this long
+  startup_timeout_seconds: 30   # max wait for claude init event
+```
+
+Pool failures (spawn error, IO error, timeout) fall back to the legacy
+single-shot subprocess path automatically — opt-in is non-breaking. Spec:
+`docs/specs/claude-warm-pool.md`. Phase 1 (MVP) only — no metrics dashboard,
+no pre-warming, no daemon mode.
+
 ## Invariants
 
 - No `--channels` flag in adapter shell scripts under gateway mode. The

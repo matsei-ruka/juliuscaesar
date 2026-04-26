@@ -70,6 +70,14 @@ class ReliabilityConfig:
 
 
 @dataclass(frozen=True)
+class WarmPoolConfig:
+    enabled: bool = False
+    max_size: int = 20
+    idle_timeout_seconds: int = 300
+    startup_timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
@@ -81,6 +89,7 @@ class GatewayConfig:
     triage: TriageConfig = field(default_factory=TriageConfig)
     brains: dict[str, BrainOverrideConfig] = field(default_factory=dict)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
+    warm_pool: WarmPoolConfig = field(default_factory=WarmPoolConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -322,6 +331,18 @@ def _load_brains(data: dict[str, Any]) -> dict[str, BrainOverrideConfig]:
     return out
 
 
+def _load_warm_pool(data: dict[str, Any]) -> WarmPoolConfig:
+    raw = data.get("warm_pool")
+    if not isinstance(raw, dict):
+        return WarmPoolConfig()
+    return WarmPoolConfig(
+        enabled=bool(raw.get("enabled", False)),
+        max_size=int(raw.get("max_size") or 20),
+        idle_timeout_seconds=int(raw.get("idle_timeout_seconds") or 300),
+        startup_timeout_seconds=int(raw.get("startup_timeout_seconds") or 30),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -388,6 +409,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         triage=_load_triage(data),
         brains=_load_brains(data),
         reliability=_load_reliability(data),
+        warm_pool=_load_warm_pool(data),
     )
 
 
@@ -421,6 +443,14 @@ triage_routing:
   image: claude:sonnet-4-6
   voice: claude:sonnet-4-6
   system: claude:haiku-4-5
+# warm_pool: persistent `claude -p` REPL pool. Cuts cold-start overhead
+# (CLAUDE.md load + MCP init + session resume) on the claude brain. Opt-in.
+# See docs/specs/claude-warm-pool.md.
+warm_pool:
+  enabled: false
+  max_size: 20
+  idle_timeout_seconds: 300
+  startup_timeout_seconds: 30
 channels:
   telegram:
     enabled: {str(telegram_enabled).lower()}
