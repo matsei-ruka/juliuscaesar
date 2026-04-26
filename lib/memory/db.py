@@ -283,6 +283,11 @@ def rebuild(conn: sqlite3.Connection, instance_dir: Path) -> tuple[int, int]:
     return len(paths), removed
 
 
+# Files written by other framework subsystems (e.g. gateway chat-discovery)
+# that live under memory/L1/ but should not be indexed as memory entries.
+_AUTO_GENERATED_NAMES = frozenset({"CHATS.md"})
+
+
 def _iter_md_files(instance_dir: Path) -> Iterator[Path]:
     mem = memory_dir(instance_dir)
     for base in ("L1", "L2"):
@@ -290,6 +295,8 @@ def _iter_md_files(instance_dir: Path) -> Iterator[Path]:
         if not d.exists():
             continue
         for p in sorted(d.rglob("*.md")):
+            if p.name in _AUTO_GENERATED_NAMES:
+                continue
             yield p
 
 

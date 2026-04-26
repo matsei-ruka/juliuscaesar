@@ -155,5 +155,81 @@ class PruneChatsTests(unittest.TestCase):
             self.assertEqual([c.chat_id for c in remaining], ["new"])
 
 
+class L1ChatsGeneratorTests(unittest.TestCase):
+    def test_regenerate_writes_file_with_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "memory" / "L1").mkdir(parents=True)
+            chats.upsert_chat(
+                instance,
+                channel="telegram",
+                chat_id="42",
+                chat_type="private",
+                title="Luca Mattei",
+                username="luca",
+            )
+            path = chats.regenerate_l1_chats(instance)
+            self.assertIsNotNone(path)
+            self.assertEqual(path.name, "CHATS.md")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("AUTO-GENERATED", text)
+            self.assertIn("Luca Mattei", text)
+            self.assertIn("42", text)
+
+    def test_regenerate_skips_when_l1_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(instance, channel="telegram", chat_id="42")
+            self.assertIsNone(chats.regenerate_l1_chats(instance))
+
+    def test_upsert_triggers_debounced_regen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "memory" / "L1").mkdir(parents=True)
+            # Reset debounce state for a clean test.
+            chats._LAST_REGEN.clear()
+            chats.upsert_chat(
+                instance,
+                channel="telegram",
+                chat_id="42",
+                title="Luca",
+            )
+            target = instance / "memory" / "L1" / "CHATS.md"
+            self.assertTrue(target.exists())
+            text_before = target.read_text(encoding="utf-8")
+
+            # Second upsert within debounce window — file must NOT be rewritten.
+            target.write_text("STALE", encoding="utf-8")
+            chats.upsert_chat(
+                instance,
+                channel="telegram",
+                chat_id="43",
+                title="Other",
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "STALE")
+            del text_before
+
+
+class MemoryRebuildSkipsChatsTests(unittest.TestCase):
+    def test_rebuild_skips_auto_generated_chats_file(self):
+        from memory import db as memory_db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "memory" / "L1").mkdir(parents=True)
+            (instance / "memory" / "L1" / "IDENTITY.md").write_text(
+                "---\nslug: IDENTITY\ntitle: Test\nlayer: L1\nstate: draft\n---\n\nbody",
+                encoding="utf-8",
+            )
+            chats.upsert_chat(instance, channel="telegram", chat_id="1", title="x")
+            chats.regenerate_l1_chats(instance)
+            self.assertTrue((instance / "memory" / "L1" / "CHATS.md").exists())
+
+            paths = list(memory_db._iter_md_files(instance))
+            names = {p.name for p in paths}
+            self.assertNotIn("CHATS.md", names)
+            self.assertIn("IDENTITY.md", names)
+
+
 if __name__ == "__main__":
     unittest.main()
