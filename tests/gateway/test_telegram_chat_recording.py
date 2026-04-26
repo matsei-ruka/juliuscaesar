@@ -209,5 +209,281 @@ class TelegramChatRecordingTests(unittest.TestCase):
             self.assertEqual(calls, ["called"])
 
 
+class TelegramGroupAuthTests(unittest.TestCase):
+    """Bot-added detection, auth prompt, callback handling, message gating."""
+
+    def _channel(self, instance, *, main_chat="28547271"):
+        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+        channel = TelegramChannel(instance, cfg, _silent_log)
+        channel.token = "test-token"
+        channel.bot_username = "rachelbot"
+        channel.bot_user_id = 42
+        # Stub TELEGRAM_CHAT_ID resolution so _main_chat_id() returns our test value.
+        channel._main_chat_id = lambda: main_chat
+        return channel
+
+    def _patch_http(self, channel, calls: list[dict]):
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            calls.append({"url": url, "data": data})
+            if "getChatMemberCount" in url:
+                return {"ok": True, "result": 5}
+            if "getUpdates" in url:
+                return {"ok": True, "result": []}
+            return {"ok": True, "result": {"message_id": 9001}}
+
+        orig = telegram_module.http_json
+        telegram_module.http_json = fake_http_json
+        return orig
+
+    def test_my_chat_member_marks_pending_and_sends_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._channel(instance)
+            calls: list[dict] = []
+            orig = self._patch_http(channel, calls)
+            try:
+                update = {
+                    "update_id": 5000,
+                    "my_chat_member": {
+                        "chat": {"id": -1001, "type": "supergroup", "title": "BNESIM ops"},
+                        "from": {"id": 999, "username": "alice", "first_name": "Alice"},
+                        "new_chat_member": {
+                            "user": {"id": 42, "username": "rachelbot"},
+                            "status": "member",
+                        },
+                    },
+                }
+                channel._handle_my_chat_member(update)
+            finally:
+                telegram_module.http_json = orig
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
+            self.assertIsNotNone(row)
+            self.assertEqual(row.auth_status, "pending")
+            self.assertEqual(row.title, "BNESIM ops")
+            send_calls = [c for c in calls if "sendMessage" in c["url"]]
+            self.assertEqual(len(send_calls), 1)
+            payload = send_calls[0]["data"]
+            self.assertEqual(payload["chat_id"], "28547271")
+            self.assertIn("inline_keyboard", payload["reply_markup"])
+            self.assertIn("chat_auth:allow:-1001", payload["reply_markup"])
+            self.assertIn("chat_auth:deny:-1001", payload["reply_markup"])
+
+    def test_my_chat_member_left_marks_denied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._channel(instance)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-1001",
+                title="x", auth_status="allowed",
+            )
+            calls: list[dict] = []
+            orig = self._patch_http(channel, calls)
+            try:
+                update = {
+                    "update_id": 5001,
+                    "my_chat_member": {
+                        "chat": {"id": -1001, "type": "supergroup"},
+                        "from": {"id": 999},
+                        "new_chat_member": {
+                            "user": {"id": 42, "username": "rachelbot"},
+                            "status": "kicked",
+                        },
+                    },
+                }
+                channel._handle_my_chat_member(update)
+            finally:
+                telegram_module.http_json = orig
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
+            self.assertEqual(row.auth_status, "denied")
+
+    def test_my_chat_member_for_other_user_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._channel(instance)
+            calls: list[dict] = []
+            orig = self._patch_http(channel, calls)
+            try:
+                update = {
+                    "my_chat_member": {
+                        "chat": {"id": -1001, "type": "supergroup"},
+                        "new_chat_member": {
+                            "user": {"id": 7777, "username": "alice"},
+                            "status": "member",
+                        },
+                    },
+                }
+                channel._handle_my_chat_member(update)
+            finally:
+                telegram_module.http_json = orig
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
+            self.assertIsNone(row)
+
+    def test_new_chat_members_backstop_path(self):
+        update = {
+            "update_id": 5002,
+            "message": {
+                "message_id": 17,
+                "chat": {"id": -1002, "type": "group", "title": "Cardcentric"},
+                "from": {"id": 999, "username": "alice"},
+                "new_chat_members": [{"id": 42, "username": "rachelbot"}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _drive(instance, [update])
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1002")
+            self.assertIsNotNone(row)
+            self.assertEqual(row.auth_status, "pending")
+
+    def test_callback_allow_flips_status_and_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._channel(instance)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-1001",
+                title="BNESIM ops", auth_status="pending",
+            )
+            calls: list[dict] = []
+            orig = self._patch_http(channel, calls)
+            try:
+                update = {
+                    "update_id": 5100,
+                    "callback_query": {
+                        "id": "cb1",
+                        "from": {"id": 28547271, "username": "luca"},
+                        "data": "chat_auth:allow:-1001",
+                        "message": {
+                            "message_id": 200,
+                            "chat": {"id": 28547271, "type": "private"},
+                        },
+                    },
+                }
+                channel._handle_callback_query(update)
+            finally:
+                telegram_module.http_json = orig
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
+            self.assertEqual(row.auth_status, "allowed")
+            urls = [c["url"] for c in calls]
+            self.assertTrue(any("editMessageText" in u for u in urls))
+            self.assertTrue(any("answerCallbackQuery" in u for u in urls))
+            self.assertFalse(any("leaveChat" in u for u in urls))
+
+    def test_callback_deny_flips_status_and_leaves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._channel(instance)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-1001",
+                title="BNESIM ops", auth_status="pending",
+            )
+            calls: list[dict] = []
+            orig = self._patch_http(channel, calls)
+            try:
+                update = {
+                    "callback_query": {
+                        "id": "cb2",
+                        "from": {"id": 28547271},
+                        "data": "chat_auth:deny:-1001",
+                        "message": {
+                            "message_id": 201,
+                            "chat": {"id": 28547271},
+                        },
+                    },
+                }
+                channel._handle_callback_query(update)
+            finally:
+                telegram_module.http_json = orig
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
+            self.assertEqual(row.auth_status, "denied")
+            urls = [c["url"] for c in calls]
+            self.assertTrue(any("leaveChat" in u for u in urls))
+
+    def test_callback_from_unauthorized_user_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._channel(instance)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-1001",
+                auth_status="pending",
+            )
+            calls: list[dict] = []
+            orig = self._patch_http(channel, calls)
+            try:
+                update = {
+                    "callback_query": {
+                        "id": "cb-bad",
+                        "from": {"id": 99999},  # not the operator
+                        "data": "chat_auth:allow:-1001",
+                        "message": {"message_id": 1, "chat": {"id": 99999}},
+                    },
+                }
+                channel._handle_callback_query(update)
+            finally:
+                telegram_module.http_json = orig
+            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
+            self.assertEqual(row.auth_status, "pending")
+            urls = [c["url"] for c in calls]
+            self.assertTrue(any("answerCallbackQuery" in u for u in urls))
+            self.assertFalse(any("editMessageText" in u for u in urls))
+
+    def test_pending_chat_message_dropped(self):
+        update = {
+            "update_id": 6000,
+            "message": {
+                "message_id": 50,
+                "chat": {"id": -2001, "type": "supergroup", "title": "X"},
+                "from": {"id": 1, "username": "luca"},
+                "text": "@rachelbot hello",
+                "entities": [{"type": "mention", "offset": 0, "length": 10}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-2001",
+                auth_status="pending",
+            )
+            captured = _drive(instance, [update])
+            self.assertEqual(len(captured), 0)
+
+    def test_allowed_chat_message_processed(self):
+        update = {
+            "update_id": 6001,
+            "message": {
+                "message_id": 51,
+                "chat": {"id": -2002, "type": "supergroup", "title": "Y"},
+                "from": {"id": 1, "username": "luca"},
+                "text": "@rachelbot ping",
+                "entities": [{"type": "mention", "offset": 0, "length": 10}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-2002",
+                auth_status="allowed",
+            )
+            captured = _drive(instance, [update])
+            self.assertEqual(len(captured), 1)
+
+    def test_legacy_allowlist_overrides_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-3000",
+                auth_status="pending",
+            )
+            cfg = ChannelConfig(
+                enabled=True,
+                token_env="TELEGRAM_BOT_TOKEN",
+                chat_ids=["-3000"],
+            )
+            channel = TelegramChannel(instance, cfg, _silent_log)
+            channel.token = "test-token"
+            channel.bot_username = "rachelbot"
+            channel.bot_user_id = 42
+            self.assertTrue(channel._is_authorized("-3000"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError
 
 from .. import chats as chats_module
+from .. import queue as queue_module
 from ..config import ChannelConfig, env_value
 from ..format import to_markdown_v2
 from ._http import http_json
@@ -77,6 +78,20 @@ class TelegramChannel:
     # TTL is tempting but means a third joiner gets bot-replied for longer.
     _MEMBER_COUNT_TTL_SECONDS = 300.0
 
+    # Telegram update types we want to receive. By default getUpdates only
+    # delivers `message` + `edited_message`; opting into `my_chat_member` is
+    # how we learn the bot was added to / removed from a chat, and
+    # `callback_query` carries the inline-keyboard taps for chat-auth.
+    _ALLOWED_UPDATE_TYPES = (
+        "message",
+        "edited_message",
+        "my_chat_member",
+        "callback_query",
+    )
+
+    # Inline-keyboard callback_data prefix for chat-auth Allow/Deny taps.
+    _AUTH_CALLBACK_PREFIX = "chat_auth:"
+
     def __init__(self, instance_dir: Path, cfg: ChannelConfig, log: LogFn):
         self.instance_dir = instance_dir
         self.cfg = cfg
@@ -87,6 +102,13 @@ class TelegramChannel:
         self.bot_username: str | None = None
         self.bot_user_id: int | None = None
         self._member_count_cache: dict[str, tuple[int, float]] = {}
+        # Cached SQLite connection for chats reads/writes — opened lazily.
+        # Single-threaded poller, single-threaded callback_query handler;
+        # one connection is safe and skips per-call init_db churn.
+        self._chats_conn = None
+        # Track the chat_ids we've already prompted auth for so a flapping
+        # `my_chat_member` update doesn't fan out into duplicate prompts.
+        self._auth_prompts_sent: set[str] = set()
 
     def _resolve_bot_username(self) -> None:
         """Populate `bot_username` and `bot_user_id` via `getMe`. Best-effort."""
@@ -114,6 +136,317 @@ class TelegramChannel:
             self.log(
                 f"telegram bot_username resolved as @{self.bot_username} (id={self.bot_user_id})"
             )
+
+    def _get_chats_conn(self):
+        """Lazy, cached SQLite connection for chats ops."""
+        if self._chats_conn is None:
+            self._chats_conn = queue_module.connect(self.instance_dir)
+        return self._chats_conn
+
+    def close(self) -> None:
+        """Release cached resources (chats DB connection). Idempotent."""
+        if self._chats_conn is not None:
+            try:
+                self._chats_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._chats_conn = None
+
+    def _main_chat_id(self) -> str | None:
+        """Resolve the configured main DM chat_id.
+
+        Auth prompts and replies fan out from the env'd `TELEGRAM_CHAT_ID`,
+        which doubles as the operator's user id (DM `chat_id == user_id`).
+        """
+        env = env_value(self.instance_dir, "TELEGRAM_CHAT_ID")
+        return str(env) if env else None
+
+    def _is_authorized(self, chat_id: str) -> bool:
+        """Decide if a chat may have its messages dispatched to the brain.
+
+        Order:
+        1. `cfg.chat_ids` (env allowlist) → always allowed (legacy contract).
+        2. DM-with-the-operator → always allowed.
+        3. `chats.auth_status == 'allowed'` → allowed.
+        4. Otherwise → not authorized; message is dropped.
+        """
+        if self.allowed and chat_id in self.allowed:
+            return True
+        main = self._main_chat_id()
+        if main and chat_id == main:
+            return True
+        try:
+            row = chats_module.get_chat(
+                conn=self._get_chats_conn(),
+                channel="telegram",
+                chat_id=chat_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram auth lookup failed chat_id={chat_id}: {exc} — fail open")
+            return True
+        if row is None:
+            # Not yet recorded — fail open. The next `_record_chat` will
+            # write the row; bot-added flow is responsible for marking
+            # truly-new groups as `pending`.
+            return True
+        return row.auth_status == "allowed"
+
+    def _handle_my_chat_member(self, update: dict) -> None:
+        """Handle a `my_chat_member` update — bot membership changed in a chat.
+
+        We care about three transitions:
+          - bot added (status `member` or `administrator`) → mark `pending`
+            and prompt for auth (skip if already known + not pending).
+          - bot kicked / left → mark `denied` so we stop processing.
+        DM upgrades / status churn within an already-known chat are ignored.
+        """
+        mcm = update.get("my_chat_member") or {}
+        chat = mcm.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        if not chat_id:
+            return
+        new_member = mcm.get("new_chat_member") or {}
+        new_status = new_member.get("status") or ""
+        new_user = new_member.get("user") or {}
+        if self.bot_user_id and new_user.get("id") != self.bot_user_id:
+            # Update is about another user, not us. Telegram fans these out
+            # for every member transition; ignore unless it's our own.
+            return
+        added_by = mcm.get("from") or {}
+        chat_type = chat.get("type")
+        if new_status in ("member", "administrator"):
+            self._handle_bot_added(chat, added_by)
+            return
+        if new_status in ("left", "kicked"):
+            try:
+                chats_module.set_auth_status(
+                    conn=self._get_chats_conn(),
+                    channel="telegram",
+                    chat_id=chat_id,
+                    status="denied",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"telegram auth set on leave failed chat_id={chat_id}: {exc}")
+            self.log(
+                f"telegram bot left chat_id={chat_id} type={chat_type} "
+                f"new_status={new_status} — auth_status=denied"
+            )
+
+    def _handle_bot_added(self, chat: dict, added_by: dict | None = None) -> None:
+        """Mark a freshly-joined chat `pending` and prompt main DM for auth.
+
+        Idempotent: if the chat is already on the explicit allowlist, in a
+        DM, or recorded as `allowed`/`denied`, we do not re-prompt. Only a
+        truly-new chat or one stuck in `pending` triggers a prompt.
+        """
+        chat_id = str(chat.get("id", ""))
+        if not chat_id:
+            return
+        if self.allowed and chat_id in self.allowed:
+            return
+        chat_type = chat.get("type")
+        if chat_type == "private":
+            return  # operator's own DM is implicitly allowed
+        # DM with the operator slips through here too.
+        main = self._main_chat_id()
+        if main and chat_id == main:
+            return
+        title = chat.get("title") or "(untitled)"
+        member_count = self._cached_member_count(chat_id)
+        try:
+            chats_module.upsert_chat(
+                conn=self._get_chats_conn(),
+                channel="telegram",
+                chat_id=chat_id,
+                chat_type=chat_type,
+                title=title,
+                username=chat.get("username"),
+                member_count=member_count,
+                auth_status="pending",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram bot-added upsert failed chat_id={chat_id}: {exc}")
+            return
+        # Suppress duplicate prompts within this process lifetime.
+        if chat_id in self._auth_prompts_sent:
+            return
+        self._send_auth_prompt(chat, added_by or {})
+        self._auth_prompts_sent.add(chat_id)
+
+    def _send_auth_prompt(self, chat: dict, added_by: dict) -> None:
+        """Send an inline-keyboard Allow/Deny prompt to the main DM.
+
+        Best-effort — failure is logged and the row stays `pending`. The
+        operator can still allow/deny via `jc chats approve <chat_id>`.
+        """
+        main = self._main_chat_id()
+        if not main or not self.token:
+            self.log("telegram auth prompt skipped: no main chat or token")
+            return
+        chat_id = str(chat.get("id", ""))
+        title = chat.get("title") or "(untitled)"
+        chat_type = chat.get("type") or "?"
+        member_count = self._cached_member_count(chat_id)
+        member_blurb = (
+            f"{member_count} members" if member_count is not None else chat_type
+        )
+        adder = (
+            added_by.get("username")
+            and f"@{added_by['username']}"
+        ) or (
+            added_by.get("first_name") or "(unknown)"
+        )
+        body = (
+            "🤝 Bot added to a new chat — approve?\n\n"
+            f"*{title}* ({chat_type}, {member_blurb})\n"
+            f"chat_id: `{chat_id}`\n"
+            f"added by: {adder}\n\n"
+            "Tap Allow to start processing messages from this chat."
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {
+                    "text": "✅ Allow",
+                    "callback_data": f"{self._AUTH_CALLBACK_PREFIX}allow:{chat_id}",
+                },
+                {
+                    "text": "⛔ Deny + leave",
+                    "callback_data": f"{self._AUTH_CALLBACK_PREFIX}deny:{chat_id}",
+                },
+            ]]
+        }
+        payload: dict[str, Any] = {
+            "chat_id": main,
+            "text": to_markdown_v2(body),
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
+            "reply_markup": json.dumps(keyboard),
+        }
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{self.token}/sendMessage",
+                data=payload,
+                timeout=15,
+            )
+            if not data.get("ok"):
+                self.log(f"telegram auth prompt rejected: {data}")
+                return
+            self.log(
+                f"telegram auth prompt sent chat_id={chat_id} title={title!r}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram auth prompt failed chat_id={chat_id}: {exc}")
+
+    def _handle_callback_query(self, update: dict) -> None:
+        """Process an inline-keyboard tap. Only chat_auth: prefix is wired."""
+        cq = update.get("callback_query") or {}
+        cq_id = cq.get("id")
+        data = cq.get("data") or ""
+        from_user = cq.get("from") or {}
+        msg = cq.get("message") or {}
+        if not data.startswith(self._AUTH_CALLBACK_PREFIX):
+            return
+        # Only the operator may authorize.
+        main = self._main_chat_id()
+        if main and str(from_user.get("id", "")) != main:
+            self._answer_callback(cq_id, "not authorized")
+            self.log(
+                f"telegram auth callback rejected: from={from_user.get('id')} "
+                f"main={main}"
+            )
+            return
+        try:
+            _, action, target_chat_id = data.split(":", 2)
+        except ValueError:
+            self._answer_callback(cq_id, "bad payload")
+            return
+        if action not in ("allow", "deny"):
+            self._answer_callback(cq_id, "bad action")
+            return
+        new_status = "allowed" if action == "allow" else "denied"
+        row = None
+        try:
+            row = chats_module.set_auth_status(
+                conn=self._get_chats_conn(),
+                channel="telegram",
+                chat_id=target_chat_id,
+                status=new_status,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram auth flip failed chat_id={target_chat_id}: {exc}")
+            self._answer_callback(cq_id, "flip failed")
+            return
+        title = (row.title if row else None) or target_chat_id
+        if action == "deny":
+            self._leave_chat(target_chat_id)
+        # Edit the original prompt to reflect the decision.
+        edit_text = (
+            f"✅ Allowed — {title}"
+            if action == "allow"
+            else f"⛔ Denied + left — {title}"
+        )
+        self._edit_message_text(
+            chat_id=msg.get("chat", {}).get("id"),
+            message_id=msg.get("message_id"),
+            text=edit_text,
+        )
+        self._answer_callback(
+            cq_id,
+            "allowed" if action == "allow" else "denied",
+        )
+        self.log(
+            f"telegram auth flipped chat_id={target_chat_id} action={action}"
+        )
+
+    def _answer_callback(self, callback_query_id: Any, text: str) -> None:
+        if not callback_query_id or not self.token:
+            return
+        try:
+            http_json(
+                f"https://api.telegram.org/bot{self.token}/answerCallbackQuery",
+                data={"callback_query_id": str(callback_query_id), "text": text},
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram answerCallbackQuery failed: {exc}")
+
+    def _edit_message_text(
+        self,
+        *,
+        chat_id: Any,
+        message_id: Any,
+        text: str,
+    ) -> None:
+        if not chat_id or not message_id or not self.token:
+            return
+        try:
+            http_json(
+                f"https://api.telegram.org/bot{self.token}/editMessageText",
+                data={
+                    "chat_id": str(chat_id),
+                    "message_id": int(message_id),
+                    "text": to_markdown_v2(text),
+                    "parse_mode": "MarkdownV2",
+                    "reply_markup": json.dumps({"inline_keyboard": []}),
+                },
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram editMessageText failed: {exc}")
+
+    def _leave_chat(self, chat_id: str) -> None:
+        if not chat_id or not self.token:
+            return
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{self.token}/leaveChat",
+                data={"chat_id": chat_id},
+                timeout=10,
+            )
+            if not data.get("ok"):
+                self.log(f"telegram leaveChat not-ok chat_id={chat_id}: {data}")
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram leaveChat failed chat_id={chat_id}: {exc}")
 
     def _should_process_message(self, message: dict) -> bool:
         chat = message.get("chat") or {}
@@ -205,24 +538,51 @@ class TelegramChannel:
             try:
                 url = f"https://api.telegram.org/bot{self.token}/getUpdates"
                 params = urllib.parse.urlencode(
-                    {"timeout": self.cfg.timeout_seconds, "offset": self.offset}
+                    {
+                        "timeout": self.cfg.timeout_seconds,
+                        "offset": self.offset,
+                        "allowed_updates": json.dumps(
+                            list(self._ALLOWED_UPDATE_TYPES)
+                        ),
+                    }
                 )
                 data = http_json(f"{url}?{params}", timeout=self.cfg.timeout_seconds + 5)
                 for update in data.get("result", []):
                     if self.bot_username is None and self.token:
                         self._resolve_bot_username()
                     self.offset = max(self.offset, int(update.get("update_id", 0)) + 1)
+                    # Route non-message update types first.
+                    if "my_chat_member" in update:
+                        self._handle_my_chat_member(update)
+                        continue
+                    if "callback_query" in update:
+                        self._handle_callback_query(update)
+                        continue
                     message = update.get("message") or update.get("edited_message")
                     if not isinstance(message, dict):
                         continue
                     chat = message.get("chat") or {}
                     chat_id = str(chat.get("id", ""))
+                    # Backstop bot-added detection: some clients only emit
+                    # `new_chat_members` on a service message.
+                    new_members = message.get("new_chat_members")
+                    if isinstance(new_members, list) and self.bot_user_id:
+                        for m in new_members:
+                            if isinstance(m, dict) and m.get("id") == self.bot_user_id:
+                                self._handle_bot_added(chat, message.get("from"))
+                                break
                     if self.allowed and chat_id not in self.allowed:
                         self.log(f"telegram ignored disallowed chat_id={chat_id}")
                         continue
                     if not self._should_process_message(message):
                         self.log(
                             f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
+                        )
+                        continue
+                    if not self._is_authorized(chat_id):
+                        self.log(
+                            f"telegram ignored unauthorized chat_id={chat_id} "
+                            f"type={chat.get('type')}"
                         )
                         continue
                     update_id = update.get("update_id")
@@ -418,7 +778,9 @@ class TelegramChannel:
         """Upsert the inbound chat into the chats directory.
 
         Wrapped in try/except — chat tracking must never block message
-        processing. Failures are logged once per occurrence.
+        processing. Failures are logged once per occurrence. Reuses the
+        channel's cached SQLite connection to avoid per-message
+        connection churn.
         """
         try:
             chat_id = str(chat.get("id", ""))
@@ -430,7 +792,8 @@ class TelegramChannel:
             else:
                 title = self._dm_title(chat) or chat.get("title")
             chats_module.upsert_chat(
-                self.instance_dir,
+                instance_dir=self.instance_dir,
+                conn=self._get_chats_conn(),
                 channel="telegram",
                 chat_id=chat_id,
                 chat_type=chat_type,
