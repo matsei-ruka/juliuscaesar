@@ -70,6 +70,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         instance,
         channel=args.channel,
         limit=args.limit,
+        auth_status=args.auth_status,
     )
     if args.json:
         print(json.dumps([c.to_dict() for c in rows], indent=2))
@@ -82,21 +83,58 @@ def cmd_list(args: argparse.Namespace) -> int:
         return s if len(s) <= width else s[: width - 1] + "…"
 
     print(
-        f"{'CHAT_ID':<14}  {'TYPE':<10}  {'TITLE':<30}  "
+        f"{'CHAT_ID':<14}  {'TYPE':<10}  {'AUTH':<8}  {'TITLE':<26}  "
         f"{'MEMBERS':>7}  {'LAST_SEEN':<19}"
     )
-    print("-" * 88)
+    print("-" * 96)
     for c in rows:
         last = (c.last_seen or "")[:19]
         members = str(c.member_count) if c.member_count is not None else "-"
         print(
             f"{_trunc(c.chat_id, 14):<14}  "
             f"{(c.chat_type or '?'):<10}  "
-            f"{_trunc(c.title or '-', 30):<30}  "
+            f"{(c.auth_status or '-'):<8}  "
+            f"{_trunc(c.title or '-', 26):<26}  "
             f"{members:>7}  "
             f"{last:<19}"
         )
     return 0
+
+
+def cmd_set_auth(args: argparse.Namespace, status: str) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    existing = chats.get_chat(
+        instance, channel=args.channel, chat_id=args.chat_id
+    )
+    if existing is None:
+        raise SystemExit(
+            f"chat not found: channel={args.channel} chat_id={args.chat_id} "
+            f"— bot has not seen this chat yet"
+        )
+    if existing.auth_status == status:
+        print(f"chat {args.chat_id} already {status} (no-op)")
+        return 0
+    updated = chats.set_auth_status(
+        instance,
+        channel=args.channel,
+        chat_id=args.chat_id,
+        status=status,
+    )
+    if updated is None:
+        raise SystemExit(f"failed to flip chat {args.chat_id} → {status}")
+    print(f"chat {args.chat_id}: {existing.auth_status} → {status}")
+    if status == "denied":
+        print("note: bot will leave the chat on the next live update; "
+              "for an immediate leave, run `jc chats deny --leave-now <chat_id>`")
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    return cmd_set_auth(args, "allowed")
+
+
+def cmd_deny(args: argparse.Namespace) -> int:
+    return cmd_set_auth(args, "denied")
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -163,8 +201,24 @@ def build_parser() -> argparse.ArgumentParser:
     pl = sub.add_parser("list", help="list chats by last_seen")
     pl.add_argument("--channel", default=None, help="filter by channel (e.g. telegram)")
     pl.add_argument("--limit", type=int, default=20)
+    pl.add_argument(
+        "--auth-status",
+        default=None,
+        choices=["allowed", "pending", "denied"],
+        help="filter by auth_status",
+    )
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_list)
+
+    pa = sub.add_parser("approve", help="set auth_status='allowed'")
+    pa.add_argument("chat_id")
+    pa.add_argument("--channel", default="telegram")
+    pa.set_defaults(func=cmd_approve)
+
+    pd = sub.add_parser("deny", help="set auth_status='denied'")
+    pd.add_argument("chat_id")
+    pd.add_argument("--channel", default="telegram")
+    pd.set_defaults(func=cmd_deny)
 
     ps = sub.add_parser("show", help="show one chat's full row")
     ps.add_argument("chat_id")

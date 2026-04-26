@@ -156,5 +156,75 @@ class JcChatsCliTests(unittest.TestCase):
             )
 
 
+class JcChatsAuthCliTests(unittest.TestCase):
+    def _seed_with_pending(self, instance: Path) -> None:
+        chats.upsert_chat(
+            instance,
+            channel="telegram",
+            chat_id="-100",
+            chat_type="supergroup",
+            title="BNESIM ops",
+            auth_status="pending",
+        )
+        chats.upsert_chat(
+            instance,
+            channel="telegram",
+            chat_id="42",
+            chat_type="private",
+            title="Luca",
+            auth_status="allowed",
+        )
+
+    def test_list_filter_by_auth_status_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._seed_with_pending(instance)
+            rc, out, _ = _run(
+                ["list", "--auth-status", "pending", "--json"], instance
+            )
+            self.assertEqual(rc, 0)
+            data = json.loads(out)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["chat_id"], "-100")
+
+    def test_approve_flips_pending_to_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._seed_with_pending(instance)
+            rc, out, _ = _run(["approve", "-100"], instance)
+            self.assertEqual(rc, 0)
+            self.assertIn("pending → allowed", out)
+            row = chats.get_chat(instance, channel="telegram", chat_id="-100")
+            self.assertEqual(row.auth_status, "allowed")
+
+    def test_deny_flips_to_denied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._seed_with_pending(instance)
+            rc, out, _ = _run(["deny", "-100"], instance)
+            self.assertEqual(rc, 0)
+            self.assertIn("denied", out)
+            row = chats.get_chat(instance, channel="telegram", chat_id="-100")
+            self.assertEqual(row.auth_status, "denied")
+
+    def test_approve_unknown_chat_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            rc, _, err = _run(["approve", "999"], instance)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("not found", err)
+
+    def test_approve_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-100",
+                auth_status="allowed",
+            )
+            rc, out, _ = _run(["approve", "-100"], instance)
+            self.assertEqual(rc, 0)
+            self.assertIn("already allowed", out)
+
+
 if __name__ == "__main__":
     unittest.main()
