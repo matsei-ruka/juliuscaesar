@@ -494,6 +494,160 @@ class TelegramGroupMentionTests(unittest.TestCase):
             }
             self.assertTrue(channel._should_process_message(msg))
 
+    def test_group_reply_to_bot_processed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp), bot_user_id=42)
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "thanks",
+                "reply_to_message": {"from": {"id": 42, "username": "rachelbot"}},
+            }
+            self.assertTrue(channel._should_process_message(msg))
+
+    def test_group_reply_to_human_not_processed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp), bot_user_id=42)
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "thanks",
+                "reply_to_message": {"from": {"id": 999, "username": "alice"}},
+            }
+            # Need to also mock _get_chat_member_count to avoid HTTP.
+            channel._get_chat_member_count = lambda _cid: None
+            self.assertFalse(channel._should_process_message(msg))
+
+    def test_group_with_two_members_replies_always(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            channel._get_chat_member_count = lambda _cid: 2
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "lunch later?",
+            }
+            self.assertTrue(channel._should_process_message(msg))
+
+    def test_group_with_three_members_requires_mention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            channel._get_chat_member_count = lambda _cid: 3
+            msg = {
+                "chat": {"id": -100, "type": "group"},
+                "text": "lunch later?",
+            }
+            self.assertFalse(channel._should_process_message(msg))
+
+    def test_member_count_cache_short_circuits_second_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+            calls: list[str] = []
+
+            def fake_http_json(url, *, data=None, timeout=15, **_):
+                calls.append(url)
+                return {"ok": True, "result": 2}
+
+            orig = telegram_module.http_json
+            telegram_module.http_json = fake_http_json
+            try:
+                self.assertEqual(channel._get_chat_member_count("-100"), 2)
+                self.assertEqual(channel._get_chat_member_count("-100"), 2)
+            finally:
+                telegram_module.http_json = orig
+            self.assertEqual(len(calls), 1, "second call should hit cache")
+            self.assertIn("getChatMemberCount", calls[0])
+
+    def test_member_count_failure_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = self._channel(Path(tmp))
+
+            def boom(*_a, **_k):
+                raise RuntimeError("network down")
+
+            orig = telegram_module.http_json
+            telegram_module.http_json = boom
+            try:
+                self.assertIsNone(channel._get_chat_member_count("-100"))
+            finally:
+                telegram_module.http_json = orig
+
+
+class TelegramGroupSessionReuseTests(unittest.TestCase):
+    """Per-group `conversation_id` keys session reuse so each group keeps its own brain thread."""
+
+    def _make_update(self, update_id: int, chat_id: int, text: str):
+        return {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "chat": {"id": chat_id, "type": "supergroup"},
+                "from": {"id": 11, "username": "luca"},
+                "text": f"@rachelbot {text}",
+                "entities": [{"type": "mention", "offset": 0, "length": 10}],
+            },
+        }
+
+    def _drive(self, instance: Path, updates):
+        served = {"done": False}
+
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            if "getUpdates" in url:
+                if served["done"]:
+                    return {"ok": True, "result": []}
+                served["done"] = True
+                return {"ok": True, "result": updates}
+            if "getMe" in url:
+                return {
+                    "ok": True,
+                    "result": {"id": 42, "username": "rachelbot"},
+                }
+            if "getChatMemberCount" in url:
+                return {"ok": True, "result": 5}
+            return {"ok": True, "result": {}}
+
+        captured: list[dict] = []
+
+        def enqueue(**kwargs):
+            captured.append(kwargs)
+
+        stop_after = {"done": False}
+
+        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+        channel = TelegramChannel(instance, cfg, _silent_log)
+        channel.token = "test-token"
+
+        orig = telegram_module.http_json
+        telegram_module.http_json = fake_http_json
+        try:
+            thread = threading.Thread(
+                target=channel.run,
+                args=(enqueue, lambda: stop_after["done"]),
+                daemon=True,
+            )
+            thread.start()
+            for _ in range(40):
+                if served["done"] and len(captured) >= len(updates):
+                    break
+                time.sleep(0.1)
+            stop_after["done"] = True
+            thread.join(timeout=3)
+        finally:
+            telegram_module.http_json = orig
+        return captured
+
+    def test_same_group_messages_share_conversation_id(self):
+        updates = [
+            self._make_update(1001, -777, "first"),
+            self._make_update(1002, -777, "second"),
+            self._make_update(1003, -888, "other group"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = self._drive(Path(tmp), updates)
+        self.assertEqual(len(captured), 3)
+        conv_ids = [c["conversation_id"] for c in captured]
+        self.assertEqual(conv_ids[0], "-777")
+        self.assertEqual(conv_ids[1], "-777")
+        self.assertEqual(conv_ids[2], "-888")
+        self.assertNotEqual(conv_ids[0], conv_ids[2])
+
 
 class TelegramSendTypingTests(unittest.TestCase):
     def test_send_typing_posts_chat_action(self):

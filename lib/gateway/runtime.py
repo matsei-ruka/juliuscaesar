@@ -358,6 +358,14 @@ class GatewayRuntime:
         )
 
         resume_session = self._resume_id(channel, event.conversation_id, brain)
+        self.log(
+            f"session resume id={event.id} conv={event.conversation_id or '-'} "
+            f"brain={brain} session={resume_session or 'none'}"
+        )
+        self.log(
+            f"dispatch begin id={event.id} brain={brain} model={model or '-'} "
+            f"resume={'yes' if resume_session else 'no'}"
+        )
 
         typing_stop = self._start_typing(channel, meta)
         try:
@@ -370,9 +378,16 @@ class GatewayRuntime:
                 timeout_seconds=self.config.adapter_timeout_seconds,
                 log_path=self.log_path,
                 config=self.config,
+                log_event=self.log,
             )
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                f"dispatch failed id={event.id} brain={brain} reason={exc!r}"
+            )
+            raise
         finally:
             typing_stop.set()
+        self.log(f"dispatch ok id={event.id} brain={brain}")
 
         if result.session_id:
             self._record_session(channel, event.conversation_id, brain, result.session_id)

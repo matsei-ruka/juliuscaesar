@@ -8,6 +8,7 @@ implementation when a brain has no Python wrapper yet.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from ..config import BrainOverrideConfig, GatewayConfig
 from ..queue import Event
@@ -42,6 +43,7 @@ def invoke_brain(
     timeout_seconds: int,
     log_path: Path,
     config: GatewayConfig | None = None,
+    log_event: Callable[[str], None] | None = None,
 ) -> BrainResult:
     cls = _BRAIN_REGISTRY.get(brain)
     if cls is None:
@@ -54,4 +56,5 @@ def invoke_brain(
         resume_session=resume_session,
         timeout_seconds=timeout_seconds,
         log_path=log_path,
+        log_event=log_event,
     )

@@ -14,10 +14,11 @@ import os
 import re
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from ..config import BrainOverrideConfig, GatewayConfig
 from ..context import render_preamble
@@ -130,6 +131,7 @@ class Brain:
         resume_session: str | None,
         timeout_seconds: int,
         log_path: Path,
+        log_event: Callable[[str], None] | None = None,
     ) -> BrainResult:
         self.validate()
         prompt = self.prompt_for_event(event)
@@ -144,23 +146,49 @@ class Brain:
         env.update(self.extra_env())
         timeout = self.override.timeout_seconds or timeout_seconds
         start = now_iso()
-        with log_path.open("ab") as log:
-            log.write(
+        wall_start = time.monotonic()
+        log = log_event or (lambda _msg: None)
+        with log_path.open("ab") as binlog:
+            binlog.write(
                 f"[{start}] adapter start event={event.id} brain={self.name} model={model or '-'}\n".encode()
             )
-            proc = subprocess.Popen(
-                [str(self.adapter_path()), model or ""],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=log,
-                cwd=str(self.instance_dir),
-                env=env,
-                start_new_session=True,
-                text=True,
+            # Flush + fsync the header so a SIGTERM-mid-call cannot lose the
+            # only forensic marker that the adapter was about to spawn.
+            # Caught a real bug 2026-04-26 where 8 KB block buffer ate the
+            # "adapter start" line for events 73 + 74.
+            binlog.flush()
+            try:
+                os.fsync(binlog.fileno())
+            except OSError:
+                pass
+            try:
+                proc = subprocess.Popen(
+                    [str(self.adapter_path()), model or ""],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=binlog,
+                    cwd=str(self.instance_dir),
+                    env=env,
+                    start_new_session=True,
+                    text=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log(
+                    f"adapter spawn failed event={event.id} brain={self.name} reason={exc}"
+                )
+                raise
+            log(
+                f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
+                f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
             )
             try:
                 stdout, _ = proc.communicate(prompt, timeout=timeout)
             except subprocess.TimeoutExpired:
+                duration = time.monotonic() - wall_start
+                log(
+                    f"adapter timeout event={event.id} brain={self.name} "
+                    f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                )
                 killpg(proc.pid, signal.SIGTERM)
                 try:
                     proc.wait(timeout=5)
@@ -168,6 +196,11 @@ class Brain:
                     killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
                 raise TimeoutError(f"adapter timeout after {timeout}s")
+            duration = time.monotonic() - wall_start
+            log(
+                f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
+                f"rc={proc.returncode} duration={duration:.1f}s"
+            )
             if proc.returncode != 0:
                 raise RuntimeError(f"adapter {self.name} failed with exit {proc.returncode}")
         session_id = None
