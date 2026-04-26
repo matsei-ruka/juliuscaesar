@@ -77,6 +77,62 @@ class TelegramChannel:
         self.token = env_value(instance_dir, cfg.token_env)
         self.offset = 0
         self.allowed = set(cfg.chat_ids)
+        self.bot_username: str | None = None
+        self.bot_user_id: int | None = None
+
+    def _resolve_bot_username(self) -> None:
+        """Populate `bot_username` and `bot_user_id` via `getMe`. Best-effort."""
+        if not self.token:
+            return
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{self.token}/getMe",
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram getMe failed: {exc}")
+            return
+        if not data.get("ok"):
+            self.log(f"telegram getMe failed: {data}")
+            return
+        result = data.get("result") or {}
+        username = result.get("username")
+        user_id = result.get("id")
+        if isinstance(username, str) and username:
+            self.bot_username = username.lower()
+        if isinstance(user_id, int):
+            self.bot_user_id = user_id
+        if self.bot_username:
+            self.log(
+                f"telegram bot_username resolved as @{self.bot_username} (id={self.bot_user_id})"
+            )
+
+    def _should_process_message(self, message: dict) -> bool:
+        chat = message.get("chat") or {}
+        chat_type = chat.get("type", "private")
+        if chat_type in ("private", "channel"):
+            return True
+        if chat_type not in ("group", "supergroup"):
+            return False  # unknown → fail closed
+        if not self.bot_username:
+            return False  # can't verify → fail closed for groups
+        text = message.get("text") or message.get("caption") or ""
+        entities = message.get("entities") or message.get("caption_entities") or []
+        for ent in entities:
+            etype = ent.get("type")
+            if etype == "mention":
+                offset = ent.get("offset", 0)
+                length = ent.get("length", 0)
+                mentioned = text[offset : offset + length].lstrip("@").lower()
+                if mentioned == self.bot_username:
+                    return True
+            elif etype == "text_mention":
+                user = ent.get("user") or {}
+                if self.bot_user_id and user.get("id") == self.bot_user_id:
+                    return True
+        if f"@{self.bot_username}" in text.lower():
+            return True
+        return False
 
     def ready(self) -> bool:
         return bool(self.token)
@@ -94,6 +150,8 @@ class TelegramChannel:
                 )
                 data = http_json(f"{url}?{params}", timeout=self.cfg.timeout_seconds + 5)
                 for update in data.get("result", []):
+                    if self.bot_username is None and self.token:
+                        self._resolve_bot_username()
                     self.offset = max(self.offset, int(update.get("update_id", 0)) + 1)
                     message = update.get("message") or update.get("edited_message")
                     if not isinstance(message, dict):
@@ -102,6 +160,11 @@ class TelegramChannel:
                     chat_id = str(chat.get("id", ""))
                     if self.allowed and chat_id not in self.allowed:
                         self.log(f"telegram ignored disallowed chat_id={chat_id}")
+                        continue
+                    if not self._should_process_message(message):
+                        self.log(
+                            f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
+                        )
                         continue
                     update_id = update.get("update_id")
                     self._log_forward(message, update_id)
