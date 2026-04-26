@@ -128,12 +128,13 @@ class GatewayTests(unittest.TestCase):
                     "first_seen",
                     "last_seen",
                     "last_message_id",
+                    "auth_status",
                 ],
             )
             schema_version = conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()["value"]
-            self.assertEqual(schema_version, "3")
+            self.assertEqual(schema_version, "4")
         finally:
             conn.close()
 
@@ -152,6 +153,52 @@ class GatewayTests(unittest.TestCase):
             self.assertIsNotNone(idx)
         finally:
             conn2.close()
+
+    def test_chats_alter_table_migration_idempotent(self):
+        """An old DB on schema 3 (chats without auth_status) picks up the column."""
+        instance = self.make_instance()
+        conn = queue.connect(instance)
+        try:
+            # Simulate an old DB by dropping + recreating without auth_status.
+            conn.execute("DROP TABLE chats")
+            conn.execute(
+                """
+                CREATE TABLE chats (
+                    channel TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    chat_type TEXT,
+                    title TEXT,
+                    username TEXT,
+                    member_count INTEGER,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    last_message_id TEXT,
+                    PRIMARY KEY (channel, chat_id)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO chats(channel, chat_id, first_seen, last_seen) "
+                "VALUES ('telegram', '42', ?, ?)",
+                (queue.now_iso(), queue.now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # Reconnect — init_db's add_column_if_missing should backfill.
+        conn = queue.connect(instance)
+        try:
+            cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(chats)").fetchall()
+            }
+            self.assertIn("auth_status", cols)
+            row = conn.execute(
+                "SELECT auth_status FROM chats WHERE chat_id='42'"
+            ).fetchone()
+            self.assertEqual(row["auth_status"], "allowed")
+        finally:
+            conn.close()
 
     def test_dispatcher_failure_requeues(self):
         instance = self.make_instance()

@@ -7,6 +7,11 @@ that produced the active event.
 
 The `channel` column is intentionally generic so a future Discord/Slack
 adapter can write here too. Telegram is the only writer today.
+
+Connection model: the public read/write functions accept either an open
+`conn` (preferred — long-lived gateway threads cache one) or an
+`instance_dir` (one-shot — for CLI tools). Passing `conn` avoids the
+init_db churn that otherwise runs on every call.
 """
 
 from __future__ import annotations
@@ -14,10 +19,11 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import queue
 
@@ -27,6 +33,8 @@ L1_CHATS_HEADER = "<!-- AUTO-GENERATED — do not edit; rebuilt from gateway que
 _REGEN_DEBOUNCE_SECONDS = 30.0
 _LAST_REGEN: dict[str, float] = {}
 _REGEN_LOCK = threading.Lock()
+
+VALID_AUTH_STATUSES = ("allowed", "pending", "denied")
 
 
 @dataclass(frozen=True)
@@ -40,6 +48,7 @@ class Chat:
     first_seen: str
     last_seen: str
     last_message_id: str | None
+    auth_status: str = "allowed"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,12 +57,40 @@ class Chat:
 def _row_to_chat(row: sqlite3.Row | None) -> Chat | None:
     if row is None:
         return None
-    return Chat(**{key: row[key] for key in row.keys()})
+    keys = row.keys()
+    data = {key: row[key] for key in keys}
+    # Older DB rows (pre-schema-4) may not carry auth_status; default it.
+    data.setdefault("auth_status", "allowed")
+    if data.get("auth_status") is None:
+        data["auth_status"] = "allowed"
+    return Chat(**data)
+
+
+@contextmanager
+def _scoped_conn(
+    instance_dir: Path | None,
+    conn: sqlite3.Connection | None,
+) -> Iterator[sqlite3.Connection]:
+    """Yield a connection — provided or freshly opened.
+
+    Closes the connection only when this function opened it.
+    """
+    if conn is not None:
+        yield conn
+        return
+    if instance_dir is None:
+        raise TypeError("either instance_dir or conn must be provided")
+    own = queue.connect(instance_dir)
+    try:
+        yield own
+    finally:
+        own.close()
 
 
 def upsert_chat(
-    instance_dir: Path,
+    instance_dir: Path | None = None,
     *,
+    conn: sqlite3.Connection | None = None,
     channel: str,
     chat_id: str,
     chat_type: str | None = None,
@@ -61,33 +98,40 @@ def upsert_chat(
     username: str | None = None,
     member_count: int | None = None,
     last_message_id: str | None = None,
+    auth_status: str | None = None,
 ) -> Chat:
     """Insert or refresh a chat row.
 
     On conflict, `first_seen` is preserved, `last_seen` is bumped to now,
     and the optional fields (`chat_type`, `title`, `username`,
-    `member_count`, `last_message_id`) are only overwritten when the
-    new value is non-NULL — a transiently missing field in one update
-    must not wipe a previously-known value.
+    `member_count`, `last_message_id`, `auth_status`) are only overwritten
+    when the new value is non-NULL — a transiently missing field in one
+    update must not wipe a previously-known value.
     """
 
+    if auth_status is not None and auth_status not in VALID_AUTH_STATUSES:
+        raise ValueError(
+            f"auth_status must be one of {VALID_AUTH_STATUSES}, got {auth_status!r}"
+        )
+
     ts = queue.now_iso()
-    conn = queue.connect(instance_dir)
-    try:
-        conn.execute(
+    with _scoped_conn(instance_dir, conn) as c:
+        c.execute(
             """
             INSERT INTO chats(
                 channel, chat_id, chat_type, title, username,
-                member_count, first_seen, last_seen, last_message_id
+                member_count, first_seen, last_seen, last_message_id,
+                auth_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'allowed'))
             ON CONFLICT(channel, chat_id) DO UPDATE SET
                 chat_type       = COALESCE(excluded.chat_type, chats.chat_type),
                 title           = COALESCE(excluded.title, chats.title),
                 username        = COALESCE(excluded.username, chats.username),
                 member_count    = COALESCE(excluded.member_count, chats.member_count),
                 last_seen       = excluded.last_seen,
-                last_message_id = COALESCE(excluded.last_message_id, chats.last_message_id)
+                last_message_id = COALESCE(excluded.last_message_id, chats.last_message_id),
+                auth_status     = COALESCE(?, chats.auth_status)
             """,
             (
                 channel,
@@ -99,63 +143,115 @@ def upsert_chat(
                 ts,
                 ts,
                 last_message_id,
+                auth_status,
+                auth_status,
             ),
         )
-        conn.commit()
+        c.commit()
         chat = _row_to_chat(
-            conn.execute(
+            c.execute(
                 "SELECT * FROM chats WHERE channel=? AND chat_id=?",
                 (channel, chat_id),
             ).fetchone()
         )
-    finally:
-        conn.close()
     if chat is None:
         raise RuntimeError("failed to read upserted chat")
-    _maybe_regenerate_l1_chats(instance_dir)
+    if instance_dir is not None:
+        _maybe_regenerate_l1_chats(instance_dir)
     return chat
 
 
-def get_chat(
-    instance_dir: Path,
+def set_auth_status(
+    instance_dir: Path | None = None,
     *,
+    conn: sqlite3.Connection | None = None,
     channel: str,
     chat_id: str,
+    status: str,
 ) -> Chat | None:
-    conn = queue.connect(instance_dir)
-    try:
+    """Flip a chat's auth_status. Returns the updated row, or None if absent."""
+    if status not in VALID_AUTH_STATUSES:
+        raise ValueError(
+            f"status must be one of {VALID_AUTH_STATUSES}, got {status!r}"
+        )
+    ts = queue.now_iso()
+    with _scoped_conn(instance_dir, conn) as c:
+        cur = c.execute(
+            "UPDATE chats SET auth_status=?, last_seen=? WHERE channel=? AND chat_id=?",
+            (status, ts, channel, chat_id),
+        )
+        c.commit()
+        if cur.rowcount == 0:
+            return None
         return _row_to_chat(
-            conn.execute(
+            c.execute(
                 "SELECT * FROM chats WHERE channel=? AND chat_id=?",
                 (channel, chat_id),
             ).fetchone()
         )
-    finally:
-        conn.close()
+
+
+def get_chat(
+    instance_dir: Path | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
+    channel: str,
+    chat_id: str,
+) -> Chat | None:
+    with _scoped_conn(instance_dir, conn) as c:
+        return _row_to_chat(
+            c.execute(
+                "SELECT * FROM chats WHERE channel=? AND chat_id=?",
+                (channel, chat_id),
+            ).fetchone()
+        )
 
 
 def list_chats(
-    instance_dir: Path,
+    instance_dir: Path | None = None,
     *,
+    conn: sqlite3.Connection | None = None,
     channel: str | None = None,
+    auth_status: str | None = None,
     limit: int | None = None,
 ) -> list[Chat]:
     """Return chats ordered by `last_seen DESC`."""
-    conn = queue.connect(instance_dir)
-    try:
+    with _scoped_conn(instance_dir, conn) as c:
         params: list[Any] = []
-        sql = "SELECT * FROM chats"
+        clauses: list[str] = []
         if channel is not None:
-            sql += " WHERE channel=?"
+            clauses.append("channel=?")
             params.append(channel)
+        if auth_status is not None:
+            if auth_status not in VALID_AUTH_STATUSES:
+                raise ValueError(
+                    f"auth_status must be one of {VALID_AUTH_STATUSES}, got {auth_status!r}"
+                )
+            clauses.append("auth_status=?")
+            params.append(auth_status)
+        sql = "SELECT * FROM chats"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY last_seen DESC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        rows = conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
+        rows = c.execute(sql, params).fetchall()
     return [chat for row in rows if (chat := _row_to_chat(row)) is not None]
+
+
+def pending_chats(
+    instance_dir: Path | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
+    channel: str | None = None,
+) -> list[Chat]:
+    """Convenience: chats awaiting auth, oldest-first (caller should review)."""
+    rows = list_chats(
+        instance_dir, conn=conn, channel=channel, auth_status="pending"
+    )
+    rows.sort(key=lambda c: c.first_seen)
+    return rows
 
 
 def _l1_chats_path(instance_dir: Path) -> Path:
@@ -181,14 +277,25 @@ def _format_l1_chats(rows: list[Chat]) -> str:
             if chat.member_count is not None
             else ""
         )
+        status_tag = (
+            f" [{chat.auth_status}]"
+            if chat.auth_status and chat.auth_status != "allowed"
+            else ""
+        )
         last = (chat.last_seen or "")[:16].replace("T", " ")
         lines.append(
-            f"- {chat.chat_id} | {ctype} | {title}{handle}{members} — last {last}"
+            f"- {chat.chat_id} | {ctype} | {title}{handle}{members}{status_tag} "
+            f"— last {last}"
         )
     return "\n".join(lines) + "\n"
 
 
-def regenerate_l1_chats(instance_dir: Path, *, limit: int | None = 50) -> Path | None:
+def regenerate_l1_chats(
+    instance_dir: Path,
+    *,
+    conn: sqlite3.Connection | None = None,
+    limit: int | None = 50,
+) -> Path | None:
     """Write `<instance>/memory/L1/CHATS.md` from the chats table.
 
     Skips if `memory/L1/` doesn't exist (instance not initialized yet).
@@ -197,7 +304,9 @@ def regenerate_l1_chats(instance_dir: Path, *, limit: int | None = 50) -> Path |
     l1_dir = instance_dir / "memory" / "L1"
     if not l1_dir.is_dir():
         return None
-    rows = list_chats(instance_dir, channel="telegram", limit=limit)
+    rows = list_chats(
+        instance_dir, conn=conn, channel="telegram", limit=limit
+    )
     target = _l1_chats_path(instance_dir)
     target.write_text(_format_l1_chats(rows), encoding="utf-8")
     return target
@@ -222,8 +331,9 @@ def _maybe_regenerate_l1_chats(instance_dir: Path) -> None:
 
 
 def prune_chats(
-    instance_dir: Path,
+    instance_dir: Path | None = None,
     *,
+    conn: sqlite3.Connection | None = None,
     older_than_days: int,
     channel: str | None = None,
 ) -> int:
@@ -233,16 +343,13 @@ def prune_chats(
     """
     cutoff_dt = datetime.now(timezone.utc) - timedelta(days=int(older_than_days))
     cutoff = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    conn = queue.connect(instance_dir)
-    try:
+    with _scoped_conn(instance_dir, conn) as c:
         if channel is not None:
-            cur = conn.execute(
+            cur = c.execute(
                 "DELETE FROM chats WHERE channel=? AND last_seen < ?",
                 (channel, cutoff),
             )
         else:
-            cur = conn.execute("DELETE FROM chats WHERE last_seen < ?", (cutoff,))
-        conn.commit()
+            cur = c.execute("DELETE FROM chats WHERE last_seen < ?", (cutoff,))
+        c.commit()
         return cur.rowcount
-    finally:
-        conn.close()
