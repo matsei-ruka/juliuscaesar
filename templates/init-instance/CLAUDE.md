@@ -13,6 +13,7 @@ with concrete first-run context. If this instance was created with low-level
 @memory/L1/USER.md
 @memory/L1/RULES.md
 @memory/L1/HOT.md
+@memory/L1/CHATS.md
 
 ---
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError
 
+from .. import chats as chats_module
 from ..config import ChannelConfig, env_value
 from ..format import to_markdown_v2
 from ._http import http_json
@@ -226,6 +227,7 @@ class TelegramChannel:
                         continue
                     update_id = update.get("update_id")
                     self._log_forward(message, update_id)
+                    self._record_chat(chat, message)
                     text = message.get("text") or message.get("caption") or ""
                     voice = message.get("voice") if isinstance(message.get("voice"), dict) else None
                     audio = message.get("audio") if isinstance(message.get("audio"), dict) else None
@@ -383,6 +385,66 @@ class TelegramChannel:
             self.instance_dir / "state" / "voice" / "inbound" / "docs" / f"{update_id}{ext}"
         )
         return _download_telegram_file(self.token, file_id, dest)
+
+    def _dm_title(self, chat: dict[str, Any]) -> str | None:
+        """Compose a DM display name as `first_name + last_name` per spec.
+
+        Falls back to `@username` when neither name field is set.
+        """
+        first = (chat.get("first_name") or "").strip()
+        last = (chat.get("last_name") or "").strip()
+        full = " ".join(part for part in (first, last) if part)
+        if full:
+            return full
+        username = chat.get("username")
+        if username:
+            return f"@{username}"
+        return None
+
+    def _cached_member_count(self, chat_id: str) -> int | None:
+        """Return a cached `getChatMemberCount` if present — never fetch.
+
+        Chat-recording is observability; it must not trigger new HTTP calls
+        on top of the message-handling path. If the value is already in the
+        cache (typically populated by `_get_chat_member_count` during the
+        `_should_process_message` check), use it; otherwise return None and
+        let the row's `member_count` stay NULL until the next inbound
+        message refreshes it.
+        """
+        entry = self._member_count_cache.get(chat_id)
+        return entry[0] if entry else None
+
+    def _record_chat(self, chat: dict[str, Any], message: dict[str, Any]) -> None:
+        """Upsert the inbound chat into the chats directory.
+
+        Wrapped in try/except — chat tracking must never block message
+        processing. Failures are logged once per occurrence.
+        """
+        try:
+            chat_id = str(chat.get("id", ""))
+            if not chat_id:
+                return
+            chat_type = chat.get("type")
+            if chat_type in ("group", "supergroup", "channel"):
+                title = chat.get("title") or self._dm_title(chat)
+            else:
+                title = self._dm_title(chat) or chat.get("title")
+            chats_module.upsert_chat(
+                self.instance_dir,
+                channel="telegram",
+                chat_id=chat_id,
+                chat_type=chat_type,
+                title=title,
+                username=chat.get("username"),
+                member_count=self._cached_member_count(chat_id),
+                last_message_id=(
+                    str(message.get("message_id"))
+                    if message.get("message_id") is not None
+                    else None
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram chat upsert failed chat_id={chat.get('id')}: {exc}")
 
     def _log_forward(self, message: dict[str, Any], update_id: Any) -> None:
         """If the message is a forward, log a single audit line."""

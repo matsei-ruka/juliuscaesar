@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""jc-chats — list / show / prune the chat directory.
+
+Subcommands:
+  list   Tabular listing, ordered by last_seen DESC.
+  show   Full row dump for a single chat.
+  prune  Delete rows whose last_seen is older than a threshold.
+
+Instance dir resolution mirrors `jc-memory` and `jc-workers`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from gateway import chats  # type: ignore  # noqa: E402
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    if arg:
+        p = Path(arg).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"--instance-dir does not exist: {p}")
+        return p
+    env = os.environ.get("JC_INSTANCE_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if not p.exists():
+            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
+        return p
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ".jc").exists():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    cwd = Path.cwd().resolve()
+    if (cwd / "memory").exists():
+        return cwd
+    raise SystemExit(
+        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
+        "or run from a directory containing memory/ or a .jc marker."
+    )
+
+
+def _parse_older_than(value: str) -> int:
+    """Parse `--older-than` like `90d`, `30d`, or a bare integer (days)."""
+    s = value.strip().lower()
+    if s.endswith("d"):
+        s = s[:-1]
+    try:
+        return int(s)
+    except ValueError as exc:
+        raise SystemExit(f"--older-than must be days (e.g. 90 or 90d): {value}") from exc
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    rows = chats.list_chats(
+        instance,
+        channel=args.channel,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps([c.to_dict() for c in rows], indent=2))
+        return 0
+    if not rows:
+        print("(no chats)")
+        return 0
+
+    def _trunc(s: str, width: int) -> str:
+        return s if len(s) <= width else s[: width - 1] + "…"
+
+    print(
+        f"{'CHAT_ID':<14}  {'TYPE':<10}  {'TITLE':<30}  "
+        f"{'MEMBERS':>7}  {'LAST_SEEN':<19}"
+    )
+    print("-" * 88)
+    for c in rows:
+        last = (c.last_seen or "")[:19]
+        members = str(c.member_count) if c.member_count is not None else "-"
+        print(
+            f"{_trunc(c.chat_id, 14):<14}  "
+            f"{(c.chat_type or '?'):<10}  "
+            f"{_trunc(c.title or '-', 30):<30}  "
+            f"{members:>7}  "
+            f"{last:<19}"
+        )
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    chat = chats.get_chat(instance, channel=args.channel, chat_id=args.chat_id)
+    if chat is None:
+        raise SystemExit(
+            f"chat not found: channel={args.channel} chat_id={args.chat_id}"
+        )
+    if args.json:
+        print(json.dumps(chat.to_dict(), indent=2))
+        return 0
+    print(f"chat {chat.chat_id} [{chat.chat_type or '?'}]")
+    print(f"  channel          {chat.channel}")
+    print(f"  title            {chat.title or '-'}")
+    print(f"  username         {('@' + chat.username) if chat.username else '-'}")
+    print(
+        f"  member_count     "
+        f"{chat.member_count if chat.member_count is not None else '-'}"
+    )
+    print(f"  first_seen       {chat.first_seen}")
+    print(f"  last_seen        {chat.last_seen}")
+    print(f"  last_message_id  {chat.last_message_id or '-'}")
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    days = _parse_older_than(args.older_than)
+    if days <= 0:
+        raise SystemExit("--older-than must be positive")
+    if not args.yes:
+        # Read-only preview before destructive op.
+        rows = chats.list_chats(instance, channel=args.channel)
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        candidates = [c for c in rows if (c.last_seen or "") < cutoff]
+        if not candidates:
+            print(f"(no chats older than {days}d)")
+            return 0
+        print(f"would delete {len(candidates)} chat(s) older than {days}d:")
+        for c in candidates:
+            print(f"  {c.chat_id} | {c.chat_type or '?'} | {c.title or '-'} "
+                  f"(last {c.last_seen})")
+        print("re-run with --yes to confirm.")
+        return 0
+    removed = chats.prune_chats(
+        instance,
+        older_than_days=days,
+        channel=args.channel,
+    )
+    print(f"removed {removed} chat(s) older than {days}d")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-chats")
+    p.add_argument("--instance-dir", help="override instance dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pl = sub.add_parser("list", help="list chats by last_seen")
+    pl.add_argument("--channel", default=None, help="filter by channel (e.g. telegram)")
+    pl.add_argument("--limit", type=int, default=20)
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_list)
+
+    ps = sub.add_parser("show", help="show one chat's full row")
+    ps.add_argument("chat_id")
+    ps.add_argument("--channel", default="telegram")
+    ps.add_argument("--json", action="store_true")
+    ps.set_defaults(func=cmd_show)
+
+    pp = sub.add_parser("prune", help="delete chats older than threshold")
+    pp.add_argument(
+        "--older-than",
+        required=True,
+        help="age threshold (days, e.g. 90 or 90d)",
+    )
+    pp.add_argument("--channel", default=None, help="restrict to one channel")
+    pp.add_argument("--yes", action="store_true", help="skip confirmation")
+    pp.set_defaults(func=cmd_prune)
+
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

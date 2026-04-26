@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .. import chats as chats_module
 from ..config import BrainOverrideConfig, GatewayConfig
 from ..context import render_preamble
 from ..queue import Event
@@ -91,6 +92,10 @@ class Brain:
         meta = self._meta(event)
         meta_text = json.dumps(meta, indent=2, sort_keys=True) if meta else "{}"
         preamble = render_preamble(self.instance_dir) if self.needs_l1_preamble else ""
+        if self.needs_l1_preamble and event.source == "telegram":
+            chats_section = self._render_known_chats_section()
+            if chats_section:
+                preamble = f"{preamble}\n\n{chats_section}" if preamble else chats_section
         body = f"""{preamble}
 
 # Incoming event
@@ -107,6 +112,36 @@ class Brain:
 {event.content}
 """
         return body
+
+    def _render_known_chats_section(self, limit: int = 20) -> str:
+        """Build the `## Known Telegram chats` block from the chats table.
+
+        Returns "" when no chats are recorded yet (so empty preambles stay
+        empty for fresh instances).
+        """
+        try:
+            rows = chats_module.list_chats(
+                self.instance_dir, channel="telegram", limit=limit
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+        if not rows:
+            return ""
+        lines = ["## Known Telegram chats", ""]
+        for chat in rows:
+            ctype = chat.chat_type or "?"
+            title = chat.title or "(untitled)"
+            handle = f" (@{chat.username})" if chat.username else ""
+            members = (
+                f" ({chat.member_count} members)"
+                if chat.member_count is not None
+                else ""
+            )
+            last = (chat.last_seen or "")[:16].replace("T", " ")
+            lines.append(
+                f"- {chat.chat_id} | {ctype} | {title}{handle}{members} — last {last}"
+            )
+        return "\n".join(lines)
 
     def extra_env(self) -> dict[str, str]:
         return {}
