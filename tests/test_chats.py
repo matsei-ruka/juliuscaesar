@@ -155,6 +155,193 @@ class PruneChatsTests(unittest.TestCase):
             self.assertEqual([c.chat_id for c in remaining], ["new"])
 
 
+class SharedConnectionTests(unittest.TestCase):
+    def test_upsert_with_shared_conn_does_not_open_extra_connections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            conn = queue.connect(instance)
+            try:
+                opens = {"count": 0}
+                orig_connect = queue.connect
+
+                def counting_connect(p):
+                    opens["count"] += 1
+                    return orig_connect(p)
+
+                # Monkey-patch the chats module's reference too.
+                from gateway import chats as chats_mod
+
+                chats_mod.queue.connect = counting_connect
+                try:
+                    for i in range(3):
+                        chats.upsert_chat(
+                            conn=conn,
+                            channel="telegram",
+                            chat_id=f"c{i}",
+                            title=f"Chat {i}",
+                        )
+                finally:
+                    chats_mod.queue.connect = orig_connect
+                self.assertEqual(
+                    opens["count"], 0,
+                    "shared conn must avoid opening fresh connections",
+                )
+                rows = chats.list_chats(conn=conn, channel="telegram")
+                self.assertEqual({c.chat_id for c in rows}, {"c0", "c1", "c2"})
+            finally:
+                conn.close()
+
+    def test_serial_burst_with_shared_conn_no_extra_opens(self):
+        """The Telegram channel runs single-threaded; a 100-message burst on a
+        cached conn must not open one connection per call."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            conn = queue.connect(instance)
+            try:
+                opens = {"count": 0}
+                from gateway import chats as chats_mod
+
+                orig_connect = queue.connect
+
+                def counting_connect(p):
+                    opens["count"] += 1
+                    return orig_connect(p)
+
+                chats_mod.queue.connect = counting_connect
+                try:
+                    for j in range(100):
+                        chats.upsert_chat(
+                            conn=conn,
+                            channel="telegram",
+                            chat_id="-100",
+                            title="loop",
+                            last_message_id=str(j),
+                        )
+                finally:
+                    chats_mod.queue.connect = orig_connect
+                self.assertEqual(opens["count"], 0)
+                row = chats.get_chat(conn=conn, channel="telegram", chat_id="-100")
+                self.assertEqual(row.last_message_id, "99")
+            finally:
+                conn.close()
+
+    def test_two_separate_conns_with_busy_timeout_serialize(self):
+        """Two connections from the same thread can both write — busy_timeout
+        + WAL serialize them. Smoke check that we don't immediately throw
+        SQLITE_BUSY for trivial alternation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            conn_a = queue.connect(instance)
+            conn_b = queue.connect(instance)
+            try:
+                for i in range(10):
+                    chats.upsert_chat(
+                        conn=conn_a,
+                        channel="telegram",
+                        chat_id="A",
+                        last_message_id=str(i),
+                    )
+                    chats.upsert_chat(
+                        conn=conn_b,
+                        channel="telegram",
+                        chat_id="B",
+                        last_message_id=str(i),
+                    )
+                rows = chats.list_chats(conn=conn_a, channel="telegram")
+                self.assertEqual({c.chat_id for c in rows}, {"A", "B"})
+            finally:
+                conn_a.close()
+                conn_b.close()
+
+
+class AuthStatusTests(unittest.TestCase):
+    def test_default_auth_status_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chat = chats.upsert_chat(instance, channel="telegram", chat_id="1")
+            self.assertEqual(chat.auth_status, "allowed")
+
+    def test_upsert_with_explicit_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chat = chats.upsert_chat(
+                instance,
+                channel="telegram",
+                chat_id="-100",
+                auth_status="pending",
+            )
+            self.assertEqual(chat.auth_status, "pending")
+
+    def test_upsert_invalid_auth_raises(self):
+        with self.assertRaises(ValueError):
+            chats.upsert_chat(
+                Path("/tmp/x"),
+                channel="telegram",
+                chat_id="1",
+                auth_status="bogus",
+            )
+
+    def test_set_auth_status_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(instance, channel="telegram", chat_id="-100")
+            updated = chats.set_auth_status(
+                instance,
+                channel="telegram",
+                chat_id="-100",
+                status="denied",
+            )
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.auth_status, "denied")
+            current = chats.get_chat(instance, channel="telegram", chat_id="-100")
+            self.assertEqual(current.auth_status, "denied")
+
+    def test_set_auth_status_missing_chat_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            result = chats.set_auth_status(
+                instance,
+                channel="telegram",
+                chat_id="missing",
+                status="allowed",
+            )
+            self.assertIsNone(result)
+
+    def test_subsequent_upsert_preserves_auth_status_when_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(
+                instance,
+                channel="telegram",
+                chat_id="-100",
+                auth_status="pending",
+            )
+            # Refresh without specifying auth_status — must NOT clobber.
+            chats.upsert_chat(
+                instance,
+                channel="telegram",
+                chat_id="-100",
+                last_message_id="500",
+            )
+            row = chats.get_chat(instance, channel="telegram", chat_id="-100")
+            self.assertEqual(row.auth_status, "pending")
+
+    def test_pending_chats_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="A", auth_status="allowed"
+            )
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="B", auth_status="pending"
+            )
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="C", auth_status="denied"
+            )
+            pending = chats.pending_chats(instance, channel="telegram")
+            self.assertEqual([c.chat_id for c in pending], ["B"])
+
+
 class L1ChatsGeneratorTests(unittest.TestCase):
     def test_regenerate_writes_file_with_header(self):
         with tempfile.TemporaryDirectory() as tmp:

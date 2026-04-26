@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = (10, 60, 300)
 
 
@@ -103,7 +103,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
 
         INSERT OR IGNORE INTO meta(key, value)
-        VALUES ('schema_version', '3');
+        VALUES ('schema_version', '4');
 
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,6 +162,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             first_seen       TEXT NOT NULL,
             last_seen        TEXT NOT NULL,
             last_message_id  TEXT,
+            auth_status      TEXT NOT NULL DEFAULT 'allowed',
             PRIMARY KEY (channel, chat_id)
         );
 
@@ -169,11 +170,39 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON chats(channel, last_seen DESC);
         """
     )
+    add_column_if_missing(
+        conn,
+        table="chats",
+        column="auth_status",
+        column_ddl="TEXT NOT NULL DEFAULT 'allowed'",
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chats_auth_status "
+        "ON chats(channel, auth_status)"
+    )
     conn.execute(
         "UPDATE meta SET value=? WHERE key='schema_version'",
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
+
+
+def add_column_if_missing(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    column_ddl: str,
+) -> bool:
+    """Idempotent `ALTER TABLE ADD COLUMN` for SQLite (no native IF NOT EXISTS).
+
+    Returns True iff the column was just added.
+    """
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column in cols:
+        return False
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_ddl}")
+    return True
 
 
 def row_to_event(row: sqlite3.Row | None) -> Event | None:
