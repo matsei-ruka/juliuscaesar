@@ -210,7 +210,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             finally:
                 conn.close()
             if requeued:
-                log_line(instance, f"requeued expired events count={requeued}")
+                log_line(
+                    instance,
+                    f"requeued expired events count={len(requeued)} ids={requeued}",
+                )
             runtime.dispatch_once()
             time.sleep(args.interval_seconds)
     finally:

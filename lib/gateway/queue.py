@@ -226,23 +226,43 @@ def enqueue(
     return event, inserted
 
 
-def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> int:
+def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> list[int]:
+    """Move every `running` event whose lease has expired back to `queued`.
+
+    Returns the ids of the requeued events (in id order). Caller can `len()`
+    for a count, or iterate for log/audit. Snapshot the candidates first so
+    the diagnostic log can name the rows that were actually moved — knowing
+    `which` events expired is the key signal for debugging dispatch hangs.
+    """
+
     now = now or now_iso()
-    cur = conn.execute(
+    rows = conn.execute(
         """
+        SELECT id FROM events
+        WHERE status='running'
+          AND locked_until IS NOT NULL
+          AND locked_until <= ?
+        ORDER BY id
+        """,
+        (now,),
+    ).fetchall()
+    ids = [int(row["id"]) for row in rows]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        f"""
         UPDATE events
         SET status='queued',
             available_at=?,
             locked_by=NULL,
             locked_until=NULL,
             error=COALESCE(error, 'lease expired')
-        WHERE status='running'
-          AND locked_until IS NOT NULL
-          AND locked_until <= ?
+        WHERE id IN ({placeholders})
         """,
-        (now, now),
+        [now, *ids],
     )
-    return cur.rowcount
+    return ids
 
 
 def claim_next(
