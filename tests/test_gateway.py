@@ -108,6 +108,51 @@ class GatewayTests(unittest.TestCase):
         finally:
             conn2.close()
 
+    def test_chats_table_idempotent(self):
+        instance = self.make_instance()
+        conn = queue.connect(instance)
+        try:
+            cols = [
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(chats)").fetchall()
+            ]
+            self.assertEqual(
+                cols,
+                [
+                    "channel",
+                    "chat_id",
+                    "chat_type",
+                    "title",
+                    "username",
+                    "member_count",
+                    "first_seen",
+                    "last_seen",
+                    "last_message_id",
+                ],
+            )
+            schema_version = conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()["value"]
+            self.assertEqual(schema_version, "3")
+        finally:
+            conn.close()
+
+        # Second connect must be a no-op (no error, no duplicate table).
+        conn2 = queue.connect(instance)
+        try:
+            count = conn2.execute(
+                "SELECT COUNT(*) AS n FROM sqlite_master "
+                "WHERE type='table' AND name='chats'"
+            ).fetchone()["n"]
+            self.assertEqual(count, 1)
+            idx = conn2.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='idx_chats_last_seen'"
+            ).fetchone()
+            self.assertIsNotNone(idx)
+        finally:
+            conn2.close()
+
     def test_dispatcher_failure_requeues(self):
         instance = self.make_instance()
         conn = queue.connect(instance)

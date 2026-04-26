@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = (10, 60, 300)
 
 
@@ -103,7 +103,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
 
         INSERT OR IGNORE INTO meta(key, value)
-        VALUES ('schema_version', '2');
+        VALUES ('schema_version', '3');
 
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,6 +151,22 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_sessions_updated
         ON sessions(updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS chats (
+            channel          TEXT NOT NULL,
+            chat_id          TEXT NOT NULL,
+            chat_type        TEXT,
+            title            TEXT,
+            username         TEXT,
+            member_count     INTEGER,
+            first_seen       TEXT NOT NULL,
+            last_seen        TEXT NOT NULL,
+            last_message_id  TEXT,
+            PRIMARY KEY (channel, chat_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chats_last_seen
+        ON chats(channel, last_seen DESC);
         """
     )
     conn.execute(
