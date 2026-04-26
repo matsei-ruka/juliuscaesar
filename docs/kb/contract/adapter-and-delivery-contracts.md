@@ -40,7 +40,8 @@ Delivery for heartbeat still uses `lib/heartbeat/lib/send_telegram.sh`. Gateway 
 - `codex.sh`: runs `codex exec` or `codex exec resume`; sandbox controlled by `CODEX_SANDBOX`.
 - `gemini.sh`: runs `gemini -p ""`; access mode controlled by `GEMINI_YOLO`.
 - `opencode.sh`: runs `opencode run`; truncates very large prompts to avoid argv limits.
-- `minimax.sh`: stub that exits 127.
+- Minimax is not a supported adapter. The internal stub is intentionally not
+  advertised in examples until a real implementation exists.
 
 ## Telegram delivery contract
 

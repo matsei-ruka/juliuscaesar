@@ -11,10 +11,12 @@ from typing import Any, Callable
 
 from . import overrides, queue, router, sessions
 from .brains import invoke_brain
-from .channels import build_enabled_channels, deliver
+from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
-from .config import ChannelConfig, GatewayConfig, load_config
+from .config import ChannelConfig, GatewayConfig, clear_env_cache, load_config
+from .delivery import deliver_response
 from .logging_setup import configure_logger
+from .recovery_integration import RecoveryIntegration
 from .triage import MetricsRecorder, TriageBackend, TriageCache, build_backend
 from .triage.base import TriageResult
 
@@ -87,7 +89,15 @@ class GatewayRuntime:
         self.log_path = log_path
         self.stop_requested = stop_requested
         self.worker_id = f"gateway-{os.getpid()}"
-        self.threads: list[threading.Thread] = []
+        self._channel_lifecycle = ChannelLifecycle(
+            self.instance_dir,
+            config=self.config,
+            log=self.log,
+            enqueue=self.enqueue,
+            stop_requested=self.stop_requested,
+        )
+        self.threads = self._channel_lifecycle.threads
+        self.channels = self._channel_lifecycle.channels
         self._triage_lock = threading.Lock()
         self._triage_backend: TriageBackend | None = None
         self.triage_cache = TriageCache(ttl_seconds=self.config.triage.cache_ttl_seconds)
@@ -101,16 +111,7 @@ class GatewayRuntime:
         self._heartbeat_path = queue.queue_dir(self.instance_dir) / "heartbeat"
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
-        self._recovery = self._build_recovery_dispatcher()
-
-    def _build_recovery_dispatcher(self):
-        try:
-            from .recovery import RecoveryDispatcher
-
-            return RecoveryDispatcher(self)
-        except Exception as exc:  # noqa: BLE001
-            self._json_logger.warning(f"recovery dispatcher unavailable: {exc}")
-            return None
+        self._recovery = RecoveryIntegration(self)
 
     def _touch_heartbeat(self) -> None:
         """Bump the heartbeat file mtime — supervisor reads this for liveness."""
@@ -160,7 +161,9 @@ class GatewayRuntime:
 
     def reload_config(self) -> None:
         """Re-read ops/gateway.yaml — used by SIGHUP handlers."""
+        clear_env_cache()
         self.config = load_config(self.instance_dir)
+        self._channel_lifecycle.reload_config(self.config)
         with self._triage_lock:
             self._triage_backend = None
         self.triage_cache = TriageCache(ttl_seconds=self.config.triage.cache_ttl_seconds)
@@ -195,26 +198,27 @@ class GatewayRuntime:
 
     def start_channels(self) -> None:
         self.start_heartbeat()
-        for channel in build_enabled_channels(self.instance_dir, self.config, self.log):
-            thread = threading.Thread(
-                target=channel.run,
-                args=(self.enqueue, self.stop_requested),
-                name=f"gateway-{channel.name}",
-                daemon=True,
-            )
-            thread.start()
-            self.threads.append(thread)
+        self._channel_lifecycle.start()
 
     def run_forever(self) -> None:
-        self.start_channels()
-        self.log("dispatcher started")
-        while not self.stop_requested():
-            self.dispatch_once()
-            time.sleep(self.config.poll_interval_seconds)
-        self.log("dispatcher stopping")
+        try:
+            self.start_channels()
+            self.log("dispatcher started")
+            while not self.stop_requested():
+                self.dispatch_once()
+                time.sleep(self.config.poll_interval_seconds)
+            self.log("dispatcher stopping")
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Stop background work and close stateful channel/log resources."""
         self.stop_heartbeat()
-        for thread in self.threads:
-            thread.join(timeout=2)
+        self._channel_lifecycle.close()
+        for handler in list(self._json_logger.handlers):
+            if getattr(handler, "_jc_gateway_handler", False):
+                self._json_logger.removeHandler(handler)
+                handler.close()
 
     def dispatch_once(self) -> bool:
         conn = queue.connect(self.instance_dir)
@@ -232,7 +236,7 @@ class GatewayRuntime:
 
         # Pre-triage hook for outstanding auth-token round-trips. Returns True
         # iff the message was consumed by the recovery flow.
-        if self._recovery is not None and self._recovery.maybe_consume_auth_token(event):
+        if self._recovery.maybe_consume_auth_token(event):
             conn_t = queue.connect(self.instance_dir)
             try:
                 queue.complete(conn_t, event.id, response="(auth token consumed)")
@@ -249,7 +253,7 @@ class GatewayRuntime:
                 conn2.close()
             self.log(f"event done id={event.id} source={event.source}")
         except AdapterFailure as failure:
-            self._handle_adapter_failure(event, failure)
+            self._recovery.handle_adapter_failure(event, failure)
         except Exception as exc:  # noqa: BLE001
             conn3 = queue.connect(self.instance_dir)
             try:
@@ -263,84 +267,6 @@ class GatewayRuntime:
                 conn3.close()
             self.log(f"event {failed.status} id={event.id} error={exc}")
         return True
-
-    def _handle_adapter_failure(self, event: queue.Event, failure) -> None:
-        """Route an adapter rc!=0 through the recovery dispatcher.
-
-        On classifier outage / handler error, fall back to the existing blind
-        retry behavior so we never regress on the prior contract.
-        """
-        from .recovery import Defer, Fail, Retry
-
-        if self._recovery is None:
-            self._fallback_blind_retry(event, str(failure))
-            return
-        try:
-            decision = self._recovery.handle(event, failure)
-        except Exception as exc:  # noqa: BLE001
-            self.log(
-                f"recovery dispatcher error id={event.id} brain={failure.brain} "
-                f"reason={exc!r} — falling back to blind retry"
-            )
-            self._fallback_blind_retry(event, str(failure))
-            return
-        if isinstance(decision, Retry):
-            conn = queue.connect(self.instance_dir)
-            try:
-                failed = queue.fail(
-                    conn,
-                    event.id,
-                    error=f"recovery: retry ({decision.reason})"[:1000],
-                    max_retries=self.config.max_retries,
-                    backoff_seconds=(int(decision.delay_seconds),),
-                )
-            finally:
-                conn.close()
-            self.log(
-                f"recovery retry id={event.id} brain={failure.brain} "
-                f"delay={decision.delay_seconds}s status={failed.status}"
-            )
-        elif isinstance(decision, Fail):
-            conn = queue.connect(self.instance_dir)
-            try:
-                queue.fail(
-                    conn,
-                    event.id,
-                    error=f"recovery: {decision.reason}"[:1000],
-                    max_retries=0,
-                )
-            finally:
-                conn.close()
-            self.log(
-                f"recovery fail id={event.id} brain={failure.brain} reason={decision.reason}"
-            )
-        elif isinstance(decision, Defer):
-            self.log(
-                f"recovery defer id={event.id} brain={failure.brain} reason={decision.reason}"
-            )
-            # Handler owns re-enqueue; nothing else to do here.
-        else:
-            self.log(
-                f"recovery unknown decision id={event.id} type={type(decision).__name__} — failing event"
-            )
-            conn = queue.connect(self.instance_dir)
-            try:
-                queue.fail(conn, event.id, error="recovery: unknown decision", max_retries=0)
-            finally:
-                conn.close()
-
-    def _fallback_blind_retry(self, event: queue.Event, error: str) -> None:
-        conn = queue.connect(self.instance_dir)
-        try:
-            failed = queue.fail(
-                conn,
-                event.id,
-                error=error[:1000],
-                max_retries=self.config.max_retries,
-            )
-        finally:
-            conn.close()
-        self.log(f"event {failed.status} id={event.id} error={error}")
 
     def _maybe_triage(
         self,
@@ -465,14 +391,7 @@ class GatewayRuntime:
         meta = decode_meta(event)
         if meta.get("deliver_only"):
             response = event.content
-            deliver(
-                instance_dir=self.instance_dir,
-                source=event.source,
-                response=response,
-                meta=meta,
-                config_channels=self.config.channels,
-                log=self.log,
-            )
+            self._deliver_response(event.source, response, meta)
             return response
 
         channel = router.channel_name(event)
@@ -550,15 +469,24 @@ class GatewayRuntime:
         meta.setdefault("delivery_channel", channel)
         if meta.get("was_voice"):
             self._render_voice_reply(response, meta)
-        deliver(
+        self._deliver_response(channel, response, meta)
+        return response
+
+    def _deliver_response(
+        self,
+        source: str,
+        response: str,
+        meta: dict[str, Any],
+    ) -> str | None:
+        return deliver_response(
             instance_dir=self.instance_dir,
-            source=channel,
+            source=source,
             response=response,
             meta=meta,
             config_channels=self.config.channels,
+            live_channels=self.channels,
             log=self.log,
         )
-        return response
 
     def _start_typing(self, channel: str, meta: dict[str, Any]) -> threading.Event:
         """Spawn a typing-indicator daemon for telegram channels.
@@ -681,14 +609,7 @@ class GatewayRuntime:
         reply = slash.reply or ""
         meta = dict(meta)
         meta.setdefault("delivery_channel", channel)
-        deliver(
-            instance_dir=self.instance_dir,
-            source=channel,
-            response=reply,
-            meta=meta,
-            config_channels=self.config.channels,
-            log=self.log,
-        )
+        self._deliver_response(channel, reply, meta)
         self.log(f"slash command id={event.id} kind={slash.kind} spec={slash.spec or '-'}")
         return reply
 

@@ -15,12 +15,15 @@ import datetime as dt
 import fcntl
 import hashlib
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
+
+from jc_paths import resolve_instance_path
 
 
 FRAMEWORK_ROOT = Path(__file__).resolve().parent  # lib/heartbeat/
@@ -66,10 +69,10 @@ def load_l1_context(instance_dir: Path) -> str:
     return "".join(parts)
 
 
-def load_context_files(instance_dir: Path, paths: list[str]) -> str:
+def load_context_files(instance_dir: Path, paths: list[str], *, allowlist=()) -> str:
     parts = []
     for rel in paths or []:
-        p = (instance_dir / rel).resolve()
+        p = resolve_instance_path(instance_dir, rel, allowlist=allowlist)
         if not p.exists():
             parts.append(f"\n--- {rel} (MISSING) ---\n")
             continue
@@ -77,21 +80,50 @@ def load_context_files(instance_dir: Path, paths: list[str]) -> str:
     return "".join(parts)
 
 
-def run_pre_fetch(instance_dir: Path, script_rel: str, bundle_path: Path, log_path: Path) -> None:
-    script = (instance_dir / "heartbeat" / script_rel).resolve()
+def _terminate_process_group(proc: subprocess.Popen, *, grace_seconds: float = 5.0) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        proc.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+
+
+def run_pre_fetch(
+    instance_dir: Path,
+    script_rel: str,
+    bundle_path: Path,
+    log_path: Path,
+    *,
+    timeout_seconds: int | None = None,
+) -> None:
+    script = resolve_instance_path(instance_dir, Path("heartbeat") / script_rel)
     if not script.exists():
         raise FileNotFoundError(f"pre_fetch script not found: {script}")
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     with bundle_path.open("w", encoding="utf-8") as out:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             ["bash", str(script)],
             stdout=out,
             stderr=subprocess.PIPE,
             cwd=str(instance_dir / "heartbeat"),
+            start_new_session=True,
         )
-    if r.returncode != 0:
-        log_line(f"pre_fetch FAILED rc={r.returncode} stderr={r.stderr.decode()[:500]}", log_path)
-        raise RuntimeError(f"pre_fetch failed: {r.returncode}")
+        try:
+            _, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _terminate_process_group(proc)
+            log_line(f"pre_fetch TIMEOUT timeout={timeout_seconds}s script={script_rel}", log_path)
+            raise TimeoutError(f"pre_fetch timeout after {timeout_seconds}s")
+    if proc.returncode != 0:
+        log_line(f"pre_fetch FAILED rc={proc.returncode} stderr={stderr.decode()[:500]}", log_path)
+        raise RuntimeError(f"pre_fetch failed: {proc.returncode}")
 
 
 def sha256_file(p: Path) -> str:
@@ -100,23 +132,39 @@ def sha256_file(p: Path) -> str:
     return h.hexdigest()
 
 
-def call_adapter(tool: str, model: str | None, prompt: str, workdir: Path, log_path: Path) -> str:
+def call_adapter(
+    tool: str,
+    model: str | None,
+    prompt: str,
+    workdir: Path,
+    log_path: Path,
+    *,
+    timeout_seconds: int | None = None,
+) -> str:
     adapter = ADAPTERS_DIR / f"{tool}.sh"
     if not adapter.exists():
         raise FileNotFoundError(f"adapter not found: {adapter}")
     if not os.access(adapter, os.X_OK):
         raise PermissionError(f"adapter not executable: {adapter}")
-    r = subprocess.run(
+    proc = subprocess.Popen(
         [str(adapter), model or ""],
-        input=prompt,
-        capture_output=True,
-        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         cwd=str(workdir),
+        start_new_session=True,
+        text=True,
     )
-    if r.returncode != 0:
-        log_line(f"adapter FAILED tool={tool} rc={r.returncode} stderr={r.stderr[:500]}", log_path)
-        raise RuntimeError(f"adapter {tool} failed: {r.returncode}\n{r.stderr[:500]}")
-    return r.stdout
+    try:
+        stdout, stderr = proc.communicate(prompt, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        log_line(f"adapter TIMEOUT tool={tool} timeout={timeout_seconds}s", log_path)
+        raise TimeoutError(f"adapter {tool} timeout after {timeout_seconds}s")
+    if proc.returncode != 0:
+        log_line(f"adapter FAILED tool={tool} rc={proc.returncode} stderr={stderr[:500]}", log_path)
+        raise RuntimeError(f"adapter {tool} failed: {proc.returncode}\n{stderr[:500]}")
+    return stdout
 
 
 def send_telegram(
@@ -248,8 +296,21 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
     try:
         tool = resolve(task, defaults, "tool", "claude")
         model = resolve(task, defaults, "model", None)
-        folder = Path(resolve(task, defaults, "folder", str(instance_dir)))
+        allowlist = list(defaults.get("path_allowlist") or []) + list(task.get("path_allowlist") or [])
+        folder = resolve_instance_path(
+            instance_dir,
+            resolve(task, defaults, "folder", str(instance_dir)),
+            allowlist=allowlist,
+        )
         pre_fetch = resolve(task, defaults, "pre_fetch", None)
+        timeout_seconds = resolve(task, defaults, "timeout_seconds", None)
+        pre_fetch_timeout_seconds = resolve(task, defaults, "pre_fetch_timeout_seconds", None)
+        timeout_seconds = int(timeout_seconds) if timeout_seconds is not None else None
+        pre_fetch_timeout_seconds = (
+            int(pre_fetch_timeout_seconds)
+            if pre_fetch_timeout_seconds is not None
+            else timeout_seconds
+        )
         prompt_tpl = task.get("prompt") or ""
         only_if_delta = bool(resolve(task, defaults, "only_if_delta", False))
         context_files = task.get("context_files") or []
@@ -257,7 +318,13 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         bundle_path = None
         if pre_fetch:
             bundle_path = state / "bundles" / f"{task_name}-{ts_tag}.md"
-            run_pre_fetch(instance_dir, pre_fetch, bundle_path, log_path)
+            run_pre_fetch(
+                instance_dir,
+                pre_fetch,
+                bundle_path,
+                log_path,
+                timeout_seconds=pre_fetch_timeout_seconds,
+            )
 
             if only_if_delta:
                 new_hash = sha256_file(bundle_path)
@@ -268,7 +335,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
                 last_hash_file.write_text(new_hash)
 
         l1_ctx = load_l1_context(instance_dir)
-        extra_ctx = load_context_files(instance_dir, context_files)
+        extra_ctx = load_context_files(instance_dir, context_files, allowlist=allowlist)
         bundle_body = bundle_path.read_text(encoding="utf-8") if bundle_path else ""
 
         subs = {
@@ -292,7 +359,14 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         prompt_path.write_text(final_prompt, encoding="utf-8")
 
         log_line(f"task {task_name}: tool={tool} model={model or '(default)'} folder={folder}", log_path)
-        output = call_adapter(tool, model, final_prompt, folder, log_path)
+        output = call_adapter(
+            tool,
+            model,
+            final_prompt,
+            folder,
+            log_path,
+            timeout_seconds=timeout_seconds,
+        )
 
         output_path = state / "outputs" / f"{task_name}-{ts_tag}.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)

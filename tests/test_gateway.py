@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gateway import queue
+from gateway import queue, sessions
 from gateway.brain import BrainResult
 from gateway.config import load_config, render_default_config
 from gateway.runtime import GatewayRuntime
@@ -43,14 +43,14 @@ class GatewayTests(unittest.TestCase):
             self.assertFalse(inserted_again)
             self.assertEqual(first.id, second.id)
 
-            queue.upsert_session(
+            sessions.upsert_session(
                 conn,
                 channel="telegram",
                 conversation_id="c1",
                 brain="claude",
                 session_id="s1",
             )
-            session = queue.get_session(
+            session = sessions.get_session(
                 conn,
                 channel="telegram",
                 conversation_id="c1",
@@ -89,8 +89,7 @@ class GatewayTests(unittest.TestCase):
         )
         conn.close()
         runtime = GatewayRuntime(instance, log_path=queue.queue_dir(instance) / "test.log", stop_requested=lambda: True)
-        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult("hello", "sess-1")), \
-             mock.patch("gateway.runtime.deliver", return_value=None):
+        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult("hello", "sess-1")):
             self.assertTrue(runtime.dispatch_once())
 
         conn2 = queue.connect(instance)
@@ -98,7 +97,7 @@ class GatewayTests(unittest.TestCase):
             saved = queue.get(conn2, event.id)
             self.assertEqual(saved.status, "done")
             self.assertEqual(saved.response, "hello")
-            session = queue.get_session(
+            session = sessions.get_session(
                 conn2,
                 channel="manual",
                 conversation_id="manual-conv",
@@ -107,6 +106,46 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(session.session_id, "sess-1")
         finally:
             conn2.close()
+
+    def test_discord_delivery_uses_live_channel_instance(self):
+        instance = self.make_instance()
+        conn = queue.connect(instance)
+        event, _ = queue.enqueue(
+            conn,
+            source="discord",
+            source_message_id="d1",
+            conversation_id="chan:chan",
+            content="hi",
+            meta={"channel_id": "123"},
+        )
+        conn.close()
+        runtime = GatewayRuntime(instance, log_path=queue.queue_dir(instance) / "test.log", stop_requested=lambda: True)
+
+        class FakeDiscord:
+            name = "discord"
+
+            def __init__(self):
+                self.sent = []
+
+            def ready(self):
+                return True
+
+            def run(self, enqueue, should_stop):
+                return None
+
+            def send(self, response, meta):
+                self.sent.append((response, meta))
+                return "msg-1"
+
+        fake = FakeDiscord()
+        runtime.channels["discord"] = fake
+        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult("pong", "sess-1")), \
+             mock.patch("gateway.delivery.deliver", side_effect=AssertionError("stateless fallback used")):
+            self.assertTrue(runtime.dispatch_once())
+
+        self.assertEqual(fake.sent[0][0], "pong")
+        self.assertEqual(fake.sent[0][1]["channel_id"], "123")
+        runtime.close()
 
     def test_chats_table_idempotent(self):
         instance = self.make_instance()

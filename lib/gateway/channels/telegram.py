@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import mimetypes
-import shutil
 import time
 import urllib.parse
-import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any, Callable
-from urllib.error import HTTPError
 
 from .. import chats as chats_module
 from .. import queue as queue_module
@@ -19,54 +14,30 @@ from ..config import ChannelConfig, env_value
 from ..format import to_markdown_v2
 from ._http import http_json
 from .base import EnqueueFn, LogFn
-
-
-_AUDIO_MIME_EXT = {
-    "audio/ogg": ".oga",
-    "audio/mpeg": ".mp3",
-    "audio/mp4": ".m4a",
-    "audio/x-m4a": ".m4a",
-    "audio/webm": ".webm",
-    "audio/x-wav": ".wav",
-    "audio/wav": ".wav",
-    "video/mp4": ".mp4",
-}
-
-# Backwards-compat alias — older code referenced the voice-specific name.
-_VOICE_MIME_EXT = _AUDIO_MIME_EXT
-
-
-def _download_telegram_file(
-    token: str,
-    file_id: str,
-    dest: Path,
-    *,
-    timeout: int = 60,
-) -> Path:
-    """Resolve Telegram `file_id` via getFile, then stream the bytes to `dest`."""
-    info = http_json(
-        f"https://api.telegram.org/bot{token}/getFile?"
-        + urllib.parse.urlencode({"file_id": file_id}),
-        timeout=timeout,
-    )
-    if not info.get("ok"):
-        raise RuntimeError(f"telegram getFile failed: {info}")
-    file_path = (info.get("result") or {}).get("file_path")
-    if not file_path:
-        raise RuntimeError(f"telegram getFile missing file_path: {info}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-    with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as out:
-        shutil.copyfileobj(resp, out)
-    return dest
-
-
-def _transcribe_audio(audio_path: Path) -> str:
-    """Best-effort ASR via `voice.asr.transcribe`. Returns "" on failure."""
-    from importlib import import_module
-
-    mod = import_module("voice.asr")
-    return str(mod.transcribe(audio_path)).strip()
+from .telegram_chats import (
+    cached_member_count as cached_telegram_member_count,
+    dm_title as telegram_dm_title,
+    record_chat as record_telegram_chat,
+)
+from .telegram_media import (
+    AUDIO_MIME_EXT as _AUDIO_MIME_EXT,
+    VOICE_MIME_EXT as _VOICE_MIME_EXT,
+    download_telegram_file as _download_telegram_file,
+    ingest_audio_attachment,
+    ingest_document,
+    ingest_photo,
+    transcribe_audio as _transcribe_audio,
+)
+from .telegram_outbound import (
+    encode_multipart as _encode_multipart,
+    send_text,
+    send_typing as send_typing_action,
+    send_voice as send_voice_message,
+)
+from .telegram_routing import (
+    forward_ident,
+    should_process_message as should_process_telegram_message,
+)
 
 
 class TelegramChannel:
@@ -151,6 +122,9 @@ class TelegramChannel:
             except Exception:  # noqa: BLE001
                 pass
             self._chats_conn = None
+
+    def __del__(self):  # pragma: no cover - defensive cleanup at interpreter shutdown
+        self.close()
 
     def _main_chat_id(self) -> str | None:
         """Resolve the configured main DM chat_id.
@@ -449,47 +423,12 @@ class TelegramChannel:
             self.log(f"telegram leaveChat failed chat_id={chat_id}: {exc}")
 
     def _should_process_message(self, message: dict) -> bool:
-        chat = message.get("chat") or {}
-        chat_type = chat.get("type", "private")
-        if chat_type in ("private", "channel"):
-            return True
-        if chat_type not in ("group", "supergroup"):
-            return False  # unknown → fail closed
-        # Reply-to-bot is unambiguous and HTTP-free: short-circuit before
-        # the username check so we don't drop a legitimate reply just
-        # because `getMe` hasn't resolved yet.
-        reply_to = message.get("reply_to_message") or {}
-        reply_from = reply_to.get("from") or {}
-        if self.bot_user_id and reply_from.get("id") == self.bot_user_id:
-            return True
-        # 1:1 detection — if the only members are Rachel + one human, every
-        # message is implicitly addressed to her. The check is HTTP-cached
-        # for 5 min, so the per-message cost is one dict lookup after the
-        # first call per chat.
-        chat_id = str(chat.get("id", ""))
-        if chat_id:
-            member_count = self._get_chat_member_count(chat_id)
-            if member_count is not None and member_count <= 2:
-                return True
-        if not self.bot_username:
-            return False  # can't verify → fail closed for groups
-        text = message.get("text") or message.get("caption") or ""
-        entities = message.get("entities") or message.get("caption_entities") or []
-        for ent in entities:
-            etype = ent.get("type")
-            if etype == "mention":
-                offset = ent.get("offset", 0)
-                length = ent.get("length", 0)
-                mentioned = text[offset : offset + length].lstrip("@").lower()
-                if mentioned == self.bot_username:
-                    return True
-            elif etype == "text_mention":
-                user = ent.get("user") or {}
-                if self.bot_user_id and user.get("id") == self.bot_user_id:
-                    return True
-        if f"@{self.bot_username}" in text.lower():
-            return True
-        return False
+        return should_process_telegram_message(
+            message,
+            bot_username=self.bot_username,
+            bot_user_id=self.bot_user_id,
+            get_chat_member_count=self._get_chat_member_count,
+        )
 
     def _get_chat_member_count(self, chat_id: str) -> int | None:
         """Return cached `getChatMemberCount` for `chat_id`, or fetch + cache.
@@ -534,169 +473,173 @@ class TelegramChannel:
             self.log("telegram disabled: token missing")
             return
         self.log("telegram poller started")
-        while not should_stop():
-            try:
-                url = f"https://api.telegram.org/bot{self.token}/getUpdates"
-                params = urllib.parse.urlencode(
-                    {
-                        "timeout": self.cfg.timeout_seconds,
-                        "offset": self.offset,
-                        "allowed_updates": json.dumps(
-                            list(self._ALLOWED_UPDATE_TYPES)
-                        ),
-                    }
-                )
-                data = http_json(f"{url}?{params}", timeout=self.cfg.timeout_seconds + 5)
-                for update in data.get("result", []):
-                    if self.bot_username is None and self.token:
-                        self._resolve_bot_username()
-                    self.offset = max(self.offset, int(update.get("update_id", 0)) + 1)
-                    # Route non-message update types first.
-                    if "my_chat_member" in update:
-                        self._handle_my_chat_member(update)
-                        continue
-                    if "callback_query" in update:
-                        self._handle_callback_query(update)
-                        continue
-                    message = update.get("message") or update.get("edited_message")
-                    if not isinstance(message, dict):
-                        continue
-                    chat = message.get("chat") or {}
-                    chat_id = str(chat.get("id", ""))
-                    # Backstop bot-added detection: some clients only emit
-                    # `new_chat_members` on a service message.
-                    new_members = message.get("new_chat_members")
-                    if isinstance(new_members, list) and self.bot_user_id:
-                        for m in new_members:
-                            if isinstance(m, dict) and m.get("id") == self.bot_user_id:
-                                self._handle_bot_added(chat, message.get("from"))
-                                break
-                    if self.allowed and chat_id not in self.allowed:
-                        self.log(f"telegram ignored disallowed chat_id={chat_id}")
-                        continue
-                    # Run the routing decision first — it populates the
-                    # member-count cache that _record_chat reads from.
-                    should_process = self._should_process_message(message)
-                    # Observability: record every inbound chat from an allowed
-                    # source, even when we won't dispatch the message. Without
-                    # this, groups Rachel is in but isn't @-mentioned in stay
-                    # invisible in CHATS.md / queue.db.
-                    self._record_chat(chat, message)
-                    if not should_process:
-                        self.log(
-                            f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
-                        )
-                        continue
-                    if not self._is_authorized(chat_id):
-                        self.log(
-                            f"telegram ignored unauthorized chat_id={chat_id} "
-                            f"type={chat.get('type')}"
-                        )
-                        continue
-                    update_id = update.get("update_id")
-                    self._log_forward(message, update_id)
-                    text = message.get("text") or message.get("caption") or ""
-                    voice = message.get("voice") if isinstance(message.get("voice"), dict) else None
-                    audio = message.get("audio") if isinstance(message.get("audio"), dict) else None
-                    video_note = (
-                        message.get("video_note")
-                        if isinstance(message.get("video_note"), dict)
-                        else None
+        try:
+            while not should_stop():
+                try:
+                    url = f"https://api.telegram.org/bot{self.token}/getUpdates"
+                    params = urllib.parse.urlencode(
+                        {
+                            "timeout": self.cfg.timeout_seconds,
+                            "offset": self.offset,
+                            "allowed_updates": json.dumps(
+                                list(self._ALLOWED_UPDATE_TYPES)
+                            ),
+                        }
                     )
-                    attachment = voice or audio or video_note
-                    if voice:
-                        kind = "voice"
-                    elif audio:
-                        kind = "audio"
-                    elif video_note:
-                        kind = "video_note"
-                    else:
-                        kind = None
-                    audio_path: Path | None = None
-                    if not text.strip() and attachment is not None:
-                        try:
-                            audio_path = self._ingest_audio_attachment(
-                                attachment, kind, update_id
-                            )
-                            text = _transcribe_audio(audio_path)
-                        except Exception as exc:  # noqa: BLE001
+                    data = http_json(f"{url}?{params}", timeout=self.cfg.timeout_seconds + 5)
+                    for update in data.get("result", []):
+                        if self.bot_username is None and self.token:
+                            self._resolve_bot_username()
+                        self.offset = max(self.offset, int(update.get("update_id", 0)) + 1)
+                        # Route non-message update types first.
+                        if "my_chat_member" in update:
+                            self._handle_my_chat_member(update)
+                            continue
+                        if "callback_query" in update:
+                            self._handle_callback_query(update)
+                            continue
+                        message = update.get("message") or update.get("edited_message")
+                        if not isinstance(message, dict):
+                            continue
+                        chat = message.get("chat") or {}
+                        chat_id = str(chat.get("id", ""))
+                        # Backstop bot-added detection: some clients only emit
+                        # `new_chat_members` on a service message.
+                        new_members = message.get("new_chat_members")
+                        if isinstance(new_members, list) and self.bot_user_id:
+                            for m in new_members:
+                                if isinstance(m, dict) and m.get("id") == self.bot_user_id:
+                                    self._handle_bot_added(chat, message.get("from"))
+                                    break
+                        if self.allowed and chat_id not in self.allowed:
+                            self.log(f"telegram ignored disallowed chat_id={chat_id}")
+                            continue
+                        # Run the routing decision first — it populates the
+                        # member-count cache that _record_chat reads from.
+                        should_process = self._should_process_message(message)
+                        # Observability: record every inbound chat from an allowed
+                        # source, even when we won't dispatch the message. Without
+                        # this, groups Rachel is in but isn't @-mentioned in stay
+                        # invisible in CHATS.md / queue.db.
+                        self._record_chat(chat, message)
+                        if not should_process:
                             self.log(
-                                f"telegram {kind} ingestion failed update_id={update_id}: {exc}"
+                                f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
                             )
                             continue
-                        if not text.strip():
+                        if not self._is_authorized(chat_id):
                             self.log(
-                                f"telegram {kind} transcription empty update_id={update_id}"
+                                f"telegram ignored unauthorized chat_id={chat_id} "
+                                f"type={chat.get('type')}"
                             )
                             continue
-                        self.log(
-                            f"telegram {kind} transcribed update_id={update_id} chars={len(text)}"
+                        update_id = update.get("update_id")
+                        self._log_forward(message, update_id)
+                        text = message.get("text") or message.get("caption") or ""
+                        voice = message.get("voice") if isinstance(message.get("voice"), dict) else None
+                        audio = message.get("audio") if isinstance(message.get("audio"), dict) else None
+                        video_note = (
+                            message.get("video_note")
+                            if isinstance(message.get("video_note"), dict)
+                            else None
                         )
-                    photo = message.get("photo") if isinstance(message.get("photo"), list) else None
-                    document = (
-                        message.get("document")
-                        if isinstance(message.get("document"), dict)
-                        else None
-                    )
-                    image_path: Path | None = None
-                    if photo:
-                        try:
-                            image_path = self._ingest_photo(photo, update_id)
-                        except Exception as exc:  # noqa: BLE001
+                        attachment = voice or audio or video_note
+                        if voice:
+                            kind = "voice"
+                        elif audio:
+                            kind = "audio"
+                        elif video_note:
+                            kind = "video_note"
+                        else:
+                            kind = None
+                        audio_path: Path | None = None
+                        if not text.strip() and attachment is not None:
+                            try:
+                                audio_path = self._ingest_audio_attachment(
+                                    attachment, kind, update_id
+                                )
+                                text = _transcribe_audio(audio_path)
+                            except Exception as exc:  # noqa: BLE001
+                                self.log(
+                                    f"telegram {kind} ingestion failed update_id={update_id}: {exc}"
+                                )
+                                continue
+                            if not text.strip():
+                                self.log(
+                                    f"telegram {kind} transcription empty update_id={update_id}"
+                                )
+                                continue
                             self.log(
-                                f"telegram photo ingestion failed update_id={update_id}: {exc}"
+                                f"telegram {kind} transcribed update_id={update_id} chars={len(text)}"
                             )
-                    file_path: Path | None = None
-                    if document:
-                        try:
-                            file_path = self._ingest_document(document, update_id)
-                        except Exception as exc:  # noqa: BLE001
-                            self.log(
-                                f"telegram document ingestion failed update_id={update_id}: {exc}"
-                            )
-                    has_media = image_path is not None or file_path is not None
-                    if not text.strip() and not has_media:
-                        continue
-                    if not text.strip() and has_media:
-                        if image_path is not None and file_path is None:
-                            text = "[image]"
-                        elif file_path is not None:
-                            name = (document or {}).get("file_name") or file_path.name
-                            text = f"[document: {name}]"
-                    thread_id = message.get("message_thread_id")
-                    conversation_id = f"{chat_id}:{thread_id}" if thread_id else chat_id
-                    meta: dict[str, Any] = {
-                        "chat_id": chat_id,
-                        "message_id": message.get("message_id"),
-                        "message_thread_id": thread_id,
-                        "username": (message.get("from") or {}).get("username"),
-                    }
-                    if audio_path is not None:
-                        # `was_voice` keeps its name for downstream voice-reply
-                        # rendering — the trigger is "user sent something we
-                        # transcribed", regardless of whether it was a `voice`
-                        # bubble, music clip, or round video.
-                        meta["was_voice"] = True
-                        meta["audio_path"] = str(audio_path)
-                        meta["attachment_kind"] = kind
-                    if image_path is not None:
-                        meta["image_path"] = str(image_path)
-                    if file_path is not None:
-                        meta["file_path"] = str(file_path)
-                        if document and document.get("file_name"):
-                            meta["file_name"] = document.get("file_name")
-                    enqueue(
-                        source="telegram",
-                        source_message_id=str(update.get("update_id")),
-                        user_id=str((message.get("from") or {}).get("id", "")) or None,
-                        conversation_id=conversation_id,
-                        content=text,
-                        meta=meta,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"telegram poll error: {exc}")
-                time.sleep(5)
-        self.log("telegram poller stopped")
+                        photo = message.get("photo") if isinstance(message.get("photo"), list) else None
+                        document = (
+                            message.get("document")
+                            if isinstance(message.get("document"), dict)
+                            else None
+                        )
+                        image_path: Path | None = None
+                        if photo:
+                            try:
+                                image_path = self._ingest_photo(photo, update_id)
+                            except Exception as exc:  # noqa: BLE001
+                                self.log(
+                                    f"telegram photo ingestion failed update_id={update_id}: {exc}"
+                                )
+                        file_path: Path | None = None
+                        if document:
+                            try:
+                                file_path = self._ingest_document(document, update_id)
+                            except Exception as exc:  # noqa: BLE001
+                                self.log(
+                                    f"telegram document ingestion failed update_id={update_id}: {exc}"
+                                )
+                        has_media = image_path is not None or file_path is not None
+                        if not text.strip() and not has_media:
+                            continue
+                        if not text.strip() and has_media:
+                            if image_path is not None and file_path is None:
+                                text = "[image]"
+                            elif file_path is not None:
+                                name = (document or {}).get("file_name") or file_path.name
+                                text = f"[document: {name}]"
+                        thread_id = message.get("message_thread_id")
+                        conversation_id = f"{chat_id}:{thread_id}" if thread_id else chat_id
+                        meta: dict[str, Any] = {
+                            "chat_id": chat_id,
+                            "message_id": message.get("message_id"),
+                            "message_thread_id": thread_id,
+                            "username": (message.get("from") or {}).get("username"),
+                            "chat_type": chat.get("type"),
+                        }
+                        if audio_path is not None:
+                            # `was_voice` keeps its name for downstream voice-reply
+                            # rendering — the trigger is "user sent something we
+                            # transcribed", regardless of whether it was a `voice`
+                            # bubble, music clip, or round video.
+                            meta["was_voice"] = True
+                            meta["audio_path"] = str(audio_path)
+                            meta["attachment_kind"] = kind
+                        if image_path is not None:
+                            meta["image_path"] = str(image_path)
+                        if file_path is not None:
+                            meta["file_path"] = str(file_path)
+                            if document and document.get("file_name"):
+                                meta["file_name"] = document.get("file_name")
+                        enqueue(
+                            source="telegram",
+                            source_message_id=str(update.get("update_id")),
+                            user_id=str((message.get("from") or {}).get("id", "")) or None,
+                            conversation_id=conversation_id,
+                            content=text,
+                            meta=meta,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"telegram poll error: {exc}")
+                    time.sleep(5)
+        finally:
+            self.close()
+            self.log("telegram poller stopped")
 
     def _ingest_audio_attachment(
         self,
@@ -712,12 +655,13 @@ class TelegramChannel:
         file_id = payload.get("file_id")
         if not file_id:
             raise RuntimeError(f"{kind or 'attachment'} payload missing file_id")
-        if kind == "video_note":
-            ext = ".mp4"
-        else:
-            ext = _AUDIO_MIME_EXT.get(str(payload.get("mime_type") or ""), ".oga")
-        dest = self.instance_dir / "state" / "voice" / "inbound" / f"{update_id}{ext}"
-        return _download_telegram_file(self.token, file_id, dest)
+        return ingest_audio_attachment(
+            token=self.token,
+            instance_dir=self.instance_dir,
+            payload=payload,
+            kind=kind,
+            update_id=update_id,
+        )
 
     def _ingest_photo(self, photos: list[Any], update_id: Any) -> Path:
         """Download the largest photo size to `state/voice/inbound/photos/`."""
@@ -726,13 +670,12 @@ class TelegramChannel:
         largest = photos[-1]
         if not isinstance(largest, dict):
             raise RuntimeError("photo payload malformed")
-        file_id = largest.get("file_id")
-        if not file_id:
-            raise RuntimeError("photo payload missing file_id")
-        dest = (
-            self.instance_dir / "state" / "voice" / "inbound" / "photos" / f"{update_id}.jpg"
+        return ingest_photo(
+            token=self.token,
+            instance_dir=self.instance_dir,
+            photos=photos,
+            update_id=update_id,
         )
-        return _download_telegram_file(self.token, file_id, dest)
 
     def _ingest_document(self, document: dict[str, Any], update_id: Any) -> Path:
         """Download a Telegram document to `state/voice/inbound/docs/`.
@@ -740,33 +683,19 @@ class TelegramChannel:
         Preserves the original file extension when present; falls back to a
         MIME-derived extension; finally `.bin` if neither is available.
         """
-        file_id = document.get("file_id")
-        if not file_id:
-            raise RuntimeError("document payload missing file_id")
-        original = document.get("file_name") or ""
-        ext = Path(original).suffix
-        if not ext:
-            mime = str(document.get("mime_type") or "")
-            ext = mimetypes.guess_extension(mime) or ".bin"
-        dest = (
-            self.instance_dir / "state" / "voice" / "inbound" / "docs" / f"{update_id}{ext}"
+        return ingest_document(
+            token=self.token,
+            instance_dir=self.instance_dir,
+            document=document,
+            update_id=update_id,
         )
-        return _download_telegram_file(self.token, file_id, dest)
 
     def _dm_title(self, chat: dict[str, Any]) -> str | None:
         """Compose a DM display name as `first_name + last_name` per spec.
 
         Falls back to `@username` when neither name field is set.
         """
-        first = (chat.get("first_name") or "").strip()
-        last = (chat.get("last_name") or "").strip()
-        full = " ".join(part for part in (first, last) if part)
-        if full:
-            return full
-        username = chat.get("username")
-        if username:
-            return f"@{username}"
-        return None
+        return telegram_dm_title(chat)
 
     def _cached_member_count(self, chat_id: str) -> int | None:
         """Return a cached `getChatMemberCount` if present — never fetch.
@@ -778,8 +707,7 @@ class TelegramChannel:
         let the row's `member_count` stay NULL until the next inbound
         message refreshes it.
         """
-        entry = self._member_count_cache.get(chat_id)
-        return entry[0] if entry else None
+        return cached_telegram_member_count(self._member_count_cache, chat_id)
 
     def _record_chat(self, chat: dict[str, Any], message: dict[str, Any]) -> None:
         """Upsert the inbound chat into the chats directory.
@@ -789,40 +717,20 @@ class TelegramChannel:
         channel's cached SQLite connection to avoid per-message
         connection churn.
         """
-        try:
-            chat_id = str(chat.get("id", ""))
-            if not chat_id:
-                return
-            chat_type = chat.get("type")
-            if chat_type in ("group", "supergroup", "channel"):
-                title = chat.get("title") or self._dm_title(chat)
-            else:
-                title = self._dm_title(chat) or chat.get("title")
-            chats_module.upsert_chat(
-                instance_dir=self.instance_dir,
-                conn=self._get_chats_conn(),
-                channel="telegram",
-                chat_id=chat_id,
-                chat_type=chat_type,
-                title=title,
-                username=chat.get("username"),
-                member_count=self._cached_member_count(chat_id),
-                last_message_id=(
-                    str(message.get("message_id"))
-                    if message.get("message_id") is not None
-                    else None
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"telegram chat upsert failed chat_id={chat.get('id')}: {exc}")
+        record_telegram_chat(
+            instance_dir=self.instance_dir,
+            conn_factory=self._get_chats_conn,
+            member_count_cache=self._member_count_cache,
+            log=self.log,
+            chat=chat,
+            message=message,
+        )
 
     def _log_forward(self, message: dict[str, Any], update_id: Any) -> None:
         """If the message is a forward, log a single audit line."""
-        ff = message.get("forward_from") or message.get("forward_from_chat")
-        if not isinstance(ff, dict):
-            return
-        ident = ff.get("username") or ff.get("title") or ff.get("id") or "-"
-        self.log(f"telegram forward update_id={update_id} from={ident}")
+        ident = forward_ident(message)
+        if ident is not None:
+            self.log(f"telegram forward update_id={update_id} from={ident}")
 
     def send_typing(
         self,
@@ -836,13 +744,10 @@ class TelegramChannel:
         """
         if not self.ready() or not chat_id:
             return
-        payload: dict[str, Any] = {"chat_id": str(chat_id), "action": "typing"}
-        if message_thread_id:
-            payload["message_thread_id"] = message_thread_id
-        http_json(
-            f"https://api.telegram.org/bot{self.token}/sendChatAction",
-            data=payload,
-            timeout=10,
+        send_typing_action(
+            token=self.token,
+            chat_id=str(chat_id),
+            message_thread_id=message_thread_id,
         )
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
@@ -854,130 +759,21 @@ class TelegramChannel:
                 return self.send_voice(str(ogg_path), meta)
             except Exception as exc:  # noqa: BLE001
                 self.log(f"telegram sendVoice failed, falling back to text: {exc}")
-        chat_id = str(
-            meta.get("chat_id")
-            or meta.get("notify_chat_id")
-            or env_value(self.instance_dir, "TELEGRAM_CHAT_ID")
-            or ""
+        return send_text(
+            instance_dir=self.instance_dir,
+            token=self.token,
+            response=response,
+            meta=meta,
+            log=self.log,
         )
-        if not chat_id:
-            return None
-        original = response[:4096]
-        escaped = to_markdown_v2(original)
-        payload: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": escaped,
-            "disable_web_page_preview": True,
-            "parse_mode": "MarkdownV2",
-        }
-        if meta.get("message_thread_id"):
-            payload["message_thread_id"] = meta["message_thread_id"]
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        try:
-            data = http_json(url, data=payload, timeout=15)
-            parse_error = (
-                not data.get("ok")
-                and "parse" in str(data.get("description") or "").lower()
-            )
-            error_desc = str(data.get("description") or "")
-        except HTTPError as exc:
-            # Telegram returns 400 with a JSON body describing the parse
-            # failure. urllib.urlopen raises HTTPError before we get to read.
-            try:
-                body_text = exc.read().decode("utf-8", errors="replace")
-                body = json.loads(body_text) if body_text else {}
-            except (json.JSONDecodeError, ValueError):
-                body = {}
-            error_desc = str(body.get("description") or exc.reason or "")
-            parse_error = exc.code == 400 and (
-                "parse" in error_desc.lower() or "entit" in error_desc.lower()
-            )
-            data = body if isinstance(body, dict) else {}
-            if not parse_error:
-                raise RuntimeError(f"telegram send failed: HTTP {exc.code} {error_desc}") from exc
-        if parse_error:
-            self.log(
-                f"telegram.send.parse_error retrying without parse_mode err={error_desc!r}"
-            )
-            fallback: dict[str, Any] = {
-                "chat_id": chat_id,
-                "text": original,
-                "disable_web_page_preview": True,
-            }
-            if meta.get("message_thread_id"):
-                fallback["message_thread_id"] = meta["message_thread_id"]
-            data = http_json(url, data=fallback, timeout=15)
-        if not data.get("ok"):
-            raise RuntimeError(f"telegram send failed: {data}")
-        result = data.get("result") or {}
-        return str(result.get("message_id")) if result.get("message_id") is not None else None
 
     def send_voice(self, ogg_path: str, meta: dict[str, Any]) -> str | None:
         """Upload an OGG/Opus file and post it as a Telegram voice message."""
         if not self.ready():
             return None
-        chat_id = str(
-            meta.get("chat_id")
-            or meta.get("notify_chat_id")
-            or env_value(self.instance_dir, "TELEGRAM_CHAT_ID")
-            or ""
+        return send_voice_message(
+            instance_dir=self.instance_dir,
+            token=self.token,
+            ogg_path=ogg_path,
+            meta=meta,
         )
-        if not chat_id:
-            return None
-        path = Path(ogg_path)
-        if not path.exists():
-            raise RuntimeError(f"telegram sendVoice missing file: {ogg_path}")
-
-        fields: list[tuple[str, str]] = [("chat_id", chat_id)]
-        if meta.get("message_thread_id"):
-            fields.append(("message_thread_id", str(meta["message_thread_id"])))
-        files: list[tuple[str, str, bytes, str]] = [
-            ("voice", path.name, path.read_bytes(), "audio/ogg"),
-        ]
-        body, content_type = _encode_multipart(fields, files)
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{self.token}/sendVoice",
-            data=body,
-            headers={"Content-Type": content_type},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-        data = json.loads(raw) if raw else {}
-        if not data.get("ok"):
-            raise RuntimeError(f"telegram sendVoice failed: {data}")
-        result = data.get("result") or {}
-        return str(result.get("message_id")) if result.get("message_id") is not None else None
-
-
-def _encode_multipart(
-    fields: list[tuple[str, str]],
-    files: list[tuple[str, str, bytes, str]],
-) -> tuple[bytes, str]:
-    """Build a `multipart/form-data` body for urllib.
-
-    `fields` is a list of (name, value) string pairs.
-    `files` is a list of (name, filename, data, content_type) tuples.
-    Returns (body_bytes, content_type_header).
-    """
-    boundary = f"----jcboundary{uuid.uuid4().hex}"
-    crlf = b"\r\n"
-    parts: list[bytes] = []
-    for name, value in fields:
-        parts.append(f"--{boundary}".encode("utf-8"))
-        parts.append(f'Content-Disposition: form-data; name="{name}"'.encode("utf-8"))
-        parts.append(b"")
-        parts.append(value.encode("utf-8"))
-    for name, filename, data, content_type in files:
-        parts.append(f"--{boundary}".encode("utf-8"))
-        parts.append(
-            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"'.encode(
-                "utf-8"
-            )
-        )
-        parts.append(f"Content-Type: {content_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'}".encode("utf-8"))
-        parts.append(b"")
-        parts.append(data)
-    parts.append(f"--{boundary}--".encode("utf-8"))
-    parts.append(b"")
-    body = crlf.join(parts)
-    return body, f"multipart/form-data; boundary={boundary}"

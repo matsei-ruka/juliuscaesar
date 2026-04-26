@@ -48,21 +48,6 @@ class Event:
                 pass
         return data
 
-
-@dataclass(frozen=True)
-class Session:
-    id: int
-    channel: str
-    conversation_id: str
-    brain: str
-    session_id: str
-    created_at: str
-    updated_at: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -91,6 +76,9 @@ def connect(instance_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     init_db(conn)
+    from . import sessions
+
+    sessions.init_db(conn)
     return conn
 
 
@@ -137,20 +125,6 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_events_conversation
         ON events(source, user_id, conversation_id, received_at DESC);
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel TEXT NOT NULL,
-            conversation_id TEXT NOT NULL,
-            brain TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(channel, conversation_id, brain)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_sessions_updated
-        ON sessions(updated_at DESC);
 
         CREATE TABLE IF NOT EXISTS chats (
             channel          TEXT NOT NULL,
@@ -209,12 +183,6 @@ def row_to_event(row: sqlite3.Row | None) -> Event | None:
     if row is None:
         return None
     return Event(**{key: row[key] for key in row.keys()})
-
-
-def row_to_session(row: sqlite3.Row | None) -> Session | None:
-    if row is None:
-        return None
-    return Session(**{key: row[key] for key in row.keys()})
 
 
 def encode_meta(meta: dict[str, Any] | None) -> str | None:
@@ -478,47 +446,3 @@ def recent(conn: sqlite3.Connection, *, limit: int = 20) -> list[Event]:
 
 def get(conn: sqlite3.Connection, event_id: int) -> Event | None:
     return row_to_event(conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
-
-
-def get_session(
-    conn: sqlite3.Connection,
-    *,
-    channel: str,
-    conversation_id: str,
-    brain: str,
-) -> Session | None:
-    return row_to_session(
-        conn.execute(
-            """
-            SELECT * FROM sessions
-            WHERE channel=? AND conversation_id=? AND brain=?
-            """,
-            (channel, conversation_id, brain),
-        ).fetchone()
-    )
-
-
-def upsert_session(
-    conn: sqlite3.Connection,
-    *,
-    channel: str,
-    conversation_id: str,
-    brain: str,
-    session_id: str,
-) -> Session:
-    ts = now_iso()
-    conn.execute(
-        """
-        INSERT INTO sessions(channel, conversation_id, brain, session_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(channel, conversation_id, brain) DO UPDATE SET
-            session_id=excluded.session_id,
-            updated_at=excluded.updated_at
-        """,
-        (channel, conversation_id, brain, session_id, ts, ts),
-    )
-    conn.commit()
-    session = get_session(conn, channel=channel, conversation_id=conversation_id, brain=brain)
-    if session is None:
-        raise RuntimeError("failed to read upserted session")
-    return session

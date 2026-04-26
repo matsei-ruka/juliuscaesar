@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -42,34 +41,14 @@ if _LIB.exists() and str(_LIB) not in sys.path:
 
 from voice import enroll, synthesize, transcribe  # type: ignore  # noqa: E402
 from voice.enroll import list_voices  # type: ignore  # noqa: E402
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
 
 def resolve_instance_dir(arg: str | None) -> Path:
-    if arg:
-        p = Path(arg).expanduser().resolve()
-        if not p.exists():
-            raise SystemExit(f"--instance-dir does not exist: {p}")
-        return p
-    env = os.environ.get("JC_INSTANCE_DIR")
-    if env:
-        p = Path(env).expanduser().resolve()
-        if not p.exists():
-            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
-        return p
-    cur = Path.cwd().resolve()
-    while True:
-        if (cur / ".jc").exists():
-            return cur
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    cwd = Path.cwd().resolve()
-    if (cwd / "voice").exists() or (cwd / "memory").exists():
-        return cwd
-    raise SystemExit(
-        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
-        "or run from a directory with voice/ or a .jc marker."
-    )
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("voice", "memory"))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def load_instance_env(instance: Path) -> None:

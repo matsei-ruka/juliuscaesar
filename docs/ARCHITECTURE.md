@@ -29,7 +29,7 @@ memory/ heartbeat/ voice/ ops/  skills/ .env
 
 JC never simulates Claude Code. When a task needs AI:
 
-1. Task config names a **tool** (claude, gemini, opencode, minimax) and optional model.
+1. Task config names a **tool** (claude, codex, gemini, opencode, aider) and optional model.
 2. JC invokes the tool's **native CLI** as a subprocess (e.g. `claude -p`).
 3. User supplies authentication via the tool's own login flow (e.g. `claude /login`).
 4. Subscription-bound usage stays on the user's subscription — no API key injection, no session spoofing.

@@ -1,7 +1,7 @@
 # Heartbeat tasks — run via `jc-heartbeat run <task-name>` (cron-driven).
 #
 # Per-task fields:
-#   tool:           adapter name (claude | codex | gemini | minimax | opencode)
+#   tool:           adapter name (claude | codex | gemini | opencode | aider)
 #   model:          model id for the tool; empty = tool's own default
 #   folder:         working dir for the adapter (default: instance dir)
 #   pre_fetch:      bash script path relative to <instance>/heartbeat/

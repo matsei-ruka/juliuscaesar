@@ -9,12 +9,14 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import runtime as runtime_module  # noqa: E402
 from gateway.channels import telegram as telegram_module  # noqa: E402
+from gateway.channels import telegram_media, telegram_outbound  # noqa: E402
 from gateway.channels.cron import CronChannel  # noqa: E402
 from gateway.channels.jc_events import JcEventsChannel  # noqa: E402
 from gateway.channels.telegram import TelegramChannel  # noqa: E402
@@ -191,10 +193,12 @@ def _drive_telegram(
     channel.token = "test-token"
 
     orig_http_json = telegram_module.http_json
-    orig_urlopen = telegram_module.urllib.request.urlopen
+    orig_media_http_json = telegram_media.http_json
+    orig_urlopen = telegram_media.urllib.request.urlopen
     orig_transcribe = telegram_module._transcribe_audio
     telegram_module.http_json = fake_http_json
-    telegram_module.urllib.request.urlopen = lambda *_a, **_k: FakeResp(urlopen_payload)
+    telegram_media.http_json = fake_http_json
+    telegram_media.urllib.request.urlopen = lambda *_a, **_k: FakeResp(urlopen_payload)
     if transcript is not None:
         telegram_module._transcribe_audio = lambda _path: transcript
     try:
@@ -210,7 +214,8 @@ def _drive_telegram(
         thread.join(timeout=3)
     finally:
         telegram_module.http_json = orig_http_json
-        telegram_module.urllib.request.urlopen = orig_urlopen
+        telegram_media.http_json = orig_media_http_json
+        telegram_media.urllib.request.urlopen = orig_urlopen
         if transcript is not None:
             telegram_module._transcribe_audio = orig_transcribe
     return captured
@@ -650,6 +655,17 @@ class TelegramGroupSessionReuseTests(unittest.TestCase):
 
 
 class TelegramSendTypingTests(unittest.TestCase):
+    def test_run_closes_cached_chats_connection_on_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+            channel = TelegramChannel(instance, cfg, _silent_log)
+            channel.token = "test-token"
+            conn = channel._get_chats_conn()
+            self.assertIsNotNone(conn)
+            channel.run(lambda **_kwargs: None, lambda: True)
+            self.assertIsNone(channel._chats_conn)
+
     def test_send_typing_posts_chat_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -663,12 +679,12 @@ class TelegramSendTypingTests(unittest.TestCase):
                 seen.append({"url": url, "data": data, "timeout": timeout})
                 return {"ok": True, "result": True}
 
-            orig = telegram_module.http_json
-            telegram_module.http_json = fake_http_json
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = fake_http_json
             try:
                 channel.send_typing("28547271", message_thread_id=7)
             finally:
-                telegram_module.http_json = orig
+                telegram_outbound.http_json = orig
 
             self.assertEqual(len(seen), 1)
             call = seen[0]
@@ -871,15 +887,15 @@ class TelegramSendVoiceTests(unittest.TestCase):
                 ).encode("utf-8")
                 return FakeResp(payload)
 
-            orig_urlopen = telegram_module.urllib.request.urlopen
-            telegram_module.urllib.request.urlopen = fake_urlopen
+            orig_urlopen = telegram_outbound.urllib.request.urlopen
+            telegram_outbound.urllib.request.urlopen = fake_urlopen
             try:
                 msg_id = channel.send_voice(
                     str(ogg),
                     {"chat_id": "28547271", "message_thread_id": 7},
                 )
             finally:
-                telegram_module.urllib.request.urlopen = orig_urlopen
+                telegram_outbound.urllib.request.urlopen = orig_urlopen
 
             self.assertEqual(msg_id, "4906")
             self.assertIn("/sendVoice", captured["url"])
@@ -917,12 +933,12 @@ class TelegramSendParseModeTests(unittest.TestCase):
             instance = Path(tmp)
             channel = self._make_channel(instance)
             captured: list[dict[str, Any]] = []
-            orig = telegram_module.http_json
-            telegram_module.http_json = self._patch_http(captured)
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = self._patch_http(captured)
             try:
                 channel.send("Hello, world.", {"chat_id": "28547271"})
             finally:
-                telegram_module.http_json = orig
+                telegram_outbound.http_json = orig
         self.assertEqual(len(captured), 1)
         payload = captured[0]["data"]
         self.assertEqual(payload["parse_mode"], "MarkdownV2")
@@ -935,12 +951,12 @@ class TelegramSendParseModeTests(unittest.TestCase):
             instance = Path(tmp)
             channel = self._make_channel(instance)
             captured: list[dict[str, Any]] = []
-            orig = telegram_module.http_json
-            telegram_module.http_json = self._patch_http(captured)
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = self._patch_http(captured)
             try:
                 channel.send("**bold** text", {"chat_id": "28547271"})
             finally:
-                telegram_module.http_json = orig
+                telegram_outbound.http_json = orig
         self.assertEqual(captured[0]["data"]["text"], "*bold* text")
         self.assertEqual(captured[0]["data"]["parse_mode"], "MarkdownV2")
 
@@ -960,12 +976,12 @@ class TelegramSendParseModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             channel = self._make_channel(instance)
-            orig = telegram_module.http_json
-            telegram_module.http_json = fake_http_json
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = fake_http_json
             try:
                 msg_id = channel.send(original, {"chat_id": "28547271"})
             finally:
-                telegram_module.http_json = orig
+                telegram_outbound.http_json = orig
         self.assertEqual(msg_id, "7777")
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["parse_mode"], "MarkdownV2")
@@ -1000,12 +1016,12 @@ class TelegramSendParseModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             channel = self._make_channel(instance)
-            orig = telegram_module.http_json
-            telegram_module.http_json = fake_http_json
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = fake_http_json
             try:
                 msg_id = channel.send(original, {"chat_id": "28547271"})
             finally:
-                telegram_module.http_json = orig
+                telegram_outbound.http_json = orig
         self.assertEqual(msg_id, "8888")
         self.assertEqual(len(calls), 2)
         self.assertNotIn("parse_mode", calls[1])
@@ -1029,13 +1045,13 @@ class TelegramSendParseModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             channel = self._make_channel(instance)
-            orig = telegram_module.http_json
-            telegram_module.http_json = fake_http_json
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = fake_http_json
             try:
                 with self.assertRaises(RuntimeError):
                     channel.send("hi", {"chat_id": "28547271"})
             finally:
-                telegram_module.http_json = orig
+                telegram_outbound.http_json = orig
 
 
 class ConfigWebRejectionTests(unittest.TestCase):
@@ -1068,6 +1084,33 @@ class ConfigWebRejectionTests(unittest.TestCase):
             self.assertTrue(cfg.channel("cron").enabled)
             self.assertFalse(cfg.channel("discord").enabled)
             self.assertFalse(cfg.channel("voice").enabled)
+
+    def test_unknown_channel_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".jc").write_text("", encoding="utf-8")
+            (instance / "ops").mkdir()
+            (instance / "ops" / "gateway.yaml").write_text(
+                render_default_config(default_brain="claude")
+                + "  matrix:\n    enabled: true\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("unknown channel", str(ctx.exception))
+
+    def test_bad_triage_backend_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".jc").write_text("", encoding="utf-8")
+            (instance / "ops").mkdir()
+            (instance / "ops" / "gateway.yaml").write_text(
+                render_default_config(default_brain="claude", triage_backend="bogus"),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("unsupported backend", str(ctx.exception))
 
 
 if __name__ == "__main__":

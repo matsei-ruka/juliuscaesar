@@ -47,59 +47,82 @@ def _coerce_scalar(value: str) -> Any:
         return value
 
 
+def _strip_comment(line: str) -> str:
+    quote: str | None = None
+    out: list[str] = []
+    for ch in line:
+        if ch in ("'", '"'):
+            quote = None if quote == ch else ch if quote is None else quote
+        if ch == "#" and quote is None:
+            break
+        out.append(ch)
+    return "".join(out).rstrip()
+
+
+def _next_content(lines: list[str], start: int) -> tuple[int, str] | None:
+    for j in range(start, len(lines)):
+        raw = _strip_comment(lines[j])
+        if raw.strip():
+            return len(raw) - len(raw.lstrip(" ")), raw.strip()
+    return None
+
+
 def _parse_simple_yaml(text: str) -> dict[str, Any]:
-    """Tiny YAML subset parser — supports nested mappings + simple lists."""
+    """Tiny YAML subset parser for the watchdog template.
+
+    Supports nested mappings, inline lists, scalar lists, and lists of
+    mappings. This keeps watchdog config stdlib-only when PyYAML is absent.
+    """
+    lines = text.splitlines()
     root: dict[str, Any] = {}
     stack: list[tuple[int, Any]] = [(-1, root)]
-    pending_list_item: dict[str, Any] | None = None
-    for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
+
+    for i, original in enumerate(lines):
+        raw = _strip_comment(original)
+        if not raw.strip():
             continue
         indent = len(raw) - len(raw.lstrip(" "))
         line = raw.strip()
         while stack and indent <= stack[-1][0]:
-            popped = stack.pop()
-            if isinstance(popped[1], dict) and popped[1] is pending_list_item:
-                pending_list_item = None
+            stack.pop()
         parent = stack[-1][1]
+
         if line.startswith("- "):
-            body = line[2:].strip()
             if not isinstance(parent, list):
                 continue
-            if ":" in body:
-                key, _, value = body.partition(":")
-                item: dict[str, Any] = {key.strip(): _coerce_scalar(value) if value.strip() else {}}
-                parent.append(item)
-                pending_list_item = item
-                stack.append((indent, item))
-                if not value.strip():
-                    nested = item[key.strip()] = {}
-                    stack.append((indent + 2, nested))
-            else:
+            body = line[2:].strip()
+            if ":" not in body:
                 parent.append(_coerce_scalar(body))
+                continue
+            key, _, value = body.partition(":")
+            key = key.strip()
+            value = value.strip()
+            item: dict[str, Any] = {}
+            parent.append(item)
+            stack.append((indent, item))
+            if value:
+                item[key] = _coerce_scalar(value)
+            else:
+                next_line = _next_content(lines, i + 1)
+                child: list[Any] | dict[str, Any]
+                child = [] if next_line and next_line[1].startswith("- ") else {}
+                item[key] = child
+                stack.append((indent + 2, child))
             continue
-        if ":" not in line:
+
+        if ":" not in line or not isinstance(parent, dict):
             continue
         key, _, value = line.partition(":")
         key = key.strip()
         value = value.strip()
-        if not isinstance(parent, dict):
-            continue
-        if value == "":
-            # Could be a mapping or a list — wait for first child to decide.
-            child: list | dict = {}
-            parent[key] = child
-            stack.append((indent, child))
-            # Peek next non-blank line to detect list-of-mappings.
-        else:
+        if value:
             parent[key] = _coerce_scalar(value)
+            continue
+        next_line = _next_content(lines, i + 1)
+        child = [] if next_line and next_line[1].startswith("- ") else {}
+        parent[key] = child
+        stack.append((indent, child))
 
-    # Convert empty dicts that were filled with `- ` items by post-processing
-    # not needed since the parser pushes lists at first `- `. Walk and replace
-    # any dict that is empty but has a sibling that started with `- ` — too
-    # fiddly; instead, do a second pass turning empty dicts whose key sat over
-    # an indented `- ` block into lists. The fallback parser is best-effort —
-    # production should rely on PyYAML.
     return root
 
 

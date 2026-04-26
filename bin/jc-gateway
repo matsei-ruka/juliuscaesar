@@ -20,39 +20,19 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from gateway import queue  # type: ignore  # noqa: E402
-from gateway.config import config_path, load_config  # type: ignore  # noqa: E402
+from gateway.config import ConfigError, config_path, load_config, validate_config  # type: ignore  # noqa: E402
 from gateway.runtime import GatewayRuntime  # type: ignore  # noqa: E402
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
 
 RUNNING = True
 
 
 def resolve_instance_dir(arg: str | None) -> Path:
-    if arg:
-        p = Path(arg).expanduser().resolve()
-        if not p.exists():
-            raise SystemExit(f"--instance-dir does not exist: {p}")
-        return p
-    env = os.environ.get("JC_INSTANCE_DIR")
-    if env:
-        p = Path(env).expanduser().resolve()
-        if not p.exists():
-            raise SystemExit(f"JC_INSTANCE_DIR does not exist: {p}")
-        return p
-    cur = Path.cwd().resolve()
-    while True:
-        if (cur / ".jc").exists():
-            return cur
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    cwd = Path.cwd().resolve()
-    if (cwd / "memory").exists():
-        return cwd
-    raise SystemExit(
-        "Could not resolve instance dir. Use --instance-dir, set JC_INSTANCE_DIR, "
-        "or run from a directory containing memory/ or a .jc marker."
-    )
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("memory",))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def print_json(data: object) -> None:
@@ -179,6 +159,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
+    validate_config(instance)
     conn = queue.connect(instance)
     conn.close()
     queue.queue_dir(instance).mkdir(parents=True, exist_ok=True)
@@ -218,7 +199,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             runtime.dispatch_once()
             time.sleep(args.interval_seconds)
     finally:
-        runtime.stop_heartbeat()
+        runtime.close()
         pid_path(instance).unlink(missing_ok=True)
         log_line(instance, "gateway daemon stopped")
     return 0
@@ -226,6 +207,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_start(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
+    validate_config(instance)
     conn = queue.connect(instance)
     conn.close()
     existing = read_pid(instance)
@@ -548,6 +530,17 @@ def cmd_reload(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate_config(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    try:
+        validate_config(instance)
+    except ConfigError as exc:
+        print(f"gateway config invalid: {exc}", file=sys.stderr)
+        return 1
+    print(f"gateway config OK: {config_path(instance)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="jc-gateway")
     p.add_argument("--instance-dir")
@@ -635,6 +628,9 @@ def build_parser() -> argparse.ArgumentParser:
     pcfg = sub.add_parser("config", help="Show resolved gateway config")
     pcfg.add_argument("--json", action="store_true")
     pcfg.set_defaults(func=cmd_config)
+
+    pvc = sub.add_parser("validate-config", help="Validate ops/gateway.yaml")
+    pvc.set_defaults(func=cmd_validate_config)
 
     pw = sub.add_parser("work-once", help="Claim and process one event with a test worker")
     pw.add_argument("--worker-id", default=f"worker-{os.getpid()}")

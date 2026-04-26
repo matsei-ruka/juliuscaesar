@@ -80,10 +80,10 @@ class VoiceChannel:
         if self.asr_provider == "dashscope":
             from importlib import import_module
 
-            mod = import_module("voice.dashscope_asr") if (VOICE_ROOT / "dashscope_asr.py").exists() else None
-            if mod is None or not hasattr(mod, "transcribe"):
+            mod = import_module("voice.asr")
+            if not hasattr(mod, "transcribe"):
                 return ""
-            return str(mod.transcribe(str(audio_path), instance_dir=str(self.instance_dir)))
+            return str(mod.transcribe(audio_path))
         return ""
 
     def _synthesize(self, text: str, meta: dict[str, Any]) -> str | None:

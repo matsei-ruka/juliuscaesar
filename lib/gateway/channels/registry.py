@@ -57,4 +57,11 @@ def deliver(
         return None
     cfg = config_channels.get(str(channel)) or ChannelConfig()
     instance = factory(instance_dir, cfg, log)
-    return instance.send(response, meta)
+    try:
+        message_id = instance.send(response, meta)
+    except Exception as exc:  # noqa: BLE001
+        log(f"delivery failed source={source} channel={channel} reason={exc}")
+        return None
+    if message_id is None:
+        log(f"delivery failed source={source} channel={channel} reason=send_returned_none")
+    return message_id

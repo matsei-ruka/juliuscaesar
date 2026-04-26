@@ -20,6 +20,7 @@ import errno
 import fcntl
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -70,12 +71,17 @@ def _start_daemon(spec: ChildSpec, instance_dir: Path, log_file: Path) -> tuple[
     if not spec.start:
         return 1, "no start command configured"
     cmd = _expand(spec.start, instance_dir)
+    argv = shlex.split(cmd)
+    if argv and not Path(argv[0]).exists():
+        replacement = shutil.which(Path(argv[0]).name)
+        if replacement:
+            argv[0] = replacement
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open("ab") as handle:
         env = os.environ.copy()
         env.setdefault("JC_INSTANCE_DIR", str(instance_dir))
         proc = subprocess.run(
-            shlex.split(cmd),
+            argv,
             cwd=str(instance_dir),
             stdout=handle,
             stderr=subprocess.STDOUT,

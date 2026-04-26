@@ -209,6 +209,24 @@ else
     warn ".jc marker missing — auto-discovery may fail from other dirs"
 fi
 
+if [[ -f "$INSTANCE_DIR/ops/gateway.yaml" ]]; then
+    GATEWAY_CONFIG_CHECK=$(PYTHONPATH="$FRAMEWORK_ROOT/lib${PYTHONPATH:+:$PYTHONPATH}" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+import sys
+from pathlib import Path
+from gateway.config import validate_config
+
+validate_config(Path(sys.argv[1]))
+PY
+)
+    if [[ $? -eq 0 ]]; then
+        ok "gateway config valid"
+    else
+        fail "gateway config invalid: $GATEWAY_CONFIG_CHECK"
+    fi
+else
+    warn "ops/gateway.yaml missing — run: jc gateway init"
+fi
+
 # Directory structure
 for d in memory memory/L1 memory/L2 heartbeat voice; do
     if [[ -d "$INSTANCE_DIR/$d" ]]; then

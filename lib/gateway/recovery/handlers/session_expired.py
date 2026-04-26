@@ -92,15 +92,28 @@ class SessionExpiredHandler:
         from ...config import env_value
 
         meta = _decode_meta(event)
-        if meta.get("chat_type") and meta["chat_type"] != "private":
+        chat_type = meta.get("chat_type")
+        if chat_type and chat_type != "private":
             return None
         operator = env_value(ctx.instance_dir, "TELEGRAM_CHAT_ID")
+        meta_chat_id = meta.get("chat_id")
         if not operator:
+            if chat_type == "private":
+                return str(meta_chat_id or event.conversation_id or event.user_id or "")
             return None
-        if event.user_id and str(event.user_id) != str(operator):
-            if meta.get("chat_id") and str(meta["chat_id"]) != str(operator):
+        if meta_chat_id is not None:
+            if str(meta_chat_id) != str(operator):
                 return None
-        return str(operator)
+            if event.user_id and str(event.user_id) != str(operator):
+                return None
+            return str(meta_chat_id)
+        if chat_type == "private":
+            # Legacy queued Telegram events did not always include meta.chat_id.
+            # A private DM can still target the configured operator chat.
+            return str(operator)
+        if event.user_id and str(event.user_id) == str(operator):
+            return str(operator)
+        return None
 
     def _compose_message(self, login_url: str | None) -> str:
         if login_url:

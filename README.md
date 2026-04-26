@@ -35,7 +35,7 @@ Full walkthrough: [QUICKSTART.md](./QUICKSTART.md).
 ## Components (shipped)
 
 - `jc memory`     — llm-wiki + SQLite FTS5 knowledge base with L1/L2 cache split (Karpathy's LLM Wiki pattern)
-- `jc heartbeat`  — YAML-driven task runner, cron-triggered, per-task tool+model routing (claude, gemini, opencode, minimax), with pre_fetch → hash-delta → synthesis pipeline and MCP-independent Telegram delivery
+- `jc heartbeat`  — YAML-driven task runner, cron-triggered, per-task tool+model routing (claude, gemini, opencode, codex, aider), with pre_fetch → hash-delta → synthesis pipeline and MCP-independent Telegram delivery
 - `jc voice`      — TTS + ASR + enrollment via DashScope Qwen (Singapore/intl endpoint)
 - `jc watchdog`   — supervisor for the gateway daemon by default, with a legacy live-Claude fallback mode for old Telegram-plugin deployments
 - `jc gateway`    — unified runtime: local SQLite queue, Telegram long polling (MarkdownV2 outbound — bold/italic/code/links/strike render natively, gateway escapes reserved chars), Slack Socket Mode, brain dispatch through `claude`/`codex`/`opencode`/`gemini`, retries, delivery, logs, events, and restart/status commands
@@ -47,7 +47,7 @@ Full walkthrough: [QUICKSTART.md](./QUICKSTART.md).
 ## Components (planned — 0.2.0+)
 
 - `jc skill`      — declarative SKILL.md manifests, install/uninstall/list
-- More channels: Discord and additional webhook-style integrations
+- More channels: additional webhook-style integrations
 - CI (lint, shellcheck, pytest)
 - Docs site
 
@@ -62,6 +62,18 @@ See [ROADMAP.md](./ROADMAP.md).
 - **Gateway config lives in `<instance>/ops/gateway.yaml`**, with secrets referenced by env-var name and stored in `.env`.
 - **Adapter contract**: framework adapters are stdin → stdout shell scripts. Model passed as `$1`. `tasks.yaml` points at them by name.
 - **Framework has no knowledge of specific instances** — everything flows through `instance_dir`.
+
+## Development
+
+```bash
+python3 -m pip install -e '.[dev,voice,slack,discord]'
+pytest
+ruff check .
+shellcheck bin/* install.sh lib/heartbeat/adapters/*.sh
+```
+
+`pytest` is the canonical test runner because it discovers the nested gateway,
+recovery, and watchdog suites.
 
 ## Architecture
 

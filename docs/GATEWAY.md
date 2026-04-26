@@ -68,8 +68,9 @@ jc gateway metrics --hours 24
    session id, returns the response.
 6. Sticky table updates so the next message in this conversation reuses the
    same brain until `sticky_brain_idle_timeout_seconds` elapses.
-7. `lib/gateway/channels/registry.deliver()` sends the response back through
-   the originating transport.
+7. `GatewayRuntime` delivers through a live channel instance when one is
+   available. Discord requires the live `discord.py` client; stateless
+   `registry.deliver()` remains a fallback for transports such as Telegram.
 
 ## Reliability
 

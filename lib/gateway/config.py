@@ -12,6 +12,7 @@ from typing import Any
 
 SUPPORTED_BRAINS = ("claude", "codex", "opencode", "gemini", "aider")
 SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron")
+SUPPORTED_TRIAGE_BACKENDS = ("none", "always", "ollama", "openrouter", "claude-channel")
 REJECTED_CHANNELS = {"web": "web channel removed in 0.3.0; use `jc gateway enqueue` for local testing"}
 
 
@@ -135,6 +136,9 @@ class ConfigError(ValueError):
     """Raised on configuration errors that the user must fix."""
 
 
+_ENV_CACHE: dict[Path, tuple[float | None, dict[str, str]]] = {}
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -155,8 +159,37 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def clear_env_cache() -> None:
+    _ENV_CACHE.clear()
+
+
+def env_values(instance_dir: Path) -> dict[str, str]:
+    path = instance_dir / ".env"
+    try:
+        mtime: float | None = path.stat().st_mtime
+    except FileNotFoundError:
+        mtime = None
+    cached = _ENV_CACHE.get(path)
+    if cached is not None and cached[0] == mtime:
+        return dict(cached[1])
+    values = parse_env_file(path)
+    _ENV_CACHE[path] = (mtime, values)
+    return dict(values)
+
+
 def env_value(instance_dir: Path, name: str) -> str:
-    return os.environ.get(name) or parse_env_file(instance_dir / ".env").get(name, "")
+    return os.environ.get(name) or env_values(instance_dir).get(name, "")
+
+
+def redact_value(name: str, value: str) -> str:
+    if not value:
+        return ""
+    marker = name.upper()
+    if any(part in marker for part in ("TOKEN", "SECRET", "KEY", "PASSWORD")):
+        return "***"
+    if len(value) > 24 and any(part in marker for part in ("AUTH", "COOKIE")):
+        return value[:4] + "..." + value[-4:]
+    return value
 
 
 def _coerce_scalar(value: str) -> Any:
@@ -222,6 +255,241 @@ def _load_raw(path: Path) -> dict[str, Any]:
         return _parse_simple_yaml(text)
 
 
+def _is_int_like(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_number_like(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_positive_int(errors: list[str], path: str, value: Any) -> None:
+    if not _is_int_like(value) or int(value) <= 0:
+        errors.append(f"{path}: must be a positive integer")
+
+
+def _validate_nonnegative_int(errors: list[str], path: str, value: Any) -> None:
+    if not _is_int_like(value) or int(value) < 0:
+        errors.append(f"{path}: must be a non-negative integer")
+
+
+def _validate_brain_spec(errors: list[str], path: str, value: Any) -> None:
+    if not isinstance(value, str) or not value:
+        errors.append(f"{path}: must be a brain name")
+        return
+    brain = value.partition(":")[0]
+    if brain not in SUPPORTED_BRAINS:
+        errors.append(f"{path}: unsupported brain {brain!r}")
+
+
+def _validate_raw_config(data: dict[str, Any]) -> None:
+    errors: list[str] = []
+    allowed_top = {
+        "default_brain",
+        "default_model",
+        "gateway",
+        "triage",
+        "triage_confidence_threshold",
+        "default_fallback_brain",
+        "sticky_brain_idle_timeout_seconds",
+        "triage_routing",
+        "channels",
+        "brains",
+        "reliability",
+        "max_queue_depth",
+        "event_retry_backoff_seconds",
+        "ollama_model",
+        "ollama_host",
+        "ollama_timeout_seconds",
+        "openrouter_model",
+        "openrouter_api_key_env",
+        "openrouter_timeout_seconds",
+        "claude_triage_screen",
+        "claude_triage_model",
+        "claude_triage_port",
+    }
+    for key in data:
+        if key not in allowed_top:
+            errors.append(f"{key}: unknown top-level key")
+
+    if data.get("default_brain") is not None:
+        _validate_brain_spec(errors, "default_brain", data["default_brain"])
+    if data.get("default_fallback_brain") is not None:
+        _validate_brain_spec(errors, "default_fallback_brain", data["default_fallback_brain"])
+
+    gateway = data.get("gateway")
+    if gateway is not None:
+        if not isinstance(gateway, dict):
+            errors.append("gateway: must be a mapping")
+        else:
+            for key in gateway:
+                if key not in {"poll_interval_seconds", "lease_seconds", "max_retries", "adapter_timeout_seconds"}:
+                    errors.append(f"gateway.{key}: unknown field")
+            if gateway.get("poll_interval_seconds") is not None and (
+                not _is_number_like(gateway["poll_interval_seconds"])
+                or float(gateway["poll_interval_seconds"]) <= 0
+            ):
+                errors.append("gateway.poll_interval_seconds: must be a positive number")
+            for key in ("lease_seconds", "adapter_timeout_seconds"):
+                if gateway.get(key) is not None:
+                    _validate_positive_int(errors, f"gateway.{key}", gateway[key])
+            if gateway.get("max_retries") is not None:
+                _validate_nonnegative_int(errors, "gateway.max_retries", gateway["max_retries"])
+
+    triage_raw = data.get("triage")
+    if isinstance(triage_raw, dict):
+        backend = str(triage_raw.get("backend") or triage_raw.get("mode") or "none")
+        for key in triage_raw:
+            if key not in {
+                "backend",
+                "mode",
+                "routing",
+                "triage_confidence_threshold",
+                "default_fallback_brain",
+                "triage_cache_ttl_seconds",
+                "sticky_brain_idle_timeout_seconds",
+                "ollama_model",
+                "ollama_host",
+                "ollama_timeout_seconds",
+                "openrouter_model",
+                "openrouter_api_key_env",
+                "openrouter_timeout_seconds",
+                "claude_triage_screen",
+                "claude_triage_model",
+                "claude_triage_port",
+            }:
+                errors.append(f"triage.{key}: unknown field")
+    elif triage_raw is None:
+        backend = "none"
+    else:
+        backend = str(triage_raw)
+    if backend not in SUPPORTED_TRIAGE_BACKENDS:
+        errors.append(f"triage.backend: unsupported backend {backend!r}")
+    if data.get("triage_confidence_threshold") is not None:
+        threshold = data["triage_confidence_threshold"]
+        if not _is_number_like(threshold) or not 0 <= float(threshold) <= 1:
+            errors.append("triage_confidence_threshold: must be between 0 and 1")
+    if data.get("sticky_brain_idle_timeout_seconds") is not None:
+        _validate_nonnegative_int(
+            errors,
+            "sticky_brain_idle_timeout_seconds",
+            data["sticky_brain_idle_timeout_seconds"],
+        )
+    if isinstance(data.get("triage_routing"), dict):
+        for key, value in data["triage_routing"].items():
+            _validate_brain_spec(errors, f"triage_routing.{key}", value)
+
+    channels_raw = data.get("channels")
+    if channels_raw is not None:
+        if not isinstance(channels_raw, dict):
+            errors.append("channels: must be a mapping")
+        else:
+            channel_fields = {
+                "enabled",
+                "token_env",
+                "app_token_env",
+                "bot_token_env",
+                "chat_ids",
+                "brain",
+                "model",
+                "timeout_seconds",
+                "watch_dir",
+                "poll_interval_seconds",
+                "paired_with",
+                "asr_provider",
+                "tts_provider",
+            }
+            for raw_key, raw_value in channels_raw.items():
+                normalized = _normalize_channel_key(str(raw_key))
+                if normalized in REJECTED_CHANNELS:
+                    errors.append(f"channels.{raw_key}: {REJECTED_CHANNELS[normalized]}")
+                    continue
+                if normalized not in SUPPORTED_CHANNELS:
+                    errors.append(f"channels.{raw_key}: unknown channel")
+                    continue
+                if not isinstance(raw_value, dict):
+                    errors.append(f"channels.{raw_key}: must be a mapping")
+                    continue
+                for key in raw_value:
+                    if key not in channel_fields:
+                        errors.append(f"channels.{raw_key}.{key}: unknown field")
+                if raw_value.get("enabled") is not None and not isinstance(raw_value["enabled"], bool):
+                    errors.append(f"channels.{raw_key}.enabled: must be boolean")
+                if raw_value.get("brain") is not None:
+                    _validate_brain_spec(errors, f"channels.{raw_key}.brain", raw_value["brain"])
+                for key in ("timeout_seconds", "poll_interval_seconds"):
+                    if raw_value.get(key) is not None:
+                        _validate_positive_int(errors, f"channels.{raw_key}.{key}", raw_value[key])
+                if raw_value.get("chat_ids") is not None and not isinstance(
+                    raw_value["chat_ids"], (str, list, tuple)
+                ):
+                    errors.append(f"channels.{raw_key}.chat_ids: must be a string or list")
+                if raw_value.get("paired_with") is not None:
+                    paired = _normalize_channel_key(str(raw_value["paired_with"]))
+                    if paired not in SUPPORTED_CHANNELS:
+                        errors.append(f"channels.{raw_key}.paired_with: unknown channel {paired!r}")
+
+    brains_raw = data.get("brains")
+    if brains_raw is not None:
+        if not isinstance(brains_raw, dict):
+            errors.append("brains: must be a mapping")
+        else:
+            for name, body in brains_raw.items():
+                if str(name) not in SUPPORTED_BRAINS:
+                    errors.append(f"brains.{name}: unsupported brain")
+                    continue
+                if not isinstance(body, dict):
+                    errors.append(f"brains.{name}: must be a mapping")
+                    continue
+                for key in body:
+                    if key not in {"bin", "sandbox", "yolo", "timeout_seconds", "extra_args"}:
+                        errors.append(f"brains.{name}.{key}: unknown field")
+                if body.get("timeout_seconds") is not None:
+                    _validate_positive_int(errors, f"brains.{name}.timeout_seconds", body["timeout_seconds"])
+                if body.get("extra_args") is not None and not isinstance(body["extra_args"], (list, tuple)):
+                    errors.append(f"brains.{name}.extra_args: must be a list")
+
+    reliability = data.get("reliability")
+    if reliability is not None:
+        if not isinstance(reliability, dict):
+            errors.append("reliability: must be a mapping")
+        else:
+            for key in reliability:
+                if key not in {"max_queue_depth", "log_max_bytes", "log_backups", "backoff_seconds"}:
+                    errors.append(f"reliability.{key}: unknown field")
+            for key in ("max_queue_depth", "log_max_bytes"):
+                if reliability.get(key) is not None:
+                    _validate_positive_int(errors, f"reliability.{key}", reliability[key])
+            if reliability.get("log_backups") is not None:
+                _validate_nonnegative_int(errors, "reliability.log_backups", reliability["log_backups"])
+            backoff = reliability.get("backoff_seconds")
+            if backoff is not None:
+                if not isinstance(backoff, (list, tuple)) or not backoff:
+                    errors.append("reliability.backoff_seconds: must be a non-empty list")
+                else:
+                    for idx, item in enumerate(backoff):
+                        _validate_positive_int(errors, f"reliability.backoff_seconds[{idx}]", item)
+
+    if errors:
+        raise ConfigError("; ".join(errors))
+
+
+def validate_config(instance_dir: Path) -> GatewayConfig:
+    return load_config(instance_dir)
+
+
 def _tuple_str(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -237,7 +505,8 @@ def _normalize_channel_key(name: str) -> str:
 
 def _load_channel(name: str, raw: dict[str, Any], defaults: ChannelConfig) -> ChannelConfig:
     brain_value = raw.get("brain")
-    brain = str(brain_value) if brain_value in SUPPORTED_BRAINS else None
+    brain_name = str(brain_value).partition(":")[0] if brain_value is not None else ""
+    brain = brain_name if brain_name in SUPPORTED_BRAINS else None
 
     def _opt_str(key: str, default: str | None) -> str | None:
         v = raw.get(key, default)
@@ -342,6 +611,7 @@ def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
 
 def load_config(instance_dir: Path) -> GatewayConfig:
     data = _load_raw(config_path(instance_dir))
+    _validate_raw_config(data)
     gateway = data.get("gateway", {}) if isinstance(data.get("gateway"), dict) else {}
     channels_raw = data.get("channels", {}) if isinstance(data.get("channels"), dict) else {}
 
@@ -360,18 +630,6 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         if not isinstance(raw, dict):
             raw = {}
         channels[name] = _load_channel(name, raw, defaults)
-
-    # Reject removed channel keys early with a helpful message.
-    for raw_key in channels_raw.keys():
-        normalized = _normalize_channel_key(str(raw_key))
-        if normalized in REJECTED_CHANNELS:
-            raise ConfigError(
-                f"channels.{raw_key}: {REJECTED_CHANNELS[normalized]}"
-            )
-        if normalized not in SUPPORTED_CHANNELS and normalized not in {"web"}:
-            # Unknown channels are tolerated (forward-compat) but logged via raise.
-            # We accept them silently for now to avoid breaking older configs.
-            pass
 
     return GatewayConfig(
         default_brain=default_brain,

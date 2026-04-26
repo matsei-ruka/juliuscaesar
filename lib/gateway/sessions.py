@@ -12,12 +12,9 @@ queue (`<instance>/state/gateway/queue.db`).
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
-
-from . import queue
 
 
 @dataclass(frozen=True)
@@ -43,9 +40,35 @@ class StickyBrain:
     updated_at: str
 
 
-def init_sticky_table(conn: sqlite3.Connection) -> None:
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def add_seconds(ts: str, seconds: int) -> str:
+    if ts.endswith("Z"):
+        base = datetime.fromisoformat(ts[:-1] + "+00:00")
+    else:
+        base = datetime.fromisoformat(ts)
+    return (base + timedelta(seconds=seconds)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            brain TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(channel, conversation_id, brain)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_updated
+        ON sessions(updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS sticky_brain (
             channel TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
@@ -94,7 +117,7 @@ def upsert_session(
     brain: str,
     session_id: str,
 ) -> Session:
-    ts = queue.now_iso()
+    ts = now_iso()
     conn.execute(
         """
         INSERT INTO sessions(channel, conversation_id, brain, session_id, created_at, updated_at)
@@ -119,8 +142,8 @@ def get_active_sticky(
     conversation_id: str,
     now: str | None = None,
 ) -> StickyBrain | None:
-    init_sticky_table(conn)
-    now = now or queue.now_iso()
+    init_db(conn)
+    now = now or now_iso()
     row = conn.execute(
         """
         SELECT channel, conversation_id, brain, sticky_until, updated_at
@@ -142,9 +165,9 @@ def record_response(
     brain: str,
     sticky_idle_seconds: int,
 ) -> None:
-    init_sticky_table(conn)
-    ts = queue.now_iso()
-    sticky_until = queue.add_seconds(ts, sticky_idle_seconds)
+    init_db(conn)
+    ts = now_iso()
+    sticky_until = add_seconds(ts, sticky_idle_seconds)
     conn.execute(
         """
         INSERT INTO sticky_brain(channel, conversation_id, brain, sticky_until, updated_at)
@@ -160,8 +183,8 @@ def record_response(
 
 
 def purge_idle(conn: sqlite3.Connection, *, older_than_seconds: int = 60 * 60 * 24 * 7) -> int:
-    init_sticky_table(conn)
-    cutoff = queue.add_seconds(queue.now_iso(), -older_than_seconds)
+    init_db(conn)
+    cutoff = add_seconds(now_iso(), -older_than_seconds)
     cur = conn.execute(
         "DELETE FROM sticky_brain WHERE sticky_until < ?",
         (cutoff,),

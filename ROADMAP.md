@@ -39,7 +39,7 @@ Extract the self-contained pieces from the original reference instance into a wo
 - [x] Triage layer with ollama / openrouter / claude-channel backends + sticky brain
 - [x] `jc migrate-to-0.3` migrator + structured JSON logs + backpressure + log rotation
 - [x] `docs/GATEWAY.md`, migration guide, ADR, brain capability matrix
-- [ ] Config schema validator
+- [x] Config schema validator
 - [ ] Documentation site
 - [ ] Consolidation / "auto-dream" for L1 HOT.md pruning
 - [ ] Second production instance

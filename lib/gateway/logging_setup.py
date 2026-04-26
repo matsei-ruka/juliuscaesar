@@ -58,6 +58,7 @@ def configure_logger(
     for handler in list(logger.handlers):
         if getattr(handler, "_jc_gateway_handler", False):
             logger.removeHandler(handler)
+            handler.close()
     handler = logging.handlers.RotatingFileHandler(
         log_path,
         maxBytes=max_bytes,

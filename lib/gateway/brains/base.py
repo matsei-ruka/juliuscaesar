@@ -120,6 +120,8 @@ class Brain:
     # --- subclass hooks ----------------------------------------------------
 
     def adapter_path(self) -> Path:
+        if self.override.bin:
+            return Path(self.override.bin).expanduser()
         return ADAPTERS_DIR / f"{self.name}.sh"
 
     def prompt_for_event(self, event: Event) -> str:
@@ -240,8 +242,9 @@ class Brain:
             stderr_handle = stderr_path.open("wb")
             try:
                 try:
+                    cmd = [str(self.adapter_path()), model or "", *self.override.extra_args]
                     proc = subprocess.Popen(
-                        [str(self.adapter_path()), model or ""],
+                        cmd,
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         stderr=stderr_handle,
