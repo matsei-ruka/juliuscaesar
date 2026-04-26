@@ -574,7 +574,15 @@ class TelegramChannel:
                     if self.allowed and chat_id not in self.allowed:
                         self.log(f"telegram ignored disallowed chat_id={chat_id}")
                         continue
-                    if not self._should_process_message(message):
+                    # Run the routing decision first — it populates the
+                    # member-count cache that _record_chat reads from.
+                    should_process = self._should_process_message(message)
+                    # Observability: record every inbound chat from an allowed
+                    # source, even when we won't dispatch the message. Without
+                    # this, groups Rachel is in but isn't @-mentioned in stay
+                    # invisible in CHATS.md / queue.db.
+                    self._record_chat(chat, message)
+                    if not should_process:
                         self.log(
                             f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
                         )
@@ -587,7 +595,6 @@ class TelegramChannel:
                         continue
                     update_id = update.get("update_id")
                     self._log_forward(message, update_id)
-                    self._record_chat(chat, message)
                     text = message.get("text") or message.get("caption") or ""
                     voice = message.get("voice") if isinstance(message.get("voice"), dict) else None
                     audio = message.get("audio") if isinstance(message.get("audio"), dict) else None
