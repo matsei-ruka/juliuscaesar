@@ -70,6 +70,12 @@ def _transcribe_audio(audio_path: Path) -> str:
 class TelegramChannel:
     name = "telegram"
 
+    # Cache TTL for `getChatMemberCount` results. Membership changes are rare
+    # (humans joining/leaving a group), so 5 minutes amortizes the call across
+    # bursts of messages without going stale long enough to matter. A larger
+    # TTL is tempting but means a third joiner gets bot-replied for longer.
+    _MEMBER_COUNT_TTL_SECONDS = 300.0
+
     def __init__(self, instance_dir: Path, cfg: ChannelConfig, log: LogFn):
         self.instance_dir = instance_dir
         self.cfg = cfg
@@ -79,6 +85,7 @@ class TelegramChannel:
         self.allowed = set(cfg.chat_ids)
         self.bot_username: str | None = None
         self.bot_user_id: int | None = None
+        self._member_count_cache: dict[str, tuple[int, float]] = {}
 
     def _resolve_bot_username(self) -> None:
         """Populate `bot_username` and `bot_user_id` via `getMe`. Best-effort."""
@@ -114,6 +121,22 @@ class TelegramChannel:
             return True
         if chat_type not in ("group", "supergroup"):
             return False  # unknown → fail closed
+        # Reply-to-bot is unambiguous and HTTP-free: short-circuit before
+        # the username check so we don't drop a legitimate reply just
+        # because `getMe` hasn't resolved yet.
+        reply_to = message.get("reply_to_message") or {}
+        reply_from = reply_to.get("from") or {}
+        if self.bot_user_id and reply_from.get("id") == self.bot_user_id:
+            return True
+        # 1:1 detection — if the only members are Rachel + one human, every
+        # message is implicitly addressed to her. The check is HTTP-cached
+        # for 5 min, so the per-message cost is one dict lookup after the
+        # first call per chat.
+        chat_id = str(chat.get("id", ""))
+        if chat_id:
+            member_count = self._get_chat_member_count(chat_id)
+            if member_count is not None and member_count <= 2:
+                return True
         if not self.bot_username:
             return False  # can't verify → fail closed for groups
         text = message.get("text") or message.get("caption") or ""
@@ -133,6 +156,41 @@ class TelegramChannel:
         if f"@{self.bot_username}" in text.lower():
             return True
         return False
+
+    def _get_chat_member_count(self, chat_id: str) -> int | None:
+        """Return cached `getChatMemberCount` for `chat_id`, or fetch + cache.
+
+        Best-effort: returns `None` on HTTP errors / non-OK responses so
+        callers can fall through to the @-mention check. First successful
+        fetch logs once per cache fill so 1:1 detection is auditable.
+        """
+        if not self.token:
+            return None
+        now = time.monotonic()
+        cached = self._member_count_cache.get(chat_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{self.token}/getChatMemberCount?"
+                + urllib.parse.urlencode({"chat_id": chat_id}),
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram getChatMemberCount failed chat_id={chat_id}: {exc}")
+            return None
+        if not data.get("ok"):
+            self.log(f"telegram getChatMemberCount not-ok chat_id={chat_id}: {data}")
+            return None
+        count = data.get("result")
+        if not isinstance(count, int):
+            return None
+        self._member_count_cache[chat_id] = (count, now + self._MEMBER_COUNT_TTL_SECONDS)
+        if count <= 2:
+            self.log(
+                f"telegram group is 1:1 with bot count={count} chat_id={chat_id} — process all"
+            )
+        return count
 
     def ready(self) -> bool:
         return bool(self.token)
