@@ -11,8 +11,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError
 
 from ..config import ChannelConfig, env_value
+from ..format import to_markdown_v2
 from ._http import http_json
 from .base import EnqueueFn, LogFn
 
@@ -307,18 +309,51 @@ class TelegramChannel:
         )
         if not chat_id:
             return None
+        original = response[:4096]
+        escaped = to_markdown_v2(original)
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": response[:4096],
+            "text": escaped,
             "disable_web_page_preview": True,
+            "parse_mode": "MarkdownV2",
         }
         if meta.get("message_thread_id"):
             payload["message_thread_id"] = meta["message_thread_id"]
-        data = http_json(
-            f"https://api.telegram.org/bot{self.token}/sendMessage",
-            data=payload,
-            timeout=15,
-        )
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        try:
+            data = http_json(url, data=payload, timeout=15)
+            parse_error = (
+                not data.get("ok")
+                and "parse" in str(data.get("description") or "").lower()
+            )
+            error_desc = str(data.get("description") or "")
+        except HTTPError as exc:
+            # Telegram returns 400 with a JSON body describing the parse
+            # failure. urllib.urlopen raises HTTPError before we get to read.
+            try:
+                body_text = exc.read().decode("utf-8", errors="replace")
+                body = json.loads(body_text) if body_text else {}
+            except (json.JSONDecodeError, ValueError):
+                body = {}
+            error_desc = str(body.get("description") or exc.reason or "")
+            parse_error = exc.code == 400 and (
+                "parse" in error_desc.lower() or "entit" in error_desc.lower()
+            )
+            data = body if isinstance(body, dict) else {}
+            if not parse_error:
+                raise RuntimeError(f"telegram send failed: HTTP {exc.code} {error_desc}") from exc
+        if parse_error:
+            self.log(
+                f"telegram.send.parse_error retrying without parse_mode err={error_desc!r}"
+            )
+            fallback: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": original,
+                "disable_web_page_preview": True,
+            }
+            if meta.get("message_thread_id"):
+                fallback["message_thread_id"] = meta["message_thread_id"]
+            data = http_json(url, data=fallback, timeout=15)
         if not data.get("ok"):
             raise RuntimeError(f"telegram send failed: {data}")
         result = data.get("result") or {}
