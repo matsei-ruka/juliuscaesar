@@ -319,6 +319,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "claude_triage_screen",
         "claude_triage_model",
         "claude_triage_port",
+        "company",
     }
     for key in data:
         if key not in allowed_top:
@@ -481,6 +482,35 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 else:
                     for idx, item in enumerate(backoff):
                         _validate_positive_int(errors, f"reliability.backoff_seconds[{idx}]", item)
+
+    company_raw = data.get("company")
+    if company_raw is not None:
+        if not isinstance(company_raw, dict):
+            errors.append("company: must be a mapping")
+        else:
+            allowed_company = {
+                "enabled",
+                "redact_conversations",
+                "exclude_channels",
+                "exclude_users",
+                "conversation_max_chars",
+                "outbox_max_mb",
+                "outbox_max_age_hours",
+            }
+            for key in company_raw:
+                if key not in allowed_company:
+                    errors.append(f"company.{key}: unknown field")
+            for key in ("enabled", "redact_conversations"):
+                value = company_raw.get(key)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"company.{key}: must be boolean")
+            for key in ("conversation_max_chars", "outbox_max_mb", "outbox_max_age_hours"):
+                if company_raw.get(key) is not None:
+                    _validate_positive_int(errors, f"company.{key}", company_raw[key])
+            for key in ("exclude_channels", "exclude_users"):
+                value = company_raw.get(key)
+                if value is not None and not isinstance(value, (list, tuple)):
+                    errors.append(f"company.{key}: must be a list")
 
     if errors:
         raise ConfigError("; ".join(errors))
