@@ -593,7 +593,9 @@ class Reporter:
             unset_keys=("COMPANY_ENROLLMENT_TOKEN",),
         )
         self.cfg = conf_module.load(self.instance_dir)
+        old_client = self.client
         self.client = CompanyClient(self.cfg)
+        old_client.close()
         self.log(
             f"company registered agent_id={result.get('agent_id', '?')}",
             kind="company_registered",
