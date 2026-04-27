@@ -163,18 +163,34 @@ class Outbox:
 
             return dropped_events, dropped_bytes
 
-    def drain(self, send: Callable[[list[dict[str, Any]]], None], *, batch: int = BATCH_MAX_EVENTS) -> int:
+    def drain(
+        self,
+        send: Callable[[list[dict[str, Any]]], None],
+        *,
+        batch: int = BATCH_MAX_EVENTS,
+        since_mtime: float | None = None,
+    ) -> int:
         """Replay buffered events through ``send``.
 
         ``send`` receives each batch as a list of ``{event_type, payload, ...}``
-        dicts. On any exception, the remaining files are left intact for the
-        next attempt (file-level granularity — partial files are not rewritten).
+        dicts. Each chunk is sent independently — if chunk N succeeds and
+        chunk N+1 raises, the file is rewritten with only the unsent tail so
+        the successful chunks are not retransmitted on the next tick.
+
+        ``since_mtime``: when set, files whose mtime is strictly older than
+        the cutoff are skipped (left intact). Used by ``cmd_replay --since``.
 
         Returns the number of events successfully replayed.
         """
         replayed = 0
         with self._lock:
             for path in self.files():
+                if since_mtime is not None:
+                    try:
+                        if path.stat().st_mtime < since_mtime:
+                            continue
+                    except OSError:
+                        continue
                 try:
                     lines = path.read_text(encoding="utf-8").splitlines()
                 except OSError:
@@ -193,19 +209,47 @@ class Outbox:
                     except OSError:
                         pass
                     continue
-                # Send in batches.
-                try:
-                    for chunk_start in range(0, len(events), batch):
-                        send(events[chunk_start : chunk_start + batch])
-                except Exception:  # noqa: BLE001
-                    # Stop on first failing file so we retry next tick.
+                # Send chunks independently; stop on first failure and persist
+                # remaining chunks so we don't re-send the accepted ones.
+                sent_count = 0
+                failed = False
+                for chunk_start in range(0, len(events), batch):
+                    chunk = events[chunk_start : chunk_start + batch]
+                    try:
+                        send(chunk)
+                    except Exception:  # noqa: BLE001
+                        failed = True
+                        break
+                    sent_count += len(chunk)
+                replayed += sent_count
+                if failed:
+                    self._rewrite_tail(path, events[sent_count:])
                     return replayed
-                replayed += len(events)
                 try:
                     path.unlink()
                 except OSError:
                     pass
         return replayed
+
+    def _rewrite_tail(self, path: Path, remaining: list[dict[str, Any]]) -> None:
+        """Atomically replace ``path`` with only the unsent ``remaining`` events."""
+        if not remaining:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                for evt in remaining:
+                    fh.write(json.dumps(evt) + "\n")
+            tmp.replace(path)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _count_lines(path: Path) -> int:

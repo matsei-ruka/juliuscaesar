@@ -83,6 +83,41 @@ class OutboxTests(unittest.TestCase):
             # File still present so next tick retries.
             self.assertEqual(len(outbox.files()), 1)
 
+    def test_drain_partial_failure_keeps_only_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outbox = Outbox(Path(tmp), max_mb=10, max_age_hours=24)
+            events = [{"event_type": "x", "payload": {"i": i}} for i in range(1500)]
+            outbox.append(events)
+
+            calls: list[int] = []
+
+            def send(batch):
+                calls.append(len(batch))
+                if len(calls) == 3:
+                    raise RuntimeError("network down")
+
+            replayed = outbox.drain(send, batch=500)
+            self.assertEqual(replayed, 1000)
+            # The file must now hold only the unsent tail (chunk 3 = 500 events).
+            files = outbox.files()
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 500)
+            first = json.loads(lines[0])
+            self.assertEqual(first["payload"]["i"], 1000)
+
+            # Next drain succeeds — no duplicates of the first 1000.
+            calls.clear()
+            sent: list[list[dict]] = []
+
+            def send_ok(batch):
+                sent.append(batch)
+
+            replayed2 = outbox.drain(send_ok, batch=500)
+            self.assertEqual(replayed2, 500)
+            self.assertEqual(outbox.files(), [])
+            self.assertEqual(sent[0][0]["payload"]["i"], 1000)
+
     def test_trim_evicts_old_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             outbox = Outbox(Path(tmp), max_mb=10, max_age_hours=1)
