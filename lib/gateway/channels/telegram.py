@@ -34,6 +34,10 @@ from .telegram_outbound import (
     send_typing as send_typing_action,
     send_voice as send_voice_message,
 )
+from .telegram_commands import (
+    handle_slash_command,
+    parse_slash_command,
+)
 from .telegram_routing import (
     forward_ident,
     should_process_message as should_process_telegram_message,
@@ -639,6 +643,24 @@ class TelegramChannel:
                             meta["file_path"] = str(file_path)
                             if document and document.get("file_name"):
                                 meta["file_name"] = document.get("file_name")
+                        # Check for slash commands (e.g., /help, /models, /compact).
+                        # If it's a command, handle it locally and skip enqueueing.
+                        cmd = parse_slash_command(text)
+                        if cmd is not None:
+                            command, args = cmd
+                            self.log(
+                                f"telegram slash command detected update_id={update_id} "
+                                f"cmd={command}"
+                            )
+                            handle_slash_command(
+                                command=command,
+                                args=args,
+                                instance_dir=self.instance_dir,
+                                token=self.token,
+                                meta=meta,
+                                log=self.log,
+                            )
+                            continue
                         enqueue(
                             source="telegram",
                             source_message_id=str(update.get("update_id")),
