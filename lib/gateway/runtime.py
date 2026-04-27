@@ -21,6 +21,11 @@ from .recovery_integration import RecoveryIntegration
 from .triage import MetricsRecorder, TriageBackend, TriageCache, build_backend
 from .triage.base import TriageResult
 
+try:  # Optional: company client may be unavailable if `requests` isn't on path.
+    import company as _company  # type: ignore
+except Exception:  # noqa: BLE001
+    _company = None  # type: ignore
+
 
 def typing_loop(
     send_typing: Callable[[str, int | None], None],
@@ -114,6 +119,24 @@ class GatewayRuntime:
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
         self._recovery = RecoveryIntegration(self)
+        self._company_reporter = self._init_company_reporter()
+
+    def _init_company_reporter(self) -> Any:
+        """Build a company.Reporter iff company integration is configured.
+
+        Off-by-default: requires ``COMPANY_ENDPOINT`` + (api_key or
+        enrollment_token) and ``company.enabled: true`` in gateway.yaml.
+        """
+        if _company is None:
+            return None
+        try:
+            if not _company.conf.is_enabled(self.instance_dir):  # type: ignore[attr-defined]
+                return None
+            return _company.reporter.Reporter(  # type: ignore[attr-defined]
+                self.instance_dir, log_event=self.log
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
     def _touch_heartbeat(self) -> None:
         """Bump the heartbeat file mtime — supervisor reads this for liveness.
@@ -217,6 +240,11 @@ class GatewayRuntime:
         )
         self.start_heartbeat()
         self._channel_lifecycle.start()
+        if self._company_reporter is not None:
+            try:
+                self._company_reporter.start()
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"company reporter start failed: {exc}", kind="company_error")
 
     def run_forever(self) -> None:
         try:
@@ -232,6 +260,11 @@ class GatewayRuntime:
     def close(self) -> None:
         """Stop background work and close stateful channel/log resources."""
         self.stop_heartbeat()
+        if self._company_reporter is not None:
+            try:
+                self._company_reporter.stop()
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"company reporter stop failed: {exc}", kind="company_error")
         self._channel_lifecycle.close()
         try:
             process_sessions.unregister_session(self.instance_dir, self.session_id)
@@ -492,6 +525,12 @@ class GatewayRuntime:
         if meta.get("was_voice"):
             self._render_voice_reply(response, meta)
         self._deliver_response(channel, response, meta)
+        if self._company_reporter is not None:
+            try:
+                meta_with_brain = {**meta, "brain": brain}
+                self._company_reporter.on_conversation(event, response, meta_with_brain)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"company on_conversation error: {exc}", kind="company_error")
         return response
 
     def _deliver_response(
