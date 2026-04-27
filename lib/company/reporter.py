@@ -227,10 +227,16 @@ class WorkersCursor:
     Persisted at ``state/company/workers_cursor.json``. Stores the last-seen
     ``(id, status)`` per worker so a row that flips ``running -> done`` after
     we've already reported ``running`` produces exactly one ``finished``.
+
+    Cached entries are scoped to ``instance_boot_id`` — after a gateway
+    restart (which resets the workers SQLite autoincrement when the DB is
+    wiped) the cache is discarded so fresh ``id=1`` rows are not silently
+    suppressed by stale entries from a prior boot.
     """
 
-    def __init__(self, instance_dir: Path):
+    def __init__(self, instance_dir: Path, *, boot_id: str):
         self.path = Path(instance_dir) / "state" / "company" / "workers_cursor.json"
+        self.boot_id = boot_id
         self._cache: dict[int, str] = {}
         self._loaded = False
 
@@ -239,8 +245,10 @@ class WorkersCursor:
             return
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                self._cache = {int(k): str(v) for k, v in data.items()}
+            if isinstance(data, dict) and data.get("boot_id") == self.boot_id:
+                cache = data.get("cache")
+                if isinstance(cache, dict):
+                    self._cache = {int(k): str(v) for k, v in cache.items()}
         except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
             self._cache = {}
         self._loaded = True
@@ -249,7 +257,8 @@ class WorkersCursor:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._cache), encoding="utf-8")
+            payload = {"boot_id": self.boot_id, "cache": self._cache}
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
             tmp.replace(self.path)
         except OSError:
             pass
@@ -366,7 +375,7 @@ class Reporter:
             max_mb=self.cfg.outbox_max_mb,
             max_age_hours=self.cfg.outbox_max_age_hours,
         )
-        self.workers_cursor = WorkersCursor(self.instance_dir)
+        self.workers_cursor = WorkersCursor(self.instance_dir, boot_id=self.instance_boot_id)
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None

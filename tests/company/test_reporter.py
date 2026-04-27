@@ -128,7 +128,7 @@ class WorkersCursorTests(unittest.TestCase):
             finally:
                 conn.close()
 
-            cursor = WorkersCursor(instance)
+            cursor = WorkersCursor(instance, boot_id="boot-A")
             first = cursor.diff(instance)
             kinds = [k for k, _ in first]
             self.assertEqual(kinds, ["worker.started"])
@@ -150,6 +150,50 @@ class WorkersCursorTests(unittest.TestCase):
             self.assertEqual(kinds2, ["worker.finished"])
             self.assertEqual(second[0][1]["status"], "done")
 
+    def test_diff_resets_on_boot_id_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+
+            # First boot: a worker exists, cursor records it.
+            conn = workers_db.connect(instance)
+            try:
+                workers_db.create(
+                    conn,
+                    topic="t",
+                    brain="claude",
+                    prompt_path="/tmp/p",
+                    log_path="/tmp/l",
+                )
+            finally:
+                conn.close()
+
+            cursor_a = WorkersCursor(instance, boot_id="boot-A")
+            first = cursor_a.diff(instance)
+            self.assertEqual([k for k, _ in first], ["worker.started"])
+
+            # Wipe the workers DB to simulate a state reset; SQLite autoincrement
+            # means the next create() yields id=1 again, colliding with the
+            # cursor entry that was persisted under boot-A.
+            (instance / "state" / "workers.db").unlink()
+            conn = workers_db.connect(instance)
+            try:
+                wid = workers_db.create(
+                    conn,
+                    topic="t",
+                    brain="claude",
+                    prompt_path="/tmp/p",
+                    log_path="/tmp/l",
+                )
+            finally:
+                conn.close()
+            self.assertEqual(wid, 1)
+
+            # New cursor with a new boot_id must ignore the prior cache and
+            # emit worker.started for the fresh row.
+            cursor_b = WorkersCursor(instance, boot_id="boot-B")
+            second = cursor_b.diff(instance)
+            self.assertEqual([k for k, _ in second], ["worker.started"])
+
     def test_first_sight_terminal_emits_both(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = _make_instance(tmp)
@@ -166,7 +210,7 @@ class WorkersCursorTests(unittest.TestCase):
             finally:
                 conn.close()
 
-            cursor = WorkersCursor(instance)
+            cursor = WorkersCursor(instance, boot_id="boot-A")
             evts = cursor.diff(instance)
             kinds = [k for k, _ in evts]
             self.assertEqual(kinds, ["worker.started", "worker.finished"])
