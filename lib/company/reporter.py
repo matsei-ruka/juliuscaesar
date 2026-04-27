@@ -465,6 +465,10 @@ class Reporter:
         self._pending_lock = threading.Lock()
         self._pending_events: list[dict[str, Any]] = []
         self._eviction_warn_at: float = 0.0
+        self._last_register_attempt: float = 0.0
+
+    # Backoff between registration attempts when the bootstrap call fails.
+    REGISTER_RETRY_SECONDS: float = 60.0
 
     # --- Lifecycle ---------------------------------------------------------
 
@@ -479,6 +483,7 @@ class Reporter:
             return
 
         if not self.cfg.api_key and self.cfg.enrollment_token:
+            self._last_register_attempt = time.monotonic()
             try:
                 self._register()
             except CompanyError as exc:
@@ -604,8 +609,29 @@ class Reporter:
                 return
 
     def _tick(self) -> None:
+        # Try (or retry) registration if we have a token but no key yet.
+        if not self.cfg.api_key and self.cfg.enrollment_token:
+            now = time.monotonic()
+            if now - self._last_register_attempt >= self.REGISTER_RETRY_SECONDS:
+                self._last_register_attempt = now
+                try:
+                    self._register()
+                except CompanyError as exc:
+                    self.log(
+                        f"company register failed: status={exc.status} {exc}",
+                        kind="company_register_error",
+                    )
+
         if not self.cfg.api_key:
-            return  # Unauthenticated — outbox-only mode.
+            # Unauthenticated: park any conversation events the gateway has
+            # already produced into the outbox so they replay once we
+            # register. Spec §6.2.
+            with self._pending_lock:
+                queued = self._pending_events
+                self._pending_events = []
+            if queued:
+                self.outbox.append(queued)
+            return
 
         events: list[dict[str, Any]] = []
 
@@ -703,8 +729,8 @@ class Reporter:
             self.log(f"company dlq write error: {exc}", kind="company_error")
 
     def _should_record_conversation(self, event: Any, meta: dict[str, Any]) -> bool:
-        if not self.cfg.api_key:
-            return False
+        # Note: do NOT gate on api_key. Pre-registration the conversation is
+        # buffered to the outbox by _tick and replayed once we have a key.
         channel = _channel_name(event, meta)
         if channel in self.cfg.exclude_channels:
             return False

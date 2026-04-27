@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
@@ -311,6 +311,8 @@ class TickTests(unittest.TestCase):
                 encoding="utf-8",
             )
             reporter, fake = self._build_reporter(instance)
+            # Force registration to fail so the unauthenticated path runs.
+            fake.register.side_effect = CompanyError("offline", status=0)
             reporter._tick()
             fake.post_events.assert_not_called()
 
@@ -413,6 +415,71 @@ class ClientHeartbeatBodyTests(unittest.TestCase):
             ):
                 self.assertIn(key, body)
             self.assertEqual(body["status"], "offline")
+
+
+class UnauthenticatedTickTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gw_config.clear_env_cache()
+
+    def _build_unauth(self, tmp: str) -> tuple[Reporter, MagicMock]:
+        instance = Path(tmp)
+        (instance / "ops").mkdir()
+        (instance / "memory" / "L1").mkdir(parents=True)
+        (instance / "ops" / "gateway.yaml").write_text(
+            "default_brain: claude\n", encoding="utf-8"
+        )
+        (instance / ".env").write_text(
+            "COMPANY_ENDPOINT=http://x\nCOMPANY_ENROLLMENT_TOKEN=tok\n",
+            encoding="utf-8",
+        )
+        reporter = Reporter(instance)
+        reporter.REGISTER_RETRY_SECONDS = 0  # disable backoff for the test
+        fake = MagicMock()
+        fake.register.side_effect = CompanyError("offline", status=0)
+        reporter.client = fake
+        return reporter, fake
+
+    def test_unauthenticated_conversations_buffer_to_outbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reporter, _ = self._build_unauth(tmp)
+            for i in range(3):
+                event = MagicMock(
+                    source="telegram",
+                    user_id=str(i),
+                    content=f"hi-{i}",
+                    received_at="2026-04-27T10:00:00Z",
+                )
+                reporter.on_conversation(event, "ack", {"delivery_channel": "telegram"})
+            reporter._tick()
+
+            files = reporter.outbox.files()
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 6)  # 3 inbound + 3 outbound
+
+    def test_register_retried_on_subsequent_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reporter, fake = self._build_unauth(tmp)
+            with patch("company.reporter.CompanyClient") as MockClient:
+                # The replacement client (post-register) is a different mock
+                # so we can verify the reporter swapped it in.
+                new_client = MagicMock()
+                MockClient.return_value = new_client
+
+                # First tick — register raises.
+                reporter._tick()
+                self.assertEqual(reporter.cfg.api_key, "")
+
+                # Second tick — register succeeds.
+                fake.register.side_effect = None
+                fake.register.return_value = {
+                    "agent_id": "a",
+                    "api_key": "fresh-key",
+                }
+                reporter._tick()
+
+            self.assertEqual(reporter.cfg.api_key, "fresh-key")
+            self.assertIs(reporter.client, new_client)
 
 
 class ConversationHookTests(unittest.TestCase):
