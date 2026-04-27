@@ -227,6 +227,19 @@ class TelegramChannel:
             return
         title = chat.get("title") or "(untitled)"
         member_count = self._cached_member_count(chat_id)
+        existing = None
+        try:
+            existing = chats_module.get_chat(
+                conn=self._get_chats_conn(),
+                channel="telegram",
+                chat_id=chat_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        if existing is not None and existing.auth_status in ("allowed", "denied"):
+            # Already decided. Don't reset to pending on subsequent
+            # my_chat_member updates (admin promotion, etc.).
+            return
         try:
             chats_module.upsert_chat(
                 conn=self._get_chats_conn(),
