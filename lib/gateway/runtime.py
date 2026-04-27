@@ -6,10 +6,11 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from . import overrides, queue, router, sessions
+from . import overrides, process_sessions, queue, router, sessions
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
@@ -89,6 +90,7 @@ class GatewayRuntime:
         self.log_path = log_path
         self.stop_requested = stop_requested
         self.worker_id = f"gateway-{os.getpid()}"
+        self.session_id = str(uuid.uuid4())
         self._channel_lifecycle = ChannelLifecycle(
             self.instance_dir,
             config=self.config,
@@ -114,12 +116,19 @@ class GatewayRuntime:
         self._recovery = RecoveryIntegration(self)
 
     def _touch_heartbeat(self) -> None:
-        """Bump the heartbeat file mtime — supervisor reads this for liveness."""
+        """Bump the heartbeat file mtime — supervisor reads this for liveness.
+
+        Also update the process session heartbeat for orphan detection.
+        """
         try:
             self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
             self._heartbeat_path.touch(exist_ok=True)
         except OSError:
             pass
+        try:
+            process_sessions.update_heartbeat(self.instance_dir, self.session_id)
+        except Exception:  # noqa: BLE001
+            pass  # Non-critical; don't let heartbeat track failure block polling
 
     def start_heartbeat(self) -> None:
         """Spawn the heartbeat ticker thread. Idempotent.
@@ -197,6 +206,15 @@ class GatewayRuntime:
         )
 
     def start_channels(self) -> None:
+        # Register this gateway process session for tracking + orphan detection.
+        process_sessions.register_session(
+            self.instance_dir,
+            session_id=self.session_id,
+            gateway_pid=os.getpid(),
+            brain_pid=None,  # TODO: track brain PID when we subprocess Claude
+            brain_type="claude",
+            adapter="telegram",
+        )
         self.start_heartbeat()
         self._channel_lifecycle.start()
 
@@ -215,6 +233,10 @@ class GatewayRuntime:
         """Stop background work and close stateful channel/log resources."""
         self.stop_heartbeat()
         self._channel_lifecycle.close()
+        try:
+            process_sessions.unregister_session(self.instance_dir, self.session_id)
+        except Exception:  # noqa: BLE001
+            pass  # Non-critical; don't let cleanup failure block shutdown
         for handler in list(self._json_logger.handlers):
             if getattr(handler, "_jc_gateway_handler", False):
                 self._json_logger.removeHandler(handler)
