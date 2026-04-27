@@ -647,7 +647,7 @@ class TelegramChannel:
                             content=text,
                             meta=meta,
                         )
-                    self.close_conns()
+                    self.close()
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"telegram poll error: {exc}")
                     time.sleep(5)
