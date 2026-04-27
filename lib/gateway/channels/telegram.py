@@ -511,7 +511,7 @@ class TelegramChannel:
                                 if isinstance(m, dict) and m.get("id") == self.bot_user_id:
                                     self._handle_bot_added(chat, message.get("from"))
                                     break
-                        if self.allowed and chat_id not in self.allowed:
+                        if not self._is_authorized(chat_id):
                             self.log(f"telegram ignored disallowed chat_id={chat_id}")
                             continue
                         # Run the routing decision first — it populates the
