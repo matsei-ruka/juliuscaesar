@@ -37,6 +37,7 @@
 | On-demand background workers | subsystem/workers-background-agents.md | Worker DB, detached lifecycle, named worker resume |
 | DashScope voice subsystem | subsystem/voice-dashscope.md | Voice enrollment, synthesis, transcription |
 | Gateway runtime and event queue | subsystem/gateway-queue.md | Telegram/Slack gateway runtime, SQLite queue, dispatch, delivery |
+| Telegram channel | subsystem/channel-telegram.md | Long-poll inbound, Allow/Deny auth gate, per-cycle chats_conn close |
 | Discord channel | subsystem/channel-discord.md | discord.py-backed inbound DM/mention, outbound channel/thread reply |
 | Voice channel | subsystem/channel-voice.md | Paired-channel ASR/TTS via DashScope |
 | jc-events channel | subsystem/channel-jc-events.md | Internal worker/system event ingestion via `state/events/` |

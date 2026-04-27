@@ -27,3 +27,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-04-25] update | contract/instance-layout-and-resolution.md - documented ops/gateway.yaml and gateway start path
 ## [2026-04-25] update | subsystem/installation-and-cli-routing.md - documented router empty-arg guard and doctor venv Python probes
 ## [2026-04-25] update | contract/config-and-secret-boundaries.md - documented doctor venv Python diagnostic invariant
+## [2026-04-27] new | subsystem/channel-telegram.md — Telegram long-poll channel, auth gate, per-cycle _chats_conn close
