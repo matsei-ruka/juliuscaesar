@@ -631,8 +631,12 @@ class Reporter:
 
         # 5. Replay outbox best-effort (separate POST so a current send
         #    failure doesn't double-buffer the just-buffered events).
+        def _replay_send(batch: list[dict[str, Any]]) -> None:
+            result = self.client.post_events(batch)
+            self._handle_rejected(batch, result)
+
         try:
-            replayed = self.outbox.drain(lambda batch: self.client.post_events(batch))
+            replayed = self.outbox.drain(_replay_send)
             if replayed:
                 self.log(f"company outbox replay sent={replayed}", kind="company_replay")
         except Exception as exc:  # noqa: BLE001
@@ -649,13 +653,54 @@ class Reporter:
         for chunk_start in range(0, len(events), BATCH_MAX_EVENTS):
             chunk = events[chunk_start : chunk_start + BATCH_MAX_EVENTS]
             try:
-                self.client.post_events(chunk)
+                result = self.client.post_events(chunk)
             except CompanyError as exc:
                 self.outbox.append(chunk)
                 self.log(
                     f"company send failed status={exc.status}; buffered {len(chunk)} events",
                     kind="company_buffered",
                 )
+                continue
+            self._handle_rejected(chunk, result)
+
+    def _handle_rejected(
+        self, chunk: list[dict[str, Any]], result: dict[str, Any]
+    ) -> None:
+        """Park server-rejected events in the DLQ — never re-buffer them."""
+        rejected = result.get("rejected") if isinstance(result, dict) else None
+        if not rejected:
+            return
+        first_reason = ""
+        dead: list[dict[str, Any]] = []
+        for entry in rejected:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(chunk):
+                continue
+            reason = str(entry.get("reason") or "")
+            if not first_reason and reason:
+                first_reason = reason
+            dead.append({**chunk[idx], "rejected_reason": reason})
+        if not dead:
+            return
+        self._write_dlq(dead)
+        self.log(
+            f"company events rejected count={len(dead)} first_reason={first_reason!r}",
+            kind="company_rejected",
+        )
+
+    def _write_dlq(self, events: list[dict[str, Any]]) -> None:
+        dlq_dir = self.instance_dir / "state" / "company" / "dlq"
+        try:
+            dlq_dir.mkdir(parents=True, exist_ok=True)
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            path = dlq_dir / f"{day}.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                for evt in events:
+                    fh.write(json.dumps(evt) + "\n")
+        except OSError as exc:
+            self.log(f"company dlq write error: {exc}", kind="company_error")
 
     def _should_record_conversation(self, event: Any, meta: dict[str, Any]) -> bool:
         if not self.cfg.api_key:

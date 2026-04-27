@@ -315,6 +315,39 @@ class TickTests(unittest.TestCase):
             fake.post_events.assert_not_called()
 
 
+class ClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gw_config.clear_env_cache()
+
+    def test_post_events_partial_rejected_writes_dlq(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            reporter = Reporter(instance)
+            fake = MagicMock()
+            fake.post_events.return_value = {
+                "accepted": 1,
+                "rejected": [{"index": 0, "reason": "schema-violation"}],
+            }
+            reporter.client = fake
+
+            chunk = [
+                {"event_type": "x", "payload": {"i": 0}},
+                {"event_type": "y", "payload": {"i": 1}},
+            ]
+            reporter._send_or_buffer(chunk)
+
+            dlq_dir = instance / "state" / "company" / "dlq"
+            files = list(dlq_dir.glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            row = json.loads(lines[0])
+            self.assertEqual(row["payload"]["i"], 0)
+            self.assertEqual(row["rejected_reason"], "schema-violation")
+            # Outbox must NOT receive rejected events.
+            self.assertEqual(reporter.outbox.files(), [])
+
+
 class StopTests(unittest.TestCase):
     def setUp(self) -> None:
         gw_config.clear_env_cache()
