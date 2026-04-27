@@ -260,23 +260,20 @@ def cmd_replay(args: argparse.Namespace) -> int:
         max_age_hours=cfg.outbox_max_age_hours,
     )
 
+    since_mtime: float | None = None
     if args.since:
         try:
             cutoff = _parse_since(args.since)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        for path in outbox.files():
-            try:
-                mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                continue
-            if mtime < cutoff:
-                # Older than the window: leave alone.
-                continue
+        since_mtime = cutoff.timestamp()
 
     client = CompanyClient(cfg)
     try:
-        replayed = outbox.drain(lambda batch: client.post_events(batch))
+        replayed = outbox.drain(
+            lambda batch: client.post_events(batch),
+            since_mtime=since_mtime,
+        )
     finally:
         client.close()
     print(f"replayed {replayed} events")
