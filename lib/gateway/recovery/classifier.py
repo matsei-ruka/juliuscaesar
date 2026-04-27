@@ -74,7 +74,7 @@ _REGEX_RULES: list[tuple[ClassificationKind, re.Pattern[str], float]] = [
     (
         "bad_input",
         re.compile(
-            r"(image exceeds maximum size|invalid base64|payload too large|unsupported file type|mime type mismatch|schema validation)",
+            r"(image exceeds maximum size|invalid base64|payload too large|unsupported file type|mime type mismatch|schema validation|dangerously-skip-permissions cannot be used with root/sudo)",
             re.IGNORECASE,
         ),
         0.92,
@@ -113,6 +113,10 @@ def _extract_for(kind: ClassificationKind, stderr: str) -> dict[str, Any]:
             url = m.group(0).rstrip(".,:;")
             if any(host in url for host in _ALLOWED_LOGIN_HOSTS):
                 extracted["login_url"] = url
+    elif kind == "bad_input":
+        first_line = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        if first_line:
+            extracted["reason"] = first_line[:300]
     return extracted
 
 

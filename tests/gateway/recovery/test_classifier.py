@@ -74,6 +74,13 @@ class RegexPrefilterTests(unittest.TestCase):
         self.assertIsNotNone(c)
         self.assertEqual(c.kind, "bad_input")
 
+    def test_root_skip_permissions_error_classifies_bad_input(self):
+        stderr = "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons"
+        c = classifier.regex_prefilter(stderr)
+        self.assertIsNotNone(c)
+        self.assertEqual(c.kind, "bad_input")
+        self.assertIn("root/sudo", c.extracted.get("reason", ""))
+
     def test_unknown_returns_none(self):
         c = classifier.regex_prefilter("something weird and unmatched happened here")
         self.assertIsNone(c)

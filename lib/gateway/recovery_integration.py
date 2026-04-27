@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
-from . import queue
+from . import queue, router
 from .recovery import Defer, Fail, Retry
 
 if TYPE_CHECKING:
@@ -77,6 +78,7 @@ class RecoveryIntegration:
             self.runtime.log(
                 f"recovery fail id={event.id} brain={failure.brain} reason={decision.reason}"
             )
+            self._notify_failure(event, failure, decision.reason)
         elif isinstance(decision, Defer):
             self.runtime.log(
                 f"recovery defer id={event.id} brain={failure.brain} reason={decision.reason}"
@@ -104,3 +106,58 @@ class RecoveryIntegration:
         finally:
             conn.close()
         self.runtime.log(f"event {failed.status} id={event.id} error={error}")
+
+    def _notify_failure(
+        self,
+        event: "Event",
+        failure: "AdapterFailure",
+        reason: str,
+    ) -> None:
+        """Best-effort user-visible failure notification for terminal recovery decisions."""
+        if reason == "auth_required_in_group":
+            return
+        deliver = getattr(self.runtime, "_deliver_response", None)
+        if deliver is None:
+            return
+        meta = _decode_meta(event)
+        channel = router.channel_name(event)
+        meta.setdefault("delivery_channel", channel)
+        body = _format_failure_message(failure, reason)
+        try:
+            deliver(channel, body, meta)
+        except Exception as exc:  # noqa: BLE001
+            self.runtime.log(
+                f"recovery failure notification failed id={event.id} "
+                f"channel={channel} reason={exc}"
+            )
+
+
+def _decode_meta(event: "Event") -> dict:
+    if not event.meta:
+        return {}
+    try:
+        data = json.loads(event.meta)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_failure_message(failure: "AdapterFailure", reason: str) -> str:
+    lines = [
+        "Gateway adapter failed before it could reply.",
+        "",
+        f"Brain: {failure.brain}",
+        f"Exit code: {failure.rc}",
+        f"Reason: {reason}",
+    ]
+    details = _stderr_preview(failure.stderr_tail)
+    if details:
+        lines.extend(["", "Details:", details])
+    return "\n".join(lines)
+
+
+def _stderr_preview(stderr: str) -> str:
+    if not stderr:
+        return ""
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    return "\n".join(lines[:3])[:600]
