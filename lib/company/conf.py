@@ -13,6 +13,7 @@ before instantiating the reporter.
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -176,12 +177,19 @@ def write_env_keys(instance_dir: Path, *, set_keys: dict[str, str], unset_keys: 
             out.append(f"{key}={_quote_env(value)}")
 
     tmp = env_path.with_suffix(env_path.suffix + ".company.tmp")
-    tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-    tmp.replace(env_path)
+    # Open with mode 0o600 *before* writing so the file is never world-readable,
+    # not even for the brief window between write_text and a follow-up chmod.
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        env_path.chmod(0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    tmp.replace(env_path)
 
     # Refresh gateway-side env cache so the next load() sees the new value.
     clear_env_cache()

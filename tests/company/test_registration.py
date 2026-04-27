@@ -57,6 +57,28 @@ def _err_response(status: int, body: str = "") -> MagicMock:
     return resp
 
 
+class WriteEnvPermsTests(unittest.TestCase):
+    @unittest.skipIf(__import__("os").name == "nt", "POSIX perms only")
+    def test_env_file_perms_are_0600(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            company_conf.write_env_keys(
+                instance, set_keys={"COMPANY_API_KEY": "secret"}
+            )
+            mode = (instance / ".env").stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+
+            # Updating an existing file must also land at 0o600 even if the
+            # caller previously made it world-readable.
+            os.chmod(instance / ".env", 0o644)
+            company_conf.write_env_keys(
+                instance, set_keys={"COMPANY_API_KEY": "secret2"}
+            )
+            mode = (instance / ".env").stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+
+
 class CompanyClientRegisterTests(unittest.TestCase):
     def setUp(self) -> None:
         gw_config.clear_env_cache()
