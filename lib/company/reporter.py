@@ -65,6 +65,45 @@ def uuid7() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Gateway snapshot — used by both the reporter heartbeat tick and CLI ping.
+# ---------------------------------------------------------------------------
+
+
+def build_snapshot(instance_dir: Path) -> dict[str, Any]:
+    """Build a heartbeat-ready snapshot. Spec §4.1 fields, no ``status``."""
+    try:
+        conn = gateway_queue.connect(instance_dir)
+        try:
+            counts = gateway_queue.counts(conn)
+        finally:
+            conn.close()
+        queue_depth = int(counts.get("queued", 0)) + int(counts.get("running", 0))
+    except Exception:  # noqa: BLE001
+        queue_depth = 0
+
+    triage_backend, brain_runtime, channels_enabled = "", "", []
+    try:
+        from gateway.config import load_config  # type: ignore
+
+        gw_cfg = load_config(instance_dir)
+        triage_backend = gw_cfg.triage.backend or ""
+        brain_runtime = gw_cfg.default_brain or ""
+        channels_enabled = [name for name, ch in gw_cfg.channels.items() if ch.enabled]
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "queue_depth": queue_depth,
+        "brain_runtime": brain_runtime,
+        "triage_backend": triage_backend,
+        "channels_enabled": channels_enabled,
+        "error_rate_5m": 0.0,
+        "cpu_pct": 0.0,
+        "memory_mb": 0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Outbox: append-only JSON-lines, one file per UTC day.
 # ---------------------------------------------------------------------------
 
@@ -455,15 +494,21 @@ class Reporter:
         self.log("company reporter started", kind="company_start")
 
     def stop(self) -> None:
-        """Signal the thread, send a best-effort offline status, join."""
+        """Signal the thread, join it, then post offline + close.
+
+        Order matters: the reporter thread shares ``self.client`` with us,
+        and ``requests.Session`` is not safe to use concurrently from two
+        threads. Joining first guarantees the thread is no longer touching
+        the session when we POST offline and close it.
+        """
         self._stop.set()
-        try:
-            self.client.post_offline()
-        except Exception:  # noqa: BLE001
-            pass
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
+        try:
+            self.client.post_offline(self.snapshot())
+        except Exception:  # noqa: BLE001
+            pass
         self.client.close()
 
     # --- Hot-path hooks ----------------------------------------------------
@@ -521,36 +566,7 @@ class Reporter:
 
     def snapshot(self) -> dict[str, Any]:
         """Build a ``gateway.snapshot`` payload from the local instance."""
-        try:
-            conn = gateway_queue.connect(self.instance_dir)
-            try:
-                counts = gateway_queue.counts(conn)
-            finally:
-                conn.close()
-            queue_depth = int(counts.get("queued", 0)) + int(counts.get("running", 0))
-        except Exception:  # noqa: BLE001
-            queue_depth = 0
-
-        triage_backend, brain_runtime, channels_enabled = "", "", []
-        try:
-            from gateway.config import load_config  # type: ignore
-
-            gw_cfg = load_config(self.instance_dir)
-            triage_backend = gw_cfg.triage.backend or ""
-            brain_runtime = gw_cfg.default_brain or ""
-            channels_enabled = [name for name, ch in gw_cfg.channels.items() if ch.enabled]
-        except Exception:  # noqa: BLE001
-            pass
-
-        return {
-            "queue_depth": queue_depth,
-            "brain_runtime": brain_runtime,
-            "triage_backend": triage_backend,
-            "channels_enabled": channels_enabled,
-            "error_rate_5m": 0.0,
-            "cpu_pct": 0.0,
-            "memory_mb": 0,
-        }
+        return build_snapshot(self.instance_dir)
 
     # --- Internals ---------------------------------------------------------
 

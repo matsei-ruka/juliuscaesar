@@ -122,10 +122,17 @@ class CompanyClient:
             raise CompanyError(f"transport: {exc}") from exc
         return self._unwrap(resp)
 
-    def post_offline(self) -> None:
-        """Best-effort offline status POST. Swallows all errors."""
+    def post_offline(self, snapshot: dict[str, Any]) -> None:
+        """Best-effort offline status POST. Swallows all errors.
+
+        Body is the full §4.1 heartbeat shape with ``status="offline"``
+        overlaid on the supplied snapshot — the server otherwise rejects
+        the heartbeat for missing fields and the agent stays "online" in
+        the dashboard until the heartbeat timeout fires.
+        """
+        body = {**snapshot, "status": "offline"}
         try:
-            self._post("/api/agents/heartbeat", {"status": "offline"})
+            self._post("/api/agents/heartbeat", body)
         except CompanyError:
             pass
 

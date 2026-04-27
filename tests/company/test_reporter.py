@@ -315,6 +315,73 @@ class TickTests(unittest.TestCase):
             fake.post_events.assert_not_called()
 
 
+class StopTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gw_config.clear_env_cache()
+
+    def test_stop_joins_thread_before_post_offline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            reporter = Reporter(instance)
+            order: list[str] = []
+
+            fake_client = MagicMock()
+            fake_client.post_offline.side_effect = lambda snap: order.append(
+                "post_offline"
+            )
+            fake_client.close.side_effect = lambda: order.append("close")
+            reporter.client = fake_client
+
+            fake_thread = MagicMock()
+            fake_thread.is_alive.return_value = True
+            fake_thread.join.side_effect = lambda timeout=None: order.append("join")
+            reporter._thread = fake_thread
+
+            reporter.stop()
+
+            self.assertEqual(order, ["join", "post_offline", "close"])
+            self.assertTrue(reporter._stop.is_set())
+            # Snapshot dict was passed to post_offline.
+            args, _ = fake_client.post_offline.call_args
+            self.assertIsInstance(args[0], dict)
+
+
+class ClientHeartbeatBodyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gw_config.clear_env_cache()
+
+    def test_post_offline_body_matches_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            cfg = company_conf.load(instance)
+            session = MagicMock()
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.content = b"{}"
+            resp.json.return_value = {}
+            session.post.return_value = resp
+
+            from company.client import CompanyClient
+            client = CompanyClient(cfg, session=session)
+
+            from company.reporter import build_snapshot
+            client.post_offline(build_snapshot(instance))
+
+            body = session.post.call_args.kwargs["json"]
+            for key in (
+                "status",
+                "queue_depth",
+                "brain_runtime",
+                "triage_backend",
+                "channels_enabled",
+                "error_rate_5m",
+                "cpu_pct",
+                "memory_mb",
+            ):
+                self.assertIn(key, body)
+            self.assertEqual(body["status"], "offline")
+
+
 class ConversationHookTests(unittest.TestCase):
     def setUp(self) -> None:
         gw_config.clear_env_cache()

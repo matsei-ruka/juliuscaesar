@@ -24,7 +24,7 @@ from . import alerts as alerts_mod
 from . import approvals as approvals_mod
 from . import conf as conf_module
 from .client import CompanyClient, CompanyError
-from .reporter import Outbox
+from .reporter import Outbox, build_snapshot
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -164,7 +164,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if args.ping:
         client = CompanyClient(cfg)
         try:
-            client.heartbeat({"status": "online", "queue_depth": 0, "channels_enabled": []})
+            client.heartbeat({**build_snapshot(instance), "status": "online"})
             print("\nping: ok")
         except CompanyError as exc:
             print(f"\nping: FAILED status={exc.status} {exc}")
