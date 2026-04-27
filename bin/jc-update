@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# jc-update — Check and apply framework updates.
+#
+# Usage:
+#   jc update [--check-only]
+#
+# Behavior:
+#   - Fetches latest release version from GitHub
+#   - Compares with current local version
+#   - If newer, offers to pull and restart watchdog
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+JC_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# Parse args
+CHECK_ONLY=0
+while (( $# )); do
+    case "$1" in
+        --check-only)
+            CHECK_ONLY=1
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+# Get local version from pyproject.toml
+get_local_version() {
+    grep '^version = ' "$JC_ROOT/pyproject.toml" | sed 's/^version = "\(.*\)"/\1/'
+}
+
+# Get latest release version from GitHub API
+get_remote_version() {
+    timeout 5 curl -s https://api.github.com/repos/matsei-ruka/juliuscaesar/releases/latest \
+        | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/' || echo ""
+}
+
+LOCAL=$(get_local_version)
+echo "Local version: $LOCAL"
+
+echo "Checking GitHub for updates..."
+REMOTE=$(get_remote_version)
+
+if [[ -z "$REMOTE" ]]; then
+    echo "Could not fetch remote version. Check your internet connection." >&2
+    exit 1
+fi
+
+echo "Latest version: $REMOTE"
+
+if [[ "$LOCAL" == "$REMOTE" ]]; then
+    echo "Already up-to-date."
+    exit 0
+fi
+
+if [[ "$CHECK_ONLY" == 1 ]]; then
+    echo "Update available: $LOCAL → $REMOTE"
+    exit 0
+fi
+
+echo ""
+echo "⚠️  Update available: $LOCAL → $REMOTE"
+read -p "Pull and restart? [y/N] " -r
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Cancelled."
+    exit 0
+fi
+
+echo "Pulling latest code..."
+cd "$JC_ROOT"
+git fetch origin
+git reset --hard origin/main
+
+echo "Reloading watchdog..."
+if command -v jc-watchdog >/dev/null 2>&1; then
+    jc-watchdog reload || true
+fi
+
+echo "✓ Update complete. Version $REMOTE deployed."

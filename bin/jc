@@ -14,12 +14,13 @@
 #   gateway    Durable event queue and gateway runtime.
 #   init       Scaffold a new instance from templates.
 #   setup      Guided first-run configurator.
+#   update     Check and apply framework updates.
 #
 # All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="2026.04.28"
 
 usage() {
     cat <<EOF
@@ -37,6 +38,7 @@ Subcommands:
   gateway      Durable event queue and gateway runtime (jc-gateway).
   init         Scaffold a new instance from templates.
   setup        Guided first-run configurator.
+  update       Check and apply framework updates (jc-update).
   upgrade      Reconfigure an existing instance (channels, brain, triage).
   doctor       Diagnose the instance + environment.
   migrate-to-0.3  Bootstrap an existing 0.2.x instance for the unified gateway.
@@ -92,7 +94,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|chats|gateway|init|setup|doctor|upgrade|migrate-to-0.3)
+    memory|heartbeat|voice|watchdog|workers|chats|gateway|init|setup|update|doctor|upgrade|migrate-to-0.3)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127
