@@ -15,6 +15,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -130,6 +131,56 @@ def sha256_file(p: Path) -> str:
     h = hashlib.sha256()
     h.update(p.read_bytes())
     return h.hexdigest()
+
+
+def newest_jsonl_stem(root: Path, since: float) -> str | None:
+    """Find newest .jsonl file modified at/after `since` timestamp. Returns filename stem (UUID)."""
+    if not root.is_dir():
+        return None
+    best = None
+    best_delta = None
+    for path in root.glob("*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < since - 1:
+            continue
+        delta = abs(mtime - since)
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best = path
+    return best.stem if best else None
+
+
+def capture_session_id(instance_dir: Path, tool: str, started_at: str) -> str | None:
+    """Capture native session ID for Claude brain after adapter completes."""
+    if tool != "claude":
+        return None
+    try:
+        t0 = dt.datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+    slug = str(instance_dir).replace("/", "-").replace("_", "-")
+    return newest_jsonl_stem(Path.home() / ".claude" / "projects" / slug, t0)
+
+
+def load_session_id(instance_dir: Path, task_name: str) -> str | None:
+    """Load saved session ID from prior run, if exists."""
+    session_file = instance_dir / "heartbeat" / "state" / f"{task_name}.session"
+    if not session_file.exists():
+        return None
+    try:
+        return session_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def save_session_id(instance_dir: Path, task_name: str, session_id: str) -> None:
+    """Save session ID for next run's --resume."""
+    session_file = instance_dir / "heartbeat" / "state" / f"{task_name}.session"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(session_id, encoding="utf-8")
 
 
 def call_adapter(
@@ -359,6 +410,13 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         prompt_path.write_text(final_prompt, encoding="utf-8")
 
         log_line(f"task {task_name}: tool={tool} model={model or '(default)'} folder={folder}", log_path)
+
+        # Load prior session ID if available (for --resume).
+        prior_session = load_session_id(instance_dir, task_name)
+        if prior_session:
+            os.environ["JC_RESUME_SESSION"] = prior_session
+            log_line(f"task {task_name}: resuming session {prior_session}", log_path)
+
         output = call_adapter(
             tool,
             model,
@@ -367,6 +425,14 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
             log_path,
             timeout_seconds=timeout_seconds,
         )
+
+        # Capture session ID for next run.
+        new_session = capture_session_id(instance_dir, tool, ts.isoformat(timespec="seconds"))
+        if new_session:
+            save_session_id(instance_dir, task_name, new_session)
+            log_line(f"task {task_name}: captured session {new_session}", log_path)
+            if "JC_RESUME_SESSION" in os.environ:
+                del os.environ["JC_RESUME_SESSION"]
 
         output_path = state / "outputs" / f"{task_name}-{ts_tag}.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
