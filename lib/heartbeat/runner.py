@@ -133,36 +133,54 @@ def sha256_file(p: Path) -> str:
     return h.hexdigest()
 
 
-def newest_jsonl_stem(root: Path, since: float) -> str | None:
-    """Find newest .jsonl file modified at/after `since` timestamp. Returns filename stem (UUID)."""
-    if not root.is_dir():
-        return None
-    best = None
-    best_delta = None
-    for path in root.glob("*.jsonl"):
+def _claude_proj_dir(instance_dir: Path) -> Path:
+    slug = str(instance_dir).replace("/", "-").replace("_", "-")
+    return Path.home() / ".claude" / "projects" / slug
+
+
+def snapshot_jsonl(proj_dir: Path) -> dict[str, float]:
+    """Snapshot all .jsonl stems + mtimes in proj_dir. Used for session diff."""
+    if not proj_dir.is_dir():
+        return {}
+    result = {}
+    for p in proj_dir.glob("*.jsonl"):
         try:
-            mtime = path.stat().st_mtime
+            result[p.stem] = p.stat().st_mtime
         except OSError:
-            continue
-        if mtime < since - 1:
-            continue
-        delta = abs(mtime - since)
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best = path
-    return best.stem if best else None
+            pass
+    return result
 
 
-def capture_session_id(instance_dir: Path, tool: str, started_at: str) -> str | None:
-    """Capture native session ID for Claude brain after adapter completes."""
+def capture_session_id(
+    instance_dir: Path,
+    tool: str,
+    prior_session: str | None,
+    pre_snapshot: dict[str, float],
+) -> str | None:
+    """Capture session ID after adapter run via snapshot diff (no timing race).
+
+    If we resumed a known session, confirm it was written and return it.
+    Otherwise, find the one new JSONL that wasn't in pre_snapshot.
+    """
     if tool != "claude":
         return None
-    try:
-        t0 = dt.datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError):
+    proj_dir = _claude_proj_dir(instance_dir)
+    if not proj_dir.is_dir():
         return None
-    slug = str(instance_dir).replace("/", "-").replace("_", "-")
-    return newest_jsonl_stem(Path.home() / ".claude" / "projects" / slug, t0)
+
+    if prior_session:
+        jsonl = proj_dir / f"{prior_session}.jsonl"
+        try:
+            if jsonl.stat().st_mtime > pre_snapshot.get(prior_session, 0):
+                return prior_session
+        except OSError:
+            pass
+        # Session file not written (expired or missing) — fall through to new-session search.
+
+    for p in proj_dir.glob("*.jsonl"):
+        if p.stem not in pre_snapshot:
+            return p.stem
+    return None
 
 
 def load_session_id(instance_dir: Path, task_name: str) -> str | None:
@@ -417,6 +435,9 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
             os.environ["JC_RESUME_SESSION"] = prior_session
             log_line(f"task {task_name}: resuming session {prior_session}", log_path)
 
+        # Snapshot before adapter so we can find the new/resumed session by diff, not mtime.
+        pre_snapshot = snapshot_jsonl(_claude_proj_dir(instance_dir)) if tool == "claude" else {}
+
         output = call_adapter(
             tool,
             model,
@@ -427,7 +448,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         )
 
         # Capture session ID for next run.
-        new_session = capture_session_id(instance_dir, tool, ts.isoformat(timespec="seconds"))
+        new_session = capture_session_id(instance_dir, tool, prior_session, pre_snapshot)
         if new_session:
             save_session_id(instance_dir, task_name, new_session)
             log_line(f"task {task_name}: captured session {new_session}", log_path)
