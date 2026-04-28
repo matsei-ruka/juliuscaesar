@@ -13,8 +13,6 @@ ARGS=(
     "-p"
     "--dangerously-skip-permissions"
     "--chrome"
-    "--mcp-config" '{"mcpServers":{}}'
-    "--strict-mcp-config"
 )
 if [[ -n "$MODEL" ]]; then
     ARGS+=("--model" "$MODEL")
