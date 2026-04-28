@@ -1,0 +1,23 @@
+# Autonomous user model configuration
+# Enable this to detect patterns across sessions and suggest updates to memory/L1/USER.md
+
+enabled: false
+apply_mode: propose  # disabled | propose | auto_high_confidence | auto_all
+cadence_cron: "0 3 * * *"  # daily at 03:00 instance-tz
+look_back_days: 7
+min_evidence_count: 3  # require >= N mentions to signal a topic
+confidence_threshold: 0.85  # proposals >= 0.85 auto-apply (in auto_high_confidence mode)
+proposal_cooldown_days: 30  # don't re-propose same content for N days
+notify_chat_id: null  # telegram chat to notify; null = use .env TELEGRAM_CHAT_ID
+proposer_model: claude-sonnet-4-6  # LLM to generate proposal text
+
+privacy_filter:
+  llm_pass: false  # second-pass LLM filter on top of regex blocklist
+  llm_model: claude-haiku-4-5
+
+detectors:
+  recurring_topic: true
+  comm_pref: true
+  priority_shift: true
+  new_entity: true
+  rule_drift: true  # proposals always require approval, regardless of confidence
