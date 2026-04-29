@@ -264,11 +264,22 @@ class TelegramChannel:
         self._send_auth_prompt(chat, added_by or {})
         self._auth_prompts_sent.add(chat_id)
 
-    def _send_auth_prompt(self, chat: dict, added_by: dict) -> None:
+    def _send_auth_prompt(
+        self,
+        chat: dict,
+        added_by: dict | None = None,
+        message_preview: str | None = None,
+    ) -> None:
         """Send an inline-keyboard Allow/Deny prompt to the main DM.
 
         Best-effort — failure is logged and the row stays `pending`. The
         operator can still allow/deny via `jc chats approve <chat_id>`.
+
+        Args:
+            chat: Telegram chat dict (id, type, title, username, etc.)
+            added_by: Optional dict with username/first_name for group-add context.
+                      If None, formats as "new sender" instead of "bot added".
+            message_preview: Optional text snippet from the new sender.
         """
         main = self._main_chat_id()
         if not main or not self.token:
@@ -281,19 +292,41 @@ class TelegramChannel:
         member_blurb = (
             f"{member_count} members" if member_count is not None else chat_type
         )
-        adder = (
-            added_by.get("username")
-            and f"@{added_by['username']}"
-        ) or (
-            added_by.get("first_name") or "(unknown)"
-        )
-        body = (
-            "🤝 Bot added to a new chat — approve?\n\n"
-            f"*{title}* ({chat_type}, {member_blurb})\n"
-            f"chat_id: `{chat_id}`\n"
-            f"added by: {adder}\n\n"
-            "Tap Allow to start processing messages from this chat."
-        )
+
+        # Branch on context: group-add vs new sender
+        if added_by:
+            # Group-add context (existing behavior)
+            adder = (
+                added_by.get("username")
+                and f"@{added_by['username']}"
+            ) or (
+                added_by.get("first_name") or "(unknown)"
+            )
+            body = (
+                "🤝 Bot added to a new chat — approve?\n\n"
+                f"*{title}* ({chat_type}, {member_blurb})\n"
+                f"chat_id: `{chat_id}`\n"
+                f"added by: {adder}\n\n"
+                "Tap Allow to start processing messages from this chat."
+            )
+        else:
+            # New sender DM context
+            username = chat.get("username")
+            sender_handle = f"@{username}" if username else f"user {chat_id}"
+            preview_blurb = ""
+            if message_preview:
+                # Escape and truncate preview
+                escaped = message_preview[:100].replace("\n", " ").strip()
+                if len(message_preview) > 100:
+                    escaped += "…"
+                preview_blurb = f'Preview: "__{escaped}__"\n\n'
+            body = (
+                f"🔐 New contact\n\n"
+                f"*{sender_handle}* ({chat_type})\n"
+                f"chat_id: `{chat_id}`\n"
+                f"{preview_blurb}"
+                "Tap Allow to process messages from this sender."
+            )
         keyboard = {
             "inline_keyboard": [[
                 {
@@ -327,6 +360,52 @@ class TelegramChannel:
             )
         except Exception as exc:  # noqa: BLE001
             self.log(f"telegram auth prompt failed chat_id={chat_id}: {exc}")
+
+    def _maybe_send_sender_approval_prompt(
+        self,
+        chat_id: str,
+        chat: dict,
+        message: dict,
+    ) -> None:
+        """Send approval prompt for a new unauthorized sender.
+
+        Only sends if:
+        - Chat is marked 'pending' in DB (new or first-time)
+        - We haven't already sent a prompt for this chat in this process
+        - Main DM and token are available
+
+        Does not enqueue or log transcript — that only happens after approval.
+        """
+        # Suppress duplicate prompts within this process lifetime
+        # (even if the process restarts, we'll re-prompt new senders).
+        if chat_id in self._auth_prompts_sent:
+            return
+
+        # Check DB: if already approved/denied, don't prompt again.
+        try:
+            conn = self._get_chats_conn()
+            c = conn.execute(
+                "SELECT auth_status FROM chats WHERE channel='telegram' AND chat_id=?",
+                (chat_id,),
+            )
+            row = c.fetchone()
+            auth_status = row[0] if row else None
+            # Only prompt if pending (new) or no record yet (shouldn't happen,
+            # but guard against races).
+            if auth_status not in (None, "pending"):
+                return
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram auth status check failed chat_id={chat_id}: {exc}")
+            # Continue anyway — best-effort
+            pass
+
+        # Extract message preview for context
+        text = message.get("text") or message.get("caption") or ""
+        preview = text[:100].replace("\n", " ").strip() if text else "(no text)"
+
+        # Send the prompt
+        self._send_auth_prompt(chat, added_by=None, message_preview=preview)
+        self._auth_prompts_sent.add(chat_id)
 
     def _handle_callback_query(self, update: dict) -> None:
         """Process an inline-keyboard tap. Only chat_auth: prefix is wired."""
@@ -540,6 +619,13 @@ class TelegramChannel:
                             self.log(
                                 f"telegram ignored unauthorized chat_id={chat_id} "
                                 f"type={chat.get('type')}"
+                            )
+                            # Send approval prompt for new pending senders
+                            # (not for explicitly denied or already-prompted chats).
+                            self._maybe_send_sender_approval_prompt(
+                                chat_id=chat_id,
+                                chat=chat,
+                                message=message,
                             )
                             continue
                         if not should_process:
