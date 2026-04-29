@@ -48,7 +48,7 @@ class Chat:
     first_seen: str
     last_seen: str
     last_message_id: str | None
-    auth_status: str = "allowed"
+    auth_status: str = "pending"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,10 +59,11 @@ def _row_to_chat(row: sqlite3.Row | None) -> Chat | None:
         return None
     keys = row.keys()
     data = {key: row[key] for key in keys}
-    # Older DB rows (pre-schema-4) may not carry auth_status; default it.
-    data.setdefault("auth_status", "allowed")
+    # Older DB rows (pre-schema-4) may not carry auth_status; default to
+    # pending so unknown chats are not auto-authorized.
+    data.setdefault("auth_status", "pending")
     if data.get("auth_status") is None:
-        data["auth_status"] = "allowed"
+        data["auth_status"] = "pending"
     return Chat(**data)
 
 
@@ -123,7 +124,7 @@ def upsert_chat(
                 member_count, first_seen, last_seen, last_message_id,
                 auth_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'allowed'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'pending'))
             ON CONFLICT(channel, chat_id) DO UPDATE SET
                 chat_type       = COALESCE(excluded.chat_type, chats.chat_type),
                 title           = COALESCE(excluded.title, chats.title),

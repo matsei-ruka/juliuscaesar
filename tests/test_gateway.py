@@ -235,7 +235,7 @@ class GatewayTests(unittest.TestCase):
             row = conn.execute(
                 "SELECT auth_status FROM chats WHERE chat_id='42'"
             ).fetchone()
-            self.assertEqual(row["auth_status"], "allowed")
+            self.assertEqual(row["auth_status"], "pending")
         finally:
             conn.close()
 

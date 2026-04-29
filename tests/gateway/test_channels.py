@@ -615,7 +615,11 @@ class TelegramGroupSessionReuseTests(unittest.TestCase):
 
         stop_after = {"done": False}
 
-        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+        cfg = ChannelConfig(
+            enabled=True,
+            token_env="TELEGRAM_BOT_TOKEN",
+            chat_ids=["-777", "-888"],
+        )
         channel = TelegramChannel(instance, cfg, _silent_log)
         channel.token = "test-token"
 

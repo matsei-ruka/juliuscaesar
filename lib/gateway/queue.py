@@ -136,7 +136,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             first_seen       TEXT NOT NULL,
             last_seen        TEXT NOT NULL,
             last_message_id  TEXT,
-            auth_status      TEXT NOT NULL DEFAULT 'allowed',
+            auth_status      TEXT NOT NULL DEFAULT 'pending',
             PRIMARY KEY (channel, chat_id)
         );
 
@@ -148,7 +148,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn,
         table="chats",
         column="auth_status",
-        column_ddl="TEXT NOT NULL DEFAULT 'allowed'",
+        column_ddl="TEXT NOT NULL DEFAULT 'pending'",
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_chats_auth_status "

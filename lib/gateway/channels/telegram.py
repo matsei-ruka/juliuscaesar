@@ -142,11 +142,14 @@ class TelegramChannel:
     def _is_authorized(self, chat_id: str) -> bool:
         """Decide if a chat may have its messages dispatched to the brain.
 
-        Order:
+        Default-deny. Order:
         1. `cfg.chat_ids` (env allowlist) → always allowed (legacy contract).
         2. DM-with-the-operator → always allowed.
         3. `chats.auth_status == 'allowed'` → allowed.
         4. Otherwise → not authorized; message is dropped.
+
+        Unknown chats (no DB row) and DB lookup failures both fail closed.
+        Operator approves new chats explicitly via `set_auth_status`.
         """
         if self.allowed and chat_id in self.allowed:
             return True
@@ -160,13 +163,10 @@ class TelegramChannel:
                 chat_id=chat_id,
             )
         except Exception as exc:  # noqa: BLE001
-            self.log(f"telegram auth lookup failed chat_id={chat_id}: {exc} — fail open")
-            return True
+            self.log(f"telegram auth lookup failed chat_id={chat_id}: {exc} — fail closed")
+            return False
         if row is None:
-            # Not yet recorded — fail open. The next `_record_chat` will
-            # write the row; bot-added flow is responsible for marking
-            # truly-new groups as `pending`.
-            return True
+            return False
         return row.auth_status == "allowed"
 
     def _handle_my_chat_member(self, update: dict) -> None:
@@ -528,26 +528,23 @@ class TelegramChannel:
                                 if isinstance(m, dict) and m.get("id") == self.bot_user_id:
                                     self._handle_bot_added(chat, message.get("from"))
                                     break
-                        if not self._is_authorized(chat_id):
-                            self.log(f"telegram ignored disallowed chat_id={chat_id}")
-                            continue
                         # Run the routing decision first — it populates the
                         # member-count cache that _record_chat reads from.
                         should_process = self._should_process_message(message)
-                        # Observability: record every inbound chat from an allowed
-                        # source, even when we won't dispatch the message. Without
-                        # this, groups Rachel is in but isn't @-mentioned in stay
-                        # invisible in CHATS.md / queue.db.
+                        # Observability: record every inbound chat (even
+                        # unauthorized ones) so the operator can see who
+                        # tried to message and explicitly approve or deny.
+                        # New rows default to auth_status='pending'.
                         self._record_chat(chat, message)
-                        if not should_process:
-                            self.log(
-                                f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
-                            )
-                            continue
                         if not self._is_authorized(chat_id):
                             self.log(
                                 f"telegram ignored unauthorized chat_id={chat_id} "
                                 f"type={chat.get('type')}"
+                            )
+                            continue
+                        if not should_process:
+                            self.log(
+                                f"telegram ignored non-mention chat_id={chat_id} type={chat.get('type')}"
                             )
                             continue
                         update_id = update.get("update_id")

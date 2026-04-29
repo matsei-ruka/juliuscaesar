@@ -255,11 +255,11 @@ class SharedConnectionTests(unittest.TestCase):
 
 
 class AuthStatusTests(unittest.TestCase):
-    def test_default_auth_status_allowed(self):
+    def test_default_auth_status_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             chat = chats.upsert_chat(instance, channel="telegram", chat_id="1")
-            self.assertEqual(chat.auth_status, "allowed")
+            self.assertEqual(chat.auth_status, "pending")
 
     def test_upsert_with_explicit_pending(self):
         with tempfile.TemporaryDirectory() as tmp:

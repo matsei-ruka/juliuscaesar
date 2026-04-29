@@ -22,7 +22,7 @@ def _silent_log(_message: str) -> None:
     pass
 
 
-def _drive(instance: Path, updates):
+def _drive(instance: Path, updates, *, exclude_from_allowlist=None):
     served = {"done": False}
 
     def fake_http_json(url, *, data=None, timeout=15, **_):
@@ -44,7 +44,21 @@ def _drive(instance: Path, updates):
 
     stop_after = {"done": False}
 
-    cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+    # Default-deny auth means every test update must come from a
+    # pre-authorized chat. Lift each update's chat id into the env
+    # allowlist so the channel routes them to the brain. (Unless
+    # explicitly excluded to test auth denial.)
+    exclude_from_allowlist = exclude_from_allowlist or set()
+    chat_ids = sorted({
+        str((u.get("message") or u.get("edited_message") or {}).get("chat", {}).get("id", ""))
+        for u in updates
+        if isinstance(u, dict)
+    } - {""} - exclude_from_allowlist)
+    cfg = ChannelConfig(
+        enabled=True,
+        token_env="TELEGRAM_BOT_TOKEN",
+        chat_ids=chat_ids,
+    )
     channel = TelegramChannel(instance, cfg, _silent_log)
     channel.token = "test-token"
 
@@ -466,7 +480,7 @@ class TelegramGroupAuthTests(unittest.TestCase):
                 instance, channel="telegram", chat_id="-2001",
                 auth_status="pending",
             )
-            captured = _drive(instance, [update])
+            captured = _drive(instance, [update], exclude_from_allowlist={"-2001"})
             self.assertEqual(len(captured), 0)
 
     def test_allowed_chat_message_processed(self):
