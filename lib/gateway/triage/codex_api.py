@@ -60,7 +60,6 @@ class CodexApiTriage(TriageBackend):
                 prompt,
                 model=self._model,
                 instructions=SYSTEM_INSTRUCTIONS,
-                max_output_tokens=200,
             )
         except (ResponsesError, CodexAuthError) as exc:
             return _failure(f"codex_api unreachable: {exc}")
