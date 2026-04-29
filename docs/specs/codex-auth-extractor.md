@@ -1,6 +1,6 @@
 # Codex auth extractor — direct OpenAI API access
 
-**Status:** draft
+**Status:** implemented (deviates from initial draft on the API target — see "Endpoint correction")
 **Owner:** Rachel
 **Target version:** 2026.04.29
 **Branch:** `feat/codex-auth-extractor`
@@ -61,7 +61,7 @@ The `access_token` JWT decodes to:
 
 **Key points:**
 
-- The `access_token` is already a valid `Authorization: Bearer` for `api.openai.com/v1/*`. No token exchange required.
+- The `access_token` is a valid `Authorization: Bearer` for `https://chatgpt.com/backend-api/codex/*` — **NOT** for `api.openai.com/v1/*` directly. The earlier draft assumed the latter; that endpoint rejects the subscription token with `401 Missing scopes: api.responses.write`. See "Endpoint correction" below.
 - Lifetime is roughly 10 days. Refresh ahead of expiry to avoid mid-request 401s.
 - Refresh endpoint: `POST https://auth.openai.com/oauth/token` with `Content-Type: application/x-www-form-urlencoded` and body:
   ```
@@ -74,6 +74,26 @@ The `access_token` JWT decodes to:
 - Error codes Codex CLI handles (extracted from binary strings): `refresh_token_expired`, `refresh_token_already_used`, `refresh_token_revoked`. On any of these we log and surface "re-login required" to the operator; we do not retry.
 
 The Codex client ID `app_EMoamEEZ73f0CkXaXp7hrann` was extracted from the released `@openai/codex-linux-x64` binary as a string constant. We treat it as a runtime parameter (configurable via env var override) rather than a hard-coded constant, so a future Codex update that rotates it doesn't silently break us.
+
+## Endpoint correction (post-implementation finding)
+
+During Phase 2 the assumption that the access token works against `api.openai.com/v1/responses` was disproved by a live call:
+
+```
+401 You have insufficient permissions for this operation.
+    Missing scopes: api.responses.write.
+```
+
+The Codex CLI binary itself targets `https://chatgpt.com/backend-api/codex` (see strings in `@openai/codex-linux-x64`), and that endpoint *does* accept the subscription token. The Codex backend Responses API has a few constraints the public Responses API does not:
+
+- `input` is a list of `{role, content}` objects. A bare string is rejected.
+- `instructions` is required (any non-empty string is fine).
+- `store: false` and `stream: true` are both required. Synchronous calls are rejected.
+- `chatgpt-account-id` header is required (taken from the JWT `https://api.openai.com/auth.chatgpt_account_id` claim).
+- The model catalog is the **Codex** catalog (`gpt-5.4-mini`, `gpt-5.4`, `gpt-5.5`, `gpt-5.3-codex`, …) — `gpt-4o-mini` and friends are rejected with `"<model>" is not supported when using Codex with a ChatGPT account`.
+- `max_output_tokens` is rejected as `Unsupported parameter`. We accept the kwarg in the public API surface and silently drop it; callers control length via `instructions`.
+
+`lib/codex_auth/responses.py` accumulates the SSE stream internally and presents a synchronous `ResponseResult` to callers, so the higher-level adapter and triage code stay simple. The launch model is `gpt-5.4-mini` (cheapest in the catalog).
 
 ## Architecture
 
@@ -95,8 +115,8 @@ New CLI: `bin/jc-codex-auth` (Python shim) with subcommands:
 
 New gateway/adapter integration (opt-in via instance config):
 
-- `lib/gateway/triage.py` — accepts a new `triage.brain: codex_api` mode. When set, uses `codex_auth.responses.complete()` against `gpt-4o-mini` (or configured fastest model) instead of shelling out to `codex`/`claude`.
-- `lib/gateway/adapters/codex_api.py` — main-chat adapter that uses the Responses API directly. Selectable per-channel via `ops/gateway.yaml`.
+- `lib/gateway/triage/codex_api.py` — `CodexApiTriage` backend. Selected via `triage: codex_api` in `ops/gateway.yaml`. Uses `codex_auth.responses.complete()` against `gpt-5.4-mini` (overridable by repurposing `openrouter_model`).
+- `lib/gateway/adapters/codex_api.py` + `lib/gateway/brains/codex_api.py` — main-chat adapter + Brain wrapper. Selectable per-channel via `channels.<name>.brain: codex_api`. The Brain overrides `invoke()` because there is no on-disk shell adapter to exec.
 
 The existing `codex` CLI adapter stays untouched and continues to be the choice for `jc workers spawn --brain codex` (spawn / coding tasks need the CLI's tool loop).
 
@@ -144,21 +164,22 @@ Concurrency notes:
 Per-instance, `ops/gateway.yaml`:
 
 ```yaml
-triage:
-  brain: codex_api          # NEW value; existing values stay valid
-  model: gpt-4o-mini        # cheapest reasoning-capable model
+default_brain: claude              # unchanged
+triage: codex_api                  # NEW backend; "openrouter" / "claude-channel" still valid
+openrouter_model: gpt-5.4-mini     # repurposed: triage model when triage=codex_api
 
-adapters:
-  default_brain: claude     # unchanged
-  per_channel:
-    telegram_dm: codex_api  # NEW: route inbound DMs through Codex API
-    telegram_group_*: codex_api
-  spawn_brain: codex        # workers still use codex CLI
+channels:
+  telegram:
+    brain: codex_api               # route inbound DMs through Codex Responses
+    model: gpt-5.4-mini            # default catalog: gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.3-codex
 
 codex_auth:
-  auth_file: ~/.codex/auth.json   # explicit, overridable for testing
-  client_id_override: null         # null = read from binary string default
+  auth_file: ~/.codex/auth.json    # explicit, overridable for testing
+  client_id_override: null         # null = read from JWT, else env CODEX_CLIENT_ID
   refresh_skew_seconds: 300        # refresh this far ahead of exp
+
+# Spawn workers (`jc workers spawn --brain codex`) still use the existing
+# `codex` CLI adapter — that path is untouched.
 ```
 
 Defaults preserve current behavior — nothing changes unless an operator opts in.

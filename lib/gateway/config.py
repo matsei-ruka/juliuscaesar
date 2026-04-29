@@ -10,9 +10,16 @@ from pathlib import Path
 from typing import Any
 
 
-SUPPORTED_BRAINS = ("claude", "codex", "opencode", "gemini", "aider")
+SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider")
 SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron")
-SUPPORTED_TRIAGE_BACKENDS = ("none", "always", "ollama", "openrouter", "claude-channel")
+SUPPORTED_TRIAGE_BACKENDS = (
+    "none",
+    "always",
+    "ollama",
+    "openrouter",
+    "claude-channel",
+    "codex_api",
+)
 REJECTED_CHANNELS = {"web": "web channel removed in 0.3.0; use `jc gateway enqueue` for local testing"}
 
 
@@ -71,6 +78,13 @@ class ReliabilityConfig:
 
 
 @dataclass(frozen=True)
+class CodexAuthConfig:
+    auth_file: str = "~/.codex/auth.json"
+    client_id_override: str | None = None
+    refresh_skew_seconds: int = 300
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
@@ -82,6 +96,7 @@ class GatewayConfig:
     triage: TriageConfig = field(default_factory=TriageConfig)
     brains: dict[str, BrainOverrideConfig] = field(default_factory=dict)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
+    codex_auth: CodexAuthConfig = field(default_factory=CodexAuthConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -320,6 +335,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "claude_triage_model",
         "claude_triage_port",
         "company",
+        "codex_auth",
     }
     for key in data:
         if key not in allowed_top:
@@ -512,6 +528,29 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 if value is not None and not isinstance(value, (list, tuple)):
                     errors.append(f"company.{key}: must be a list")
 
+    codex_auth_raw = data.get("codex_auth")
+    if codex_auth_raw is not None:
+        if not isinstance(codex_auth_raw, dict):
+            errors.append("codex_auth: must be a mapping")
+        else:
+            allowed_codex_auth = {"auth_file", "client_id_override", "refresh_skew_seconds"}
+            for key in codex_auth_raw:
+                if key not in allowed_codex_auth:
+                    errors.append(f"codex_auth.{key}: unknown field")
+            if codex_auth_raw.get("auth_file") is not None and not isinstance(
+                codex_auth_raw["auth_file"], str
+            ):
+                errors.append("codex_auth.auth_file: must be a string")
+            cid = codex_auth_raw.get("client_id_override")
+            if cid is not None and not isinstance(cid, str):
+                errors.append("codex_auth.client_id_override: must be a string or null")
+            if codex_auth_raw.get("refresh_skew_seconds") is not None:
+                _validate_nonnegative_int(
+                    errors,
+                    "codex_auth.refresh_skew_seconds",
+                    codex_auth_raw["refresh_skew_seconds"],
+                )
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -621,6 +660,23 @@ def _load_brains(data: dict[str, Any]) -> dict[str, BrainOverrideConfig]:
     return out
 
 
+def _load_codex_auth(data: dict[str, Any]) -> CodexAuthConfig:
+    raw = data.get("codex_auth") if isinstance(data.get("codex_auth"), dict) else {}
+    return CodexAuthConfig(
+        auth_file=str(raw.get("auth_file") or DEFAULT_CONFIG.codex_auth.auth_file),
+        client_id_override=(
+            str(raw["client_id_override"])
+            if raw.get("client_id_override") is not None
+            else None
+        ),
+        refresh_skew_seconds=int(
+            raw.get("refresh_skew_seconds")
+            if raw.get("refresh_skew_seconds") is not None
+            else DEFAULT_CONFIG.codex_auth.refresh_skew_seconds
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -676,6 +732,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         triage=_load_triage(data),
         brains=_load_brains(data),
         reliability=_load_reliability(data),
+        codex_auth=_load_codex_auth(data),
     )
 
 

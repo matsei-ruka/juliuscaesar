@@ -188,7 +188,11 @@ class GatewayRuntime:
     def _get_triage_backend(self) -> TriageBackend | None:
         with self._triage_lock:
             if self._triage_backend is None and self.config.triage.backend not in ("none", "", "always"):
-                self._triage_backend = build_backend(self.config.triage, self.instance_dir)
+                self._triage_backend = build_backend(
+                    self.config.triage,
+                    self.instance_dir,
+                    codex_auth_cfg=self.config.codex_auth,
+                )
             return self._triage_backend
 
     def reload_config(self) -> None:

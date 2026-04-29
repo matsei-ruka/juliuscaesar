@@ -16,6 +16,7 @@ from .aider import AiderBrain
 from .base import Brain, BrainResult
 from .claude import ClaudeBrain
 from .codex import CodexBrain
+from .codex_api import CodexApiBrain
 from .gemini import GeminiBrain
 from .opencode import OpencodeBrain
 
@@ -23,6 +24,7 @@ from .opencode import OpencodeBrain
 _BRAIN_REGISTRY: dict[str, type[Brain]] = {
     "claude": ClaudeBrain,
     "codex": CodexBrain,
+    "codex_api": CodexApiBrain,
     "gemini": GeminiBrain,
     "opencode": OpencodeBrain,
     "aider": AiderBrain,
@@ -49,7 +51,14 @@ def invoke_brain(
     if cls is None:
         raise ValueError(f"unsupported brain: {brain}")
     override = (config.brains.get(brain) if config else None) or BrainOverrideConfig()
-    instance = cls(instance_dir, override=override)
+    if cls is CodexApiBrain:
+        instance = cls(
+            instance_dir,
+            override=override,
+            codex_auth_cfg=config.codex_auth if config else None,
+        )
+    else:
+        instance = cls(instance_dir, override=override)
     return instance.invoke(
         event=event,
         model=model,

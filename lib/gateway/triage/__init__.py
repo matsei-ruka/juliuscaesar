@@ -3,6 +3,7 @@
 from .base import TriageBackend, TriageResult
 from .cache import TriageCache
 from .claude_channel import ClaudeChannelTriage
+from .codex_api import CodexApiTriage
 from .factory import build_backend
 from .metrics import MetricsRecorder
 from .ollama import OllamaTriage
@@ -11,6 +12,7 @@ from .openrouter import OpenRouterTriage
 
 __all__ = [
     "ClaudeChannelTriage",
+    "CodexApiTriage",
     "MetricsRecorder",
     "OllamaTriage",
     "OpenRouterTriage",
