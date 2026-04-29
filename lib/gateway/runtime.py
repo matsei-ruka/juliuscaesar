@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from . import overrides, process_sessions, queue, router, sessions
+from . import overrides, process_sessions, queue, router, sessions, transcripts
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
@@ -231,6 +231,58 @@ class GatewayRuntime:
             source=event.source,
             channel=event.source,
         )
+        if inserted:
+            self._log_inbound_transcript(event)
+
+    _TRANSCRIPT_CHANNELS = ("telegram", "slack", "discord", "voice")
+
+    def _log_inbound_transcript(self, event: queue.Event) -> None:
+        """Append the inbound user message to its conversation transcript.
+
+        Only chat channels participate — cron / jc-events fan-outs are not
+        conversations. Best-effort: any failure is swallowed so a transcript
+        write cannot block the dispatch loop.
+        """
+        if event.source not in self._TRANSCRIPT_CHANNELS:
+            return
+        meta = decode_meta(event)
+        try:
+            transcripts.append(
+                self.instance_dir,
+                conversation_id=event.conversation_id,
+                role="user",
+                text=event.content,
+                message_id=event.source_message_id,
+                channel=event.source,
+                chat_id=str(meta.get("chat_id") or event.conversation_id or ""),
+                ts=event.received_at,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _log_outbound_transcript(
+        self,
+        event: queue.Event,
+        response: str,
+        meta: dict[str, Any],
+        channel: str,
+    ) -> None:
+        if channel not in self._TRANSCRIPT_CHANNELS:
+            return
+        if not response:
+            return
+        try:
+            transcripts.append(
+                self.instance_dir,
+                conversation_id=event.conversation_id,
+                role="assistant",
+                text=response,
+                message_id=None,
+                channel=channel,
+                chat_id=str(meta.get("chat_id") or event.conversation_id or ""),
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def start_channels(self) -> None:
         # Register this gateway process session for tracking + orphan detection.
@@ -529,6 +581,7 @@ class GatewayRuntime:
         if meta.get("was_voice"):
             self._render_voice_reply(response, meta)
         self._deliver_response(channel, response, meta)
+        self._log_outbound_transcript(event, response, meta, channel)
         if self._company_reporter is not None:
             try:
                 meta_with_brain = {**meta, "brain": brain}

@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import fcntl
 import hashlib
+import json
 import os
 import re
 import signal
@@ -25,6 +26,8 @@ import yaml
 from dotenv import load_dotenv
 
 from jc_paths import resolve_instance_path
+
+from . import builtins as _builtins
 
 
 FRAMEWORK_ROOT = Path(__file__).resolve().parent  # lib/heartbeat/
@@ -301,6 +304,63 @@ def resolve_destinations(task: dict, defaults: dict, all_destinations: dict) -> 
     return resolved
 
 
+def _run_builtin_task(
+    instance_dir: Path,
+    *,
+    task_name: str,
+    builtin_name: str,
+    task: dict,
+    state: Path,
+    ts_tag: str,
+    log_path: Path,
+    dry_run: bool,
+) -> int:
+    """Dispatch a ``builtin: <name>`` task to its Python handler."""
+    fn = _builtins.get(builtin_name)
+    if fn is None:
+        log_line(
+            f"task {task_name}: unknown builtin {builtin_name!r} "
+            f"(known: {', '.join(_builtins.names())})",
+            log_path,
+        )
+        print(f"Unknown builtin: {builtin_name}", file=sys.stderr)
+        return 2
+    enabled = task.get("enabled", False)
+    # Builtins ship disabled — operator opts in by setting `enabled: true`.
+    if not enabled and not dry_run:
+        log_line(
+            f"task {task_name}: builtin {builtin_name} not enabled; set "
+            f"`enabled: true` in tasks.yaml to commit changes",
+            log_path,
+        )
+        # Treat the disabled state as an automatic dry-run so cron schedules
+        # can be set up before flipping the bit.
+        dry_run = True
+    log_line(
+        f"task {task_name}: builtin={builtin_name} dry_run={dry_run}",
+        log_path,
+    )
+    try:
+        summary = fn(instance_dir, dry_run)
+    except Exception as exc:  # noqa: BLE001
+        log_line(
+            f"task {task_name}: builtin {builtin_name} raised {exc!r}",
+            log_path,
+        )
+        return 1
+    output_path = state / "outputs" / f"{task_name}-{ts_tag}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    log_line(
+        f"task {task_name}: builtin {builtin_name} ok output={output_path}",
+        log_path,
+    )
+    if dry_run:
+        # Print a compact summary so operators can preview decisions.
+        print(json.dumps(summary, indent=2))
+    return 0 if summary.get("ok", True) else 1
+
+
 class FileLock:
     def __init__(self, path: Path):
         self.path = path
@@ -363,6 +423,21 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         return 0
 
     try:
+        # Built-in tasks short-circuit the LLM dispatch path. Used for things
+        # like hot_tidy that need to run pure-Python over instance state.
+        builtin_name = task.get("builtin")
+        if builtin_name:
+            return _run_builtin_task(
+                instance_dir,
+                task_name=task_name,
+                builtin_name=str(builtin_name),
+                task=task,
+                state=state,
+                ts_tag=ts_tag,
+                log_path=log_path,
+                dry_run=dry_run,
+            )
+
         tool = resolve(task, defaults, "tool", "claude")
         model = resolve(task, defaults, "model", None)
         allowlist = list(defaults.get("path_allowlist") or []) + list(task.get("path_allowlist") or [])

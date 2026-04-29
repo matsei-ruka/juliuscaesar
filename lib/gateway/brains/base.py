@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .. import chats as chats_module
+from .. import transcripts as transcripts_module
 from ..config import BrainOverrideConfig, GatewayConfig
 from ..context import render_preamble
 from ..queue import Event
@@ -194,6 +195,9 @@ class Brain:
         if not os.access(adapter, os.X_OK):
             raise PermissionError(f"adapter not executable: {adapter}")
 
+    # Number of transcript lines to inject as priming context on resume.
+    TRANSCRIPT_PRIMING_LINES = 10
+
     def invoke(
         self,
         *,
@@ -206,6 +210,16 @@ class Brain:
     ) -> BrainResult:
         self.validate()
         prompt = self.prompt_for_event(event)
+        # Stateless brains lose context across invocations. When resuming a
+        # conversation, prepend the tail of the per-conversation transcript
+        # so the brain has at least N turns of recent history. Claude (and
+        # any other brain that auto-resumes sessions) sets needs_l1_preamble
+        # = False — it already has context server-side, so we skip priming
+        # to avoid duplication.
+        if resume_session and self.needs_l1_preamble and event.conversation_id:
+            priming = self._build_transcript_priming(event)
+            if priming:
+                prompt = priming + "\n\n" + prompt
         env = os.environ.copy()
         env["JC_INSTANCE_DIR"] = str(self.instance_dir)
         if resume_session:
@@ -302,6 +316,40 @@ class Brain:
         return BrainResult(response=stdout.strip(), session_id=session_id)
 
     # --- helpers -----------------------------------------------------------
+
+    def _build_transcript_priming(self, event: Event) -> str:
+        """Render the last N transcript lines as a context-priming block.
+
+        Returns "" when there's no transcript file or no usable lines.
+        Excludes the just-enqueued inbound message (its content is already
+        in the prompt body) by trimming a trailing user line that matches.
+        """
+        if not event.conversation_id:
+            return ""
+        path = transcripts_module.transcript_path(self.instance_dir, event.conversation_id)
+        events = transcripts_module.tail(path, lines=self.TRANSCRIPT_PRIMING_LINES + 1)
+        if not events:
+            return ""
+        # Drop the trailing user line if it's the same message we're processing
+        # (it was just appended at enqueue time).
+        if (
+            events
+            and events[-1].role == "user"
+            and events[-1].text.strip() == (event.content or "").strip()
+        ):
+            events = events[:-1]
+        events = events[-self.TRANSCRIPT_PRIMING_LINES :]
+        if not events:
+            return ""
+        body = transcripts_module.render_priming_block(events)
+        if not body:
+            return ""
+        return (
+            "# Recent conversation history (resume context)\n\n"
+            "Last messages from this conversation, oldest first. "
+            "Use for continuity; do not echo verbatim.\n\n"
+            f"{body}"
+        )
 
     def _meta(self, event: Event) -> dict:
         if not event.meta:
