@@ -41,6 +41,14 @@ tasks:
       Respond with ONE short sentence confirming the heartbeat pipeline is alive.
       Mention the current time ({{time}}).
 
+  # Built-in: trim memory/L1/HOT.md to its size caps (5 items per section)
+  # and archive overflow to memory/L2/. Ships disabled — flip `enabled: true`
+  # to commit changes (otherwise it runs as a dry-run and just reports).
+  # Suggested cadence: once/day. No Telegram delivery.
+  hot_tidy:
+    builtin: hot_tidy
+    enabled: false
+
   # Example: a report that fans out to two destinations simultaneously.
   # Uncomment + wire up your destinations above to use.
   #
