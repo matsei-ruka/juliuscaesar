@@ -5,17 +5,18 @@
 #   jc <subcommand> <args...>
 #
 # Known subcommands:
-#   memory     Knowledge base (llm-wiki + FTS5).
-#   heartbeat  Run scheduled tasks.
-#   voice      TTS / ASR / voice enrollment.
-#   watchdog   Supervisor for the instance's live claude session.
-#   workers    On-demand background agents.
-#   chats      Telegram chat directory.
-#   gateway    Durable event queue and gateway runtime.
-#   company    Fleet observability client (The Company).
-#   init       Scaffold a new instance from templates.
-#   setup      Guided first-run configurator.
-#   update     Check and apply framework updates.
+#   memory       Knowledge base (llm-wiki + FTS5).
+#   heartbeat    Run scheduled tasks.
+#   voice        TTS / ASR / voice enrollment.
+#   watchdog     Supervisor for the instance's live claude session.
+#   workers      On-demand background agents.
+#   chats        Telegram chat directory.
+#   transcripts  Per-conversation chat transcripts (read/tail/search).
+#   gateway      Durable event queue and gateway runtime.
+#   company      Fleet observability client (The Company).
+#   init         Scaffold a new instance from templates.
+#   setup        Guided first-run configurator.
+#   update       Check and apply framework updates.
 #
 # All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
 
@@ -36,6 +37,7 @@ Subcommands:
   watchdog     Live session supervisor (jc-watchdog).
   workers      On-demand background agents (jc-workers).
   chats        Telegram chat directory (jc-chats).
+  transcripts  Per-conversation chat transcripts (jc-transcripts).
   gateway      Durable event queue and gateway runtime (jc-gateway).
   company      Fleet observability client (jc-company).
   init         Scaffold a new instance from templates.
@@ -97,7 +99,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|chats|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3)
+    memory|heartbeat|voice|watchdog|workers|chats|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

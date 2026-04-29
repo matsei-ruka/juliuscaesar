@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""jc-transcripts — read, tail, search the gateway's per-conversation transcripts.
+
+Subcommands:
+  read    Print full transcript for a conversation_id.
+  tail    Print last N events (default 20).
+  search  Substring search across all transcripts.
+  get     Find a single event by message_id.
+  list    List known conversation_ids.
+
+Instance dir resolution (same as other jc-* commands):
+  1. --instance-dir flag
+  2. $JC_INSTANCE_DIR env var
+  3. Walk up from cwd for .jc / state/transcripts marker
+  4. cwd
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from gateway import transcripts  # type: ignore  # noqa: E402
+from jc_paths import (  # type: ignore  # noqa: E402
+    InstanceResolutionError,
+    resolve_instance_dir as _resolve_instance_dir,
+)
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("state",))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _format_event(ev: transcripts.TranscriptEvent, *, with_role: bool = True) -> str:
+    ts = (ev.ts or "")[:19].replace("T", " ")
+    role = ev.role or "?"
+    head = f"{ts} [{role}]" if with_role else ts
+    body = ev.text.replace("\n", "\n  ")
+    suffix = f"  (msg={ev.message_id})" if ev.message_id else ""
+    return f"{head}{suffix}\n  {body}"
+
+
+def cmd_read(args: argparse.Namespace, instance: Path) -> int:
+    path = transcripts.transcript_path(instance, args.conversation_id)
+    if not path.exists():
+        print(f"No transcript for conversation_id={args.conversation_id}", file=sys.stderr)
+        return 1
+    events = list(transcripts.iter_events(path))
+    if not events:
+        print("(empty)")
+        return 0
+    for ev in events:
+        print(_format_event(ev))
+        print()
+    return 0
+
+
+def cmd_tail(args: argparse.Namespace, instance: Path) -> int:
+    path = transcripts.transcript_path(instance, args.conversation_id)
+    if not path.exists():
+        print(f"No transcript for conversation_id={args.conversation_id}", file=sys.stderr)
+        return 1
+    events = transcripts.tail(path, lines=args.lines)
+    if args.since:
+        events = [ev for ev in events if ev.ts >= args.since]
+    if not events:
+        print("(no events match)")
+        return 0
+    for ev in events:
+        print(_format_event(ev))
+        print()
+    return 0
+
+
+def cmd_search(args: argparse.Namespace, instance: Path) -> int:
+    matches = transcripts.search(
+        instance,
+        args.query,
+        since=args.since,
+        role=args.role,
+        limit=args.limit,
+    )
+    if not matches:
+        print("(no matches)")
+        return 0
+    for path, ev in matches:
+        conv = path.stem
+        print(f"# {conv}")
+        print(_format_event(ev))
+        print()
+    return 0
+
+
+def cmd_get(args: argparse.Namespace, instance: Path) -> int:
+    found = transcripts.get_by_message_id(instance, args.message_id)
+    if found is None:
+        print(f"No event with message_id={args.message_id}", file=sys.stderr)
+        return 1
+    path, ev = found
+    print(f"# {path.stem}")
+    print(_format_event(ev))
+    return 0
+
+
+def cmd_list(_args: argparse.Namespace, instance: Path) -> int:
+    paths = transcripts.list_conversations(instance)
+    if not paths:
+        print("(no transcripts)")
+        return 0
+    for p in paths:
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        print(f"{p.stem}\t{size}B\t{p}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-transcripts")
+    p.add_argument("--instance-dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pr = sub.add_parser("read", help="Print full transcript for a conversation_id")
+    pr.add_argument("conversation_id")
+    pr.set_defaults(func=cmd_read)
+
+    pt = sub.add_parser("tail", help="Print last N events from a conversation")
+    pt.add_argument("conversation_id")
+    pt.add_argument("--lines", type=int, default=20)
+    pt.add_argument("--since", help="ISO-8601 timestamp; only events >= since")
+    pt.set_defaults(func=cmd_tail)
+
+    ps = sub.add_parser("search", help="Substring search across all transcripts")
+    ps.add_argument("query")
+    ps.add_argument("--since", help="ISO-8601 timestamp; only events >= since")
+    ps.add_argument("--role", choices=["user", "assistant"])
+    ps.add_argument("--limit", type=int, default=50)
+    ps.set_defaults(func=cmd_search)
+
+    pg = sub.add_parser("get", help="Find a single event by message_id")
+    pg.add_argument("message_id")
+    pg.set_defaults(func=cmd_get)
+
+    pl = sub.add_parser("list", help="List known conversation_ids")
+    pl.set_defaults(func=cmd_list)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    instance = resolve_instance_dir(args.instance_dir)
+    return args.func(args, instance)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
