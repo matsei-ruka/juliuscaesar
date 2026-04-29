@@ -86,7 +86,6 @@ class ResponsesClient:
         *,
         model: str | None = None,
         instructions: str | None = None,
-        max_output_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
     ) -> ResponseResult:
         body: dict[str, Any] = {
@@ -100,11 +99,6 @@ class ResponsesClient:
             "store": False,
             "stream": True,
         }
-        # The ChatGPT-subscription endpoint rejects ``max_output_tokens`` as
-        # unsupported. We accept the param for API parity with public
-        # Responses but silently drop it. Callers that need length control
-        # should bake the constraint into ``instructions``.
-        _ = max_output_tokens
         if extra:
             body.update(extra)
         return self._request(body)

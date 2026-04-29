@@ -149,7 +149,7 @@ class ResponsesClientTests(unittest.TestCase):
 
         client = ResponsesClient(auth, default_model="gpt-5.4-mini")
         with mock.patch.object(client, "_post", side_effect=fake_post):
-            result = client.complete("ping", instructions="be terse", max_output_tokens=10)
+            result = client.complete("ping", instructions="be terse")
         self.assertEqual(result.text, "hello world")
         self.assertEqual(len(sent), 1)
         token, account_id, body = sent[0]
@@ -161,8 +161,6 @@ class ResponsesClientTests(unittest.TestCase):
         self.assertFalse(body["store"])
         self.assertTrue(body["stream"])
         self.assertEqual(body["instructions"], "be terse")
-        # max_output_tokens is silently dropped — endpoint rejects it.
-        self.assertNotIn("max_output_tokens", body)
 
     def test_complete_default_instructions_when_none(self):
         auth = _build_client(self.tmp_path)

@@ -66,14 +66,12 @@ class CodexApiAdapter:
         *,
         model: str | None = None,
         instructions: str | None = None,
-        max_output_tokens: int | None = None,
     ) -> AdapterCallResult:
         try:
             result = self._client.complete(
                 prompt,
                 model=model or self._model,
                 instructions=instructions,
-                max_output_tokens=max_output_tokens,
             )
         except (ResponsesError, CodexAuthError):
             raise
