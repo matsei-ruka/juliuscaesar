@@ -131,8 +131,11 @@ FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
 WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 
 
-def parse_markdown(path: Path, instance_dir: Path) -> Entry:
-    """Parse a markdown file with YAML frontmatter into an Entry."""
+def parse_markdown(path: Path, instance_dir: Path) -> Entry | None:
+    """Parse a markdown file with YAML frontmatter into an Entry.
+
+    Returns None if noindex: true is set in frontmatter (file is skipped from index).
+    """
     text = path.read_text(encoding="utf-8")
     m = FRONTMATTER_RE.match(text)
     if not m:
@@ -140,6 +143,9 @@ def parse_markdown(path: Path, instance_dir: Path) -> Entry:
     raw_fm, body = m.group(1), m.group(2)
 
     fm = _load_yaml(raw_fm)
+
+    if fm.get("noindex"):
+        return None
 
     slug = fm.get("slug") or _slug_from_path(path, instance_dir)
     layer = fm.get("layer") or _layer_from_path(path, instance_dir)
@@ -288,12 +294,14 @@ def rebuild(conn: sqlite3.Connection, instance_dir: Path) -> tuple[int, int, int
     (e.g. unknown ``state:`` value) or that fail the SQLite CHECK constraints
     are reported via stderr-bound ``[skip] <path>: <reason>`` lines and counted
     in ``skipped``; one bad file no longer aborts the whole rebuild.
+    Files with ``noindex: true`` are silently skipped (not counted).
     """
     import sys as _sys
 
     paths = list(_iter_md_files(instance_dir))
     upserted = 0
     skipped = 0
+    indexed_paths = []
     for p in paths:
         try:
             entry = parse_markdown(p, instance_dir)
@@ -301,6 +309,10 @@ def rebuild(conn: sqlite3.Connection, instance_dir: Path) -> tuple[int, int, int
             print(f"[skip] {p}: {e}", file=_sys.stderr)
             skipped += 1
             continue
+        if entry is None:
+            # noindex: true — skip silently, don't count
+            continue
+        indexed_paths.append(p)
         try:
             upsert(conn, entry)
         except sqlite3.IntegrityError as e:
@@ -311,7 +323,7 @@ def rebuild(conn: sqlite3.Connection, instance_dir: Path) -> tuple[int, int, int
             skipped += 1
             continue
         upserted += 1
-    indexed_slugs = (_slug_from_path(p, instance_dir) for p in paths)
+    indexed_slugs = (_slug_from_path(p, instance_dir) for p in indexed_paths)
     removed = delete_missing(conn, indexed_slugs)
     conn.commit()
     return upserted, removed, skipped
