@@ -347,8 +347,11 @@ def cmd_log(args: argparse.Namespace, instance: Path) -> int:
 def cmd_rebuild(_args: argparse.Namespace, instance: Path) -> int:
     conn = connect(instance)
     try:
-        ups, gone = rebuild(conn, instance)
-        print(f"rebuild: {ups} entries upserted, {gone} removed")
+        ups, gone, skipped = rebuild(conn, instance)
+        msg = f"rebuild: {ups} entries upserted, {gone} removed"
+        if skipped:
+            msg += f", {skipped} skipped (see stderr)"
+        print(msg)
     finally:
         conn.close()
     _write_index(instance)
