@@ -11,6 +11,7 @@ imported `lib.gateway.channels.TelegramChannel` directly.
 from .base import Channel, DeliveryTarget, EnqueueFn, LogFn
 from .cron import CronChannel
 from .discord import DiscordChannel
+from .email import EmailChannel
 from .jc_events import JcEventsChannel
 from .registry import build_enabled_channels, deliver
 from .slack import SlackSocketModeChannel
@@ -23,6 +24,7 @@ __all__ = [
     "CronChannel",
     "DeliveryTarget",
     "DiscordChannel",
+    "EmailChannel",
     "EnqueueFn",
     "JcEventsChannel",
     "LogFn",

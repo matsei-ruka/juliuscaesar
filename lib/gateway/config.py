@@ -11,7 +11,7 @@ from typing import Any
 
 
 SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider")
-SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron")
+SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email")
 SUPPORTED_TRIAGE_BACKENDS = (
     "none",
     "always",
@@ -141,6 +141,9 @@ DEFAULT_CONFIG = GatewayConfig(
             enabled=True,
             watch_dir="state/cron",
             poll_interval_seconds=2,
+        ),
+        "email": ChannelConfig(
+            enabled=False,
         ),
     }
 )
@@ -431,6 +434,14 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "paired_with",
                 "asr_provider",
                 "tts_provider",
+                # Email channel: nested dicts validated lazily by the channel itself.
+                "imap",
+                "smtp",
+                "senders",
+                "state",
+                "body_limit",
+                "notify_on_unknown",
+                "telegram_chat_id",
             }
             for raw_key, raw_value in channels_raw.items():
                 normalized = _normalize_channel_key(str(raw_key))
