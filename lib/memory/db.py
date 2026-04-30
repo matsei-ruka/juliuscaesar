@@ -24,6 +24,13 @@ except ImportError:  # pragma: no cover - tiny fallback
     yaml = None
 
 
+# Allowed values for the `state:` frontmatter field. Kept in sync with the
+# CHECK constraint on `entries.state` in SCHEMA below — drift between the two
+# would be silently swallowed by SQLite at upsert time and surface only as
+# IntegrityError mid-rebuild.
+VALID_STATES = frozenset({"draft", "reviewed", "verified", "stale", "archived"})
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (
     slug           TEXT PRIMARY KEY,
@@ -147,12 +154,18 @@ def parse_markdown(path: Path, instance_dir: Path) -> Entry:
     if isinstance(tags, str):
         tags = [tags]
 
+    state = fm.get("state") or "draft"
+    if state not in VALID_STATES:
+        raise ValueError(
+            f"invalid state {state!r} (must be one of {sorted(VALID_STATES)})"
+        )
+
     return Entry(
         slug=slug,
         title=str(fm.get("title") or slug),
         layer=layer,
         type=fm.get("type"),
-        state=fm.get("state") or "draft",
+        state=state,
         path=str(path.relative_to(instance_dir)),
         created=_iso(fm.get("created")),
         updated=_iso(fm.get("updated")),
@@ -268,19 +281,40 @@ def delete_missing(conn: sqlite3.Connection, present_slugs: Iterable[str]) -> in
     return len(gone)
 
 
-def rebuild(conn: sqlite3.Connection, instance_dir: Path) -> tuple[int, int]:
-    """Re-scan .md files under memory/L1 and memory/L2 and sync DB."""
+def rebuild(conn: sqlite3.Connection, instance_dir: Path) -> tuple[int, int, int]:
+    """Re-scan .md files under memory/L1 and memory/L2 and sync DB.
+
+    Returns ``(upserted, removed, skipped)``. Files with invalid frontmatter
+    (e.g. unknown ``state:`` value) or that fail the SQLite CHECK constraints
+    are reported via stderr-bound ``[skip] <path>: <reason>`` lines and counted
+    in ``skipped``; one bad file no longer aborts the whole rebuild.
+    """
+    import sys as _sys
+
     paths = list(_iter_md_files(instance_dir))
+    upserted = 0
+    skipped = 0
     for p in paths:
         try:
             entry = parse_markdown(p, instance_dir)
         except ValueError as e:
-            print(f"[skip] {p}: {e}")
+            print(f"[skip] {p}: {e}", file=_sys.stderr)
+            skipped += 1
             continue
-        upsert(conn, entry)
-    removed = delete_missing(conn, (_slug_from_path(p, instance_dir) for p in paths))
+        try:
+            upsert(conn, entry)
+        except sqlite3.IntegrityError as e:
+            # Defensive: parser-level validation should already cover the
+            # known cases (unknown layer/state). This catches any mismatch
+            # between Python validation and a future schema-side CHECK.
+            print(f"[skip] {p}: {e}", file=_sys.stderr)
+            skipped += 1
+            continue
+        upserted += 1
+    indexed_slugs = (_slug_from_path(p, instance_dir) for p in paths)
+    removed = delete_missing(conn, indexed_slugs)
     conn.commit()
-    return len(paths), removed
+    return upserted, removed, skipped
 
 
 # Files written by other framework subsystems (e.g. gateway chat-discovery)
