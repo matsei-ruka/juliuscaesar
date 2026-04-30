@@ -117,6 +117,45 @@ class RebuildInvalidStateTests(unittest.TestCase):
         }
         self.assertEqual(sql_states, set(memory_db.VALID_STATES))
 
+    def test_noindex_flag_skips_parse(self):
+        """noindex: true in frontmatter returns None (not indexed)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = Path(tmp)
+            target = inst / "memory" / "L2" / "operational.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                "---\nslug: operational\ntitle: T\nlayer: L2\nnoindex: true\n---\nBody.\n"
+            )
+            entry = memory_db.parse_markdown(target, inst)
+            self.assertIsNone(entry)
+
+    def test_rebuild_skips_noindex_silently(self):
+        """rebuild() skips noindex files without counting them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = Path(tmp)
+            _write_entry(inst, layer="L2", slug="indexed", state="draft")
+            # Operational file with noindex: true
+            noindex_file = inst / "memory" / "L2" / "operational.md"
+            noindex_file.parent.mkdir(parents=True, exist_ok=True)
+            noindex_file.write_text(
+                "---\nslug: operational\ntitle: Op\nlayer: L2\nnoindex: true\n---\nState.\n"
+            )
+            conn = memory_db.connect(inst)
+            try:
+                upserted, removed, skipped = memory_db.rebuild(conn, inst)
+            finally:
+                conn.close()
+            # Only the indexed entry is upserted; noindex file is silent
+            self.assertEqual(upserted, 1)
+            self.assertEqual(skipped, 0)
+            # Verify operational file is NOT in DB
+            conn = memory_db.connect(inst)
+            try:
+                row = memory_db.get(conn, "operational")
+                self.assertIsNone(row)
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

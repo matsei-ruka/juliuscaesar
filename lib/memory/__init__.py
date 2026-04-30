@@ -5,7 +5,7 @@ The SQLite index is derived and rebuildable.
 
 Public API:
     connect(instance_dir: Path) -> sqlite3.Connection
-    parse_markdown(path: Path, instance_dir: Path) -> Entry
+    parse_markdown(path: Path, instance_dir: Path) -> Entry | None
     upsert(conn, entry: Entry) -> None
     rebuild(conn, instance_dir: Path) -> tuple[int, int]
     search(conn, query: str, limit: int = 10) -> list[Row]
