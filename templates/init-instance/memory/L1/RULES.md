@@ -33,6 +33,15 @@ Why: The live session should stay responsive.
 How to apply: Do quick answers inline. For longer implementation, research,
 scaffolding, or test-heavy work, use `jc workers spawn` when available.
 
+**Recursion guard:** if `$JC_IN_WORKER` is set in the environment, this rule
+is suspended — you ARE the worker, do the work inline, never call
+`jc workers spawn` on your own prompt. Why: `jc-workers _run` sets
+`JC_IN_WORKER=1` because workers run with `cwd=instance_dir` and load this
+same `CLAUDE.md`. Without the guard, the worker reads its own prompt,
+classifies it as "longer implementation", and spawns a sub-worker — which
+does the same. Infinite recursion (observed 2026-04-30 in rachel_zane: 40+
+workers spawned in 7 minutes, none did the work).
+
 ## Conversation transcripts
 
 Why: Every chat thread is logged to `state/transcripts/<conversation_id>.jsonl`.
