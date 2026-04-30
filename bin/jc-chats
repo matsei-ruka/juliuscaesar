@@ -22,6 +22,7 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from gateway import chats  # type: ignore  # noqa: E402
+from gateway.channels import email_dispatcher as _email_dispatcher  # type: ignore  # noqa: E402
 from gateway.config import load_config  # type: ignore  # noqa: E402
 from gateway.config_writer import (  # type: ignore  # noqa: E402
     env_chat_ids,
@@ -97,8 +98,18 @@ def _config_authority(instance: Path, channel: str) -> tuple[set[str], set[str]]
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    """Add chat_id to yaml chat_ids + .env TELEGRAM_CHAT_IDS. Idempotent."""
+    """Approve a chat_id (telegram-style) or a sender email address.
+
+    `--email <addr>` routes to the email-channel allowlist in
+    `ops/gateway.yaml` (`channels.email.senders.allowed`), drains any
+    pending messages from that sender into the gateway queue, and
+    notifies Telegram. Otherwise behaves as the original chat_id flow.
+    """
     instance = resolve_instance_dir(args.instance_dir)
+    if args.email:
+        return _approve_email(instance, args.email)
+    if not args.chat_id:
+        raise SystemExit("approve: provide a chat_id or --email <addr>")
     allowed, blocked = _config_authority(instance, args.channel)
     if args.chat_id in allowed:
         print(f"chat {args.chat_id} already approved (no-op)")
@@ -122,8 +133,17 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_deny(args: argparse.Namespace) -> int:
-    """Add chat_id to yaml blocked_chat_ids. Removes from chat_ids. Idempotent."""
+    """Deny a chat_id (telegram-style) or a sender email address.
+
+    `--email <addr>` routes to `channels.email.senders.blocklist` in
+    `ops/gateway.yaml`, drops any pending messages from that sender,
+    and notifies Telegram.
+    """
     instance = resolve_instance_dir(args.instance_dir)
+    if args.email:
+        return _deny_email(instance, args.email)
+    if not args.chat_id:
+        raise SystemExit("deny: provide a chat_id or --email <addr>")
     _allowed, blocked = _config_authority(instance, args.channel)
     if args.chat_id in blocked:
         print(f"chat {args.chat_id} already blocked (no-op)")
@@ -144,6 +164,159 @@ def cmd_deny(args: argparse.Namespace) -> int:
     print(
         "note: bot will leave the chat on the next live update; "
         "for an immediate leave, run `jc chats deny --leave-now <chat_id>`"
+    )
+    return 0
+
+
+def _email_senders(instance: Path) -> tuple[set[str], set[str]]:
+    """Read `(allowed, blocked)` sender sets from `channels.email.senders`."""
+    import yaml as _yaml
+    cfg_path = instance / "ops" / "gateway.yaml"
+    if not cfg_path.exists():
+        return set(), set()
+    try:
+        data = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except _yaml.YAMLError:
+        return set(), set()
+    senders = ((data.get("channels") or {}).get("email") or {}).get("senders") or {}
+    allowed = {str(s).lower() for s in (senders.get("allowed") or [])}
+    blocked = {str(s).lower() for s in (senders.get("blocklist") or [])}
+    return allowed, blocked
+
+
+def _update_email_sender_list(
+    instance: Path,
+    *,
+    allow_add: list[str] | None = None,
+    block_add: list[str] | None = None,
+) -> bool:
+    """Idempotently add a sender to the email allowlist or blocklist.
+
+    Removes the sender from the opposite list if present (so a previously
+    denied sender can be re-approved without manual yaml editing).
+    """
+    import yaml as _yaml
+    from gateway.config_writer import atomic_write_text
+
+    cfg_path = instance / "ops" / "gateway.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    text = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+    data = _yaml.safe_load(text) if text else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    channels = data.setdefault("channels", {})
+    if not isinstance(channels, dict):
+        channels = {}
+        data["channels"] = channels
+    email = channels.setdefault("email", {})
+    if not isinstance(email, dict):
+        email = {}
+        channels["email"] = email
+    senders = email.setdefault("senders", {})
+    if not isinstance(senders, dict):
+        senders = {}
+        email["senders"] = senders
+    allowed = list(senders.get("allowed") or [])
+    blocked = list(senders.get("blocklist") or [])
+
+    changed = False
+    for s in allow_add or []:
+        s_norm = s.lower().strip()
+        if s_norm and s_norm not in (a.lower() for a in allowed):
+            allowed.append(s_norm)
+            changed = True
+        # Remove from blocklist if present.
+        new_blocked = [b for b in blocked if b.lower() != s_norm]
+        if new_blocked != blocked:
+            blocked = new_blocked
+            changed = True
+    for s in block_add or []:
+        s_norm = s.lower().strip()
+        if s_norm and s_norm not in (b.lower() for b in blocked):
+            blocked.append(s_norm)
+            changed = True
+        new_allowed = [a for a in allowed if a.lower() != s_norm]
+        if new_allowed != allowed:
+            allowed = new_allowed
+            changed = True
+
+    if not changed:
+        return False
+
+    senders["allowed"] = sorted(allowed)
+    if blocked:
+        senders["blocklist"] = sorted(blocked)
+    elif "blocklist" in senders:
+        del senders["blocklist"]
+
+    new_text = _yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    if new_text == text:
+        return False
+    atomic_write_text(cfg_path, new_text)
+    return True
+
+
+def _notify_telegram_decision(instance: Path, body: str) -> None:
+    """Best-effort Telegram confirmation. No-op if sender unavailable."""
+    import os as _os
+    import subprocess as _sp
+
+    sender = Path(__file__).resolve().parent.parent / "lib" / "heartbeat" / "lib" / "send_telegram.py"
+    if not sender.exists():
+        return
+    env = _os.environ.copy()
+    env["JC_INSTANCE_DIR"] = str(instance)
+    try:
+        _sp.run(
+            [sys.executable, str(sender)],
+            input=body,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _approve_email(instance: Path, email_addr: str) -> int:
+    addr = email_addr.lower().strip()
+    allowed, _blocked = _email_senders(instance)
+    if addr in allowed:
+        print(f"sender {addr} already on email allowlist (no-op)")
+        return 0
+    changed = _update_email_sender_list(instance, allow_add=[addr])
+    if changed:
+        print(f"ops/gateway.yaml updated (+channels.email.senders.allowed: {addr})")
+    drained = _email_dispatcher.drain_pending(instance, addr, action="approve")
+    if drained:
+        print(f"drained {drained} pending message(s) from {addr} → gateway queue")
+    _notify_telegram_decision(
+        instance,
+        f"✅ Email sender approved: `{addr}`\n"
+        + (f"Drained {drained} pending message(s) into the queue." if drained else "No pending messages."),
+    )
+    return 0
+
+
+def _deny_email(instance: Path, email_addr: str) -> int:
+    addr = email_addr.lower().strip()
+    _allowed, blocked = _email_senders(instance)
+    if addr in blocked:
+        print(f"sender {addr} already on email blocklist (no-op)")
+        return 0
+    changed = _update_email_sender_list(instance, block_add=[addr])
+    if changed:
+        print(f"ops/gateway.yaml updated (+channels.email.senders.blocklist: {addr})")
+    dropped = _email_dispatcher.drain_pending(instance, addr, action="deny")
+    if dropped:
+        print(f"dropped {dropped} pending message(s) from {addr}")
+    _notify_telegram_decision(
+        instance,
+        f"⛔ Email sender denied: `{addr}`\n"
+        + (f"Dropped {dropped} pending message(s)." if dropped else ""),
     )
     return 0
 
@@ -267,14 +440,30 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_list)
 
-    pa = sub.add_parser("approve", help="set auth_status='allowed'")
-    pa.add_argument("chat_id")
+    pa = sub.add_parser(
+        "approve",
+        help="approve a chat_id or (with --email) an email sender",
+    )
+    pa.add_argument("chat_id", nargs="?", default=None)
     pa.add_argument("--channel", default="telegram")
+    pa.add_argument(
+        "--email",
+        default=None,
+        help="approve an email sender (writes channels.email.senders.allowed)",
+    )
     pa.set_defaults(func=cmd_approve)
 
-    pd = sub.add_parser("deny", help="set auth_status='denied'")
-    pd.add_argument("chat_id")
+    pd = sub.add_parser(
+        "deny",
+        help="deny a chat_id or (with --email) an email sender",
+    )
+    pd.add_argument("chat_id", nargs="?", default=None)
     pd.add_argument("--channel", default="telegram")
+    pd.add_argument(
+        "--email",
+        default=None,
+        help="deny an email sender (writes channels.email.senders.blocklist)",
+    )
     pd.set_defaults(func=cmd_deny)
 
     ps = sub.add_parser("show", help="show one chat's full row")
