@@ -187,43 +187,74 @@ class JcChatsAuthCliTests(unittest.TestCase):
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["chat_id"], "-100")
 
-    def test_approve_flips_pending_to_allowed(self):
+    def test_approve_writes_yaml_and_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             self._seed_with_pending(instance)
             rc, out, _ = _run(["approve", "-100"], instance)
             self.assertEqual(rc, 0)
-            self.assertIn("pending → allowed", out)
-            row = chats.get_chat(instance, channel="telegram", chat_id="-100")
-            self.assertEqual(row.auth_status, "allowed")
+            self.assertIn("ops/gateway.yaml updated", out)
+            self.assertIn(".env updated", out)
+            from gateway.config import load_config
+            from gateway.config_writer import env_chat_ids
+            cfg = load_config(instance).channel("telegram")
+            self.assertIn("-100", cfg.chat_ids)
+            self.assertIn("-100", env_chat_ids(instance))
 
-    def test_deny_flips_to_denied(self):
+    def test_deny_writes_blocklist(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             self._seed_with_pending(instance)
             rc, out, _ = _run(["deny", "-100"], instance)
             self.assertEqual(rc, 0)
-            self.assertIn("denied", out)
-            row = chats.get_chat(instance, channel="telegram", chat_id="-100")
-            self.assertEqual(row.auth_status, "denied")
+            self.assertIn("blocked_chat_ids", out)
+            from gateway.config import load_config
+            cfg = load_config(instance).channel("telegram")
+            self.assertIn("-100", cfg.blocked_chat_ids)
 
-    def test_approve_unknown_chat_errors(self):
+    def test_approve_unknown_chat_succeeds(self):
+        """CLI no longer requires a DB row — config-only authority.
+
+        The bot may not have seen the chat yet (operator pre-approving
+        a known id), so we don't reject; we just write config.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            rc, _, err = _run(["approve", "999"], instance)
-            self.assertNotEqual(rc, 0)
-            self.assertIn("not found", err)
+            rc, _out, _err = _run(["approve", "999"], instance)
+            self.assertEqual(rc, 0)
+            from gateway.config import load_config
+            cfg = load_config(instance).channel("telegram")
+            self.assertIn("999", cfg.chat_ids)
 
     def test_approve_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "ops").mkdir(exist_ok=True)
+            (instance / "ops" / "gateway.yaml").write_text(
+                "channels:\n  telegram:\n    chat_ids: [-100]\n"
+            )
+            (instance / ".env").write_text("TELEGRAM_CHAT_IDS='-100'\n")
+            rc, out, _ = _run(["approve", "-100"], instance)
+            self.assertEqual(rc, 0)
+            self.assertIn("already approved", out)
+
+    def test_migrate_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             chats.upsert_chat(
                 instance, channel="telegram", chat_id="-100",
                 auth_status="allowed",
             )
-            rc, out, _ = _run(["approve", "-100"], instance)
+            chats.upsert_chat(
+                instance, channel="telegram", chat_id="-200",
+                auth_status="denied",
+            )
+            rc, out, _ = _run(["migrate-to-config"], instance)
             self.assertEqual(rc, 0)
-            self.assertIn("already allowed", out)
+            from gateway.config import load_config
+            cfg = load_config(instance).channel("telegram")
+            self.assertIn("-100", cfg.chat_ids)
+            self.assertIn("-200", cfg.blocked_chat_ids)
 
 
 if __name__ == "__main__":

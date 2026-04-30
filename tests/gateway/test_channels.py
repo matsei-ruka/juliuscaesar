@@ -14,6 +14,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
+from gateway import config as gateway_config  # noqa: E402
 from gateway import runtime as runtime_module  # noqa: E402
 from gateway.channels import telegram as telegram_module  # noqa: E402
 from gateway.channels import telegram_media, telegram_outbound  # noqa: E402
@@ -26,6 +27,21 @@ from gateway.config import ChannelConfig, ConfigError, load_config, render_defau
 
 def _silent_log(message: str) -> None:  # noqa: ARG001
     pass
+
+
+def _write_minimal_telegram_yaml(instance: Path, chat_ids: list[str]) -> None:
+    """Mirror static cfg.chat_ids into ops/gateway.yaml for config-only auth."""
+    (instance / "ops").mkdir(exist_ok=True)
+    flat = ", ".join(chat_ids) if chat_ids else ""
+    (instance / "ops" / "gateway.yaml").write_text(
+        "default_brain: claude\n"
+        "channels:\n"
+        "  telegram:\n"
+        "    enabled: true\n"
+        "    token_env: TELEGRAM_BOT_TOKEN\n"
+        f"    chat_ids: [{flat}]\n"
+    )
+    gateway_config.clear_config_cache()
 
 
 def _run_channel_once(channel) -> list[dict]:
@@ -189,6 +205,7 @@ def _drive_telegram(
         return stop_after["done"]
 
     cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN", chat_ids=["28547271"])
+    _write_minimal_telegram_yaml(instance, ["28547271"])
     channel = TelegramChannel(instance, cfg, log or _silent_log)
     channel.token = "test-token"
 
@@ -620,6 +637,7 @@ class TelegramGroupSessionReuseTests(unittest.TestCase):
             token_env="TELEGRAM_BOT_TOKEN",
             chat_ids=["-777", "-888"],
         )
+        _write_minimal_telegram_yaml(instance, ["-777", "-888"])
         channel = TelegramChannel(instance, cfg, _silent_log)
         channel.token = "test-token"
 

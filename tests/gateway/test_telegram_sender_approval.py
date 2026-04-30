@@ -1,4 +1,10 @@
-"""Tests for Telegram sender approval prompt feature."""
+"""Tests for Telegram sender approval prompt rendering + suppression.
+
+The auth-decision logic itself lives in
+`test_sender_approval_config.py` (config-only flow). This module
+covers the inline-keyboard prompt: when it fires, what it contains,
+and the duplicate-suppression cache.
+"""
 
 from __future__ import annotations
 
@@ -10,252 +16,148 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 
-from gateway import chats as chats_module
-from gateway import queue
+from gateway import config as gateway_config  # noqa: E402
+from gateway import queue  # noqa: E402
+from gateway.channels.telegram import TelegramChannel  # noqa: E402
+from gateway.config import ChannelConfig  # noqa: E402
 
 
-def _make_instance() -> Path:
-    """Create a minimal test instance with queues DB."""
-    root = Path(tempfile.mkdtemp(prefix="telegram-auth-test-"))
+def _make_instance(yaml_chat_ids: list[str] | None = None,
+                   yaml_blocked: list[str] | None = None,
+                   main_chat_id: str = "28547271") -> Path:
+    root = Path(tempfile.mkdtemp(prefix="approval-prompt-"))
     (root / "ops").mkdir()
-
-    # Create .env with required tokens
+    chat_ids_yaml = yaml_chat_ids if yaml_chat_ids is not None else [main_chat_id]
+    blocked_yaml = yaml_blocked if yaml_blocked is not None else []
+    yaml_path = root / "ops" / "gateway.yaml"
+    yaml_path.write_text(
+        "default_brain: claude\n"
+        "channels:\n"
+        "  telegram:\n"
+        "    enabled: true\n"
+        "    token_env: TELEGRAM_BOT_TOKEN\n"
+        f"    chat_ids: [{', '.join(chat_ids_yaml)}]\n"
+        + (f"    blocked_chat_ids: [{', '.join(blocked_yaml)}]\n"
+           if blocked_yaml else "")
+    )
     (root / ".env").write_text(
         "TELEGRAM_BOT_TOKEN=test-token-123\n"
-        "TELEGRAM_CHAT_ID=28547271\n"
+        f"TELEGRAM_CHAT_ID='{main_chat_id}'\n"
     )
-
-    # Initialize chats DB
     queue.connect(root)
+    gateway_config.clear_config_cache()
+    gateway_config.clear_env_cache()
     return root
 
 
-class TelegramSenderApprovalTest(unittest.TestCase):
-    """Test sender approval prompt feature."""
+def _make_channel(instance: Path, cfg_chat_ids: list[str] | None = None,
+                  main_chat_id: str = "28547271") -> TelegramChannel:
+    cfg = ChannelConfig(
+        enabled=True,
+        chat_ids=tuple(cfg_chat_ids or [main_chat_id]),
+        token_env="TELEGRAM_BOT_TOKEN",
+    )
+    return TelegramChannel(instance_dir=instance, cfg=cfg, log=MagicMock())
 
+
+class TelegramSenderApprovalPromptTest(unittest.TestCase):
     def test_new_pending_sender_triggers_prompt(self) -> None:
-        """Unauthorized sender marked 'pending' → approval prompt sent."""
         instance = _make_instance()
-
-        # Create a mock TelegramChannel with just the methods we need
-        from gateway.channels.telegram import TelegramChannel
-        from gateway.config import ChannelConfig
-
-        cfg = ChannelConfig(
-            enabled=True,
-            chat_ids=["9999"],  # Different, not authorized
-            token_env="TELEGRAM_BOT_TOKEN",
-        )
-        log_func = MagicMock()
-
-        channel = TelegramChannel(
-            instance_dir=instance,
-            cfg=cfg,
-            log=log_func,
-        )
-
-        # Record the chat (defaults to 'pending')
-        channel._record_chat(
-            chat={"id": 1234, "type": "private", "username": "alice"},
-            message={"message_id": 100, "text": "hello"},
-        )
-
-        # Mock HTTP to avoid actual network calls
-        with patch("gateway.channels.telegram.http_json") as mock_http:
-            mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
-
-            # Call the approval prompt logic
-            channel._maybe_send_sender_approval_prompt(
-                chat_id="1234",
+        channel = _make_channel(instance)
+        try:
+            channel._record_chat(
                 chat={"id": 1234, "type": "private", "username": "alice"},
-                message={"text": "hello", "message_id": 100},
+                message={"message_id": 100, "text": "hello"},
             )
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="1234",
+                    chat={"id": 1234, "type": "private", "username": "alice"},
+                    message={"text": "hello", "message_id": 100},
+                )
+                assert mock_http.called
+                payload = mock_http.call_args.kwargs["data"]
+                self.assertIn("New contact", payload["text"])
+                self.assertIn("alice", payload["text"])
+                self.assertIn("1234", payload["text"])
+        finally:
+            channel.close()
 
-            # Verify HTTP was called (prompt sent)
-            assert mock_http.called
-            call_args = mock_http.call_args
-            payload = call_args.kwargs["data"]
-            assert "🔐 New contact" in payload["text"]
-            assert "@alice" in payload["text"]
-            assert "1234" in payload["text"]
+    def test_already_allowed_sender_no_prompt(self) -> None:
+        instance = _make_instance(yaml_chat_ids=["28547271", "1234"])
+        channel = _make_channel(instance, cfg_chat_ids=["28547271", "1234"])
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="1234",
+                    chat={"id": 1234, "type": "private", "username": "alice"},
+                    message={"text": "hello"},
+                )
+                self.assertFalse(mock_http.called)
+        finally:
+            channel.close()
 
-        channel.close()
-
-    def test_already_approved_sender_no_prompt(self) -> None:
-        """Already-approved sender → no approval prompt."""
-        instance = _make_instance()
-        conn = queue.connect(instance)  # Uses same DB initialization
-
-        # Insert approved chat
-        chats_module.upsert_chat(
-            conn=conn,
-            channel="telegram",
-            chat_id="1234",
-            chat_type="private",
-            title="alice",
-            auth_status="allowed",
+    def test_blocked_sender_no_prompt(self) -> None:
+        instance = _make_instance(
+            yaml_chat_ids=["28547271"], yaml_blocked=["1234"],
         )
-        conn.commit()
-
-        from gateway.channels.telegram import TelegramChannel
-        from gateway.config import ChannelConfig
-
-        cfg = ChannelConfig(
-            enabled=True,
-            chat_ids=["9999"],
-            token_env="TELEGRAM_BOT_TOKEN",
-        )
-
-        with patch("gateway.channels.telegram.http_json") as mock_http:
-            channel = TelegramChannel(
-                instance_dir=instance,
-                cfg=cfg,
-                log=MagicMock(),
-            )
-
-            # Should not send prompt for already-approved chat
-            channel._maybe_send_sender_approval_prompt(
-                chat_id="1234",
-                chat={"id": 1234, "type": "private", "username": "alice"},
-                message={"text": "hello"},
-            )
-
-            # No HTTP call should be made
-            assert not mock_http.called
-
-        channel.close()
-
-    def test_denied_sender_no_prompt(self) -> None:
-        """Explicitly denied sender → no approval prompt."""
-        instance = _make_instance()
-        conn = queue.connect(instance)  # Uses same DB initialization
-
-        # Insert denied chat
-        chats_module.upsert_chat(
-            conn=conn,
-            channel="telegram",
-            chat_id="1234",
-            chat_type="private",
-            title="eve",
-            auth_status="denied",
-        )
-        conn.commit()
-
-        from gateway.channels.telegram import TelegramChannel
-        from gateway.config import ChannelConfig
-
-        cfg = ChannelConfig(
-            enabled=True,
-            chat_ids=["9999"],
-            token_env="TELEGRAM_BOT_TOKEN",
-        )
-
-        with patch("gateway.channels.telegram.http_json") as mock_http:
-            channel = TelegramChannel(
-                instance_dir=instance,
-                cfg=cfg,
-                log=MagicMock(),
-            )
-
-            # Should not send prompt for denied chat
-            channel._maybe_send_sender_approval_prompt(
-                chat_id="1234",
-                chat={"id": 1234, "type": "private", "username": "eve"},
-                message={"text": "hello"},
-            )
-
-            # No HTTP call
-            assert not mock_http.called
-
-        channel.close()
+        channel = _make_channel(instance)
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="1234",
+                    chat={"id": 1234, "type": "private", "username": "eve"},
+                    message={"text": "hello"},
+                )
+                self.assertFalse(mock_http.called)
+        finally:
+            channel.close()
 
     def test_duplicate_prompt_suppressed(self) -> None:
-        """Within same process, second prompt suppressed."""
         instance = _make_instance()
-
-        from gateway.channels.telegram import TelegramChannel
-        from gateway.config import ChannelConfig
-
-        cfg = ChannelConfig(
-            enabled=True,
-            chat_ids=["9999"],
-            token_env="TELEGRAM_BOT_TOKEN",
-        )
-
-        with patch("gateway.channels.telegram.http_json") as mock_http:
-            mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
-
-            channel = TelegramChannel(
-                instance_dir=instance,
-                cfg=cfg,
-                log=MagicMock(),
-            )
-
-            channel._record_chat(
-                chat={"id": 5555, "type": "private", "username": "bob"},
-                message={"message_id": 100, "text": "first"},
-            )
-
-            # First prompt
-            channel._maybe_send_sender_approval_prompt(
-                chat_id="5555",
-                chat={"id": 5555, "type": "private", "username": "bob"},
-                message={"text": "first"},
-            )
-            assert mock_http.call_count == 1
-
-            # Second prompt from same sender (same process)
-            channel._maybe_send_sender_approval_prompt(
-                chat_id="5555",
-                chat={"id": 5555, "type": "private", "username": "bob"},
-                message={"text": "second"},
-            )
-            # Should not increment HTTP call count
-            assert mock_http.call_count == 1
-
-        channel.close()
+        channel = _make_channel(instance)
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
+                channel._record_chat(
+                    chat={"id": 5555, "type": "private", "username": "bob"},
+                    message={"message_id": 100, "text": "first"},
+                )
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="5555",
+                    chat={"id": 5555, "type": "private", "username": "bob"},
+                    message={"text": "first"},
+                )
+                self.assertEqual(mock_http.call_count, 1)
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="5555",
+                    chat={"id": 5555, "type": "private", "username": "bob"},
+                    message={"text": "second"},
+                )
+                self.assertEqual(mock_http.call_count, 1)
+        finally:
+            channel.close()
 
     def test_message_preview_in_prompt(self) -> None:
-        """Message preview included in approval prompt."""
         instance = _make_instance()
-
-        from gateway.channels.telegram import TelegramChannel
-        from gateway.config import ChannelConfig
-
-        cfg = ChannelConfig(
-            enabled=True,
-            chat_ids=["9999"],
-            token_env="TELEGRAM_BOT_TOKEN",
-        )
-
-        with patch("gateway.channels.telegram.http_json") as mock_http:
-            mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
-
-            channel = TelegramChannel(
-                instance_dir=instance,
-                cfg=cfg,
-                log=MagicMock(),
-            )
-
-            channel._record_chat(
-                chat={"id": 6666, "type": "private"},
-                message={"message_id": 100, "text": "important business idea"},
-            )
-
-            channel._maybe_send_sender_approval_prompt(
-                chat_id="6666",
-                chat={"id": 6666, "type": "private"},
-                message={"text": "important business idea"},
-            )
-
-            # Check prompt payload
-            call_args = mock_http.call_args
-            payload = call_args.kwargs["data"]
-            text = payload["text"]
-            # Preview should be included (will be escaped for MarkdownV2)
-            assert "important business idea" in text or "important" in text
-
-        channel.close()
+        channel = _make_channel(instance)
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
+                channel._record_chat(
+                    chat={"id": 6666, "type": "private"},
+                    message={"message_id": 100, "text": "important business idea"},
+                )
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="6666",
+                    chat={"id": 6666, "type": "private"},
+                    message={"text": "important business idea"},
+                )
+                payload = mock_http.call_args.kwargs["data"]
+                self.assertIn("important", payload["text"])
+        finally:
+            channel.close()
 
 
 if __name__ == "__main__":

@@ -22,6 +22,12 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from gateway import chats  # type: ignore  # noqa: E402
+from gateway.config import load_config  # type: ignore  # noqa: E402
+from gateway.config_writer import (  # type: ignore  # noqa: E402
+    env_chat_ids,
+    update_env_chat_ids,
+    update_gateway_yaml_chat_lists,
+)
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
 
@@ -80,40 +86,112 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_set_auth(args: argparse.Namespace, status: str) -> int:
-    instance = resolve_instance_dir(args.instance_dir)
-    existing = chats.get_chat(
-        instance, channel=args.channel, chat_id=args.chat_id
-    )
-    if existing is None:
-        raise SystemExit(
-            f"chat not found: channel={args.channel} chat_id={args.chat_id} "
-            f"— bot has not seen this chat yet"
-        )
-    if existing.auth_status == status:
-        print(f"chat {args.chat_id} already {status} (no-op)")
-        return 0
-    updated = chats.set_auth_status(
-        instance,
-        channel=args.channel,
-        chat_id=args.chat_id,
-        status=status,
-    )
-    if updated is None:
-        raise SystemExit(f"failed to flip chat {args.chat_id} → {status}")
-    print(f"chat {args.chat_id}: {existing.auth_status} → {status}")
-    if status == "denied":
-        print("note: bot will leave the chat on the next live update; "
-              "for an immediate leave, run `jc chats deny --leave-now <chat_id>`")
-    return 0
+def _config_authority(instance: Path, channel: str) -> tuple[set[str], set[str]]:
+    """Read `(allowed, blocked)` chat-id sets from yaml + env."""
+    cfg = load_config(instance).channel(channel)
+    allowed = set(cfg.chat_ids)
+    blocked = set(cfg.blocked_chat_ids)
+    if channel == "telegram":
+        allowed |= set(env_chat_ids(instance))
+    return allowed, blocked
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    return cmd_set_auth(args, "allowed")
+    """Add chat_id to yaml chat_ids + .env TELEGRAM_CHAT_IDS. Idempotent."""
+    instance = resolve_instance_dir(args.instance_dir)
+    allowed, blocked = _config_authority(instance, args.channel)
+    if args.chat_id in allowed:
+        print(f"chat {args.chat_id} already approved (no-op)")
+        return 0
+    yaml_changed = update_gateway_yaml_chat_lists(
+        instance,
+        channel=args.channel,
+        allow_add=[args.chat_id],
+        block_remove=[args.chat_id],
+    )
+    env_changed = False
+    if args.channel == "telegram":
+        env_changed = update_env_chat_ids(instance, add=[args.chat_id])
+    if yaml_changed:
+        print(f"ops/gateway.yaml updated (+chat_ids: {args.chat_id})")
+    if env_changed:
+        print(f".env updated (+TELEGRAM_CHAT_IDS: {args.chat_id})")
+    if args.chat_id in blocked:
+        print(f"chat {args.chat_id} removed from blocked_chat_ids")
+    return 0
 
 
 def cmd_deny(args: argparse.Namespace) -> int:
-    return cmd_set_auth(args, "denied")
+    """Add chat_id to yaml blocked_chat_ids. Removes from chat_ids. Idempotent."""
+    instance = resolve_instance_dir(args.instance_dir)
+    _allowed, blocked = _config_authority(instance, args.channel)
+    if args.chat_id in blocked:
+        print(f"chat {args.chat_id} already blocked (no-op)")
+        return 0
+    yaml_changed = update_gateway_yaml_chat_lists(
+        instance,
+        channel=args.channel,
+        block_add=[args.chat_id],
+        allow_remove=[args.chat_id],
+    )
+    env_changed = False
+    if args.channel == "telegram":
+        env_changed = update_env_chat_ids(instance, remove=[args.chat_id])
+    if yaml_changed:
+        print(f"ops/gateway.yaml updated (+blocked_chat_ids: {args.chat_id})")
+    if env_changed:
+        print(f".env updated (-TELEGRAM_CHAT_IDS: {args.chat_id})")
+    print(
+        "note: bot will leave the chat on the next live update; "
+        "for an immediate leave, run `jc chats deny --leave-now <chat_id>`"
+    )
+    return 0
+
+
+def cmd_migrate_to_config(args: argparse.Namespace) -> int:
+    """Lift DB `auth_status` rows into yaml + .env config.
+
+    One-shot helper for instances created before the config-only
+    refactor (PR feat/sender-approval-config-only). Idempotent: any
+    chat already in config is skipped. DB rows are left untouched —
+    `auth_status` becomes informational from this point on.
+    """
+    instance = resolve_instance_dir(args.instance_dir)
+    rows = chats.list_chats(instance, channel=args.channel)
+    allowed, blocked = _config_authority(instance, args.channel)
+    to_allow = sorted(
+        c.chat_id for c in rows
+        if c.auth_status == "allowed" and c.chat_id not in allowed
+    )
+    to_block = sorted(
+        c.chat_id for c in rows
+        if c.auth_status == "denied" and c.chat_id not in blocked
+    )
+    if not to_allow and not to_block:
+        print("(nothing to migrate; config already in sync with DB)")
+        return 0
+    if args.dry_run:
+        if to_allow:
+            print(f"would add to chat_ids: {to_allow}")
+        if to_block:
+            print(f"would add to blocked_chat_ids: {to_block}")
+        print("re-run without --dry-run to apply.")
+        return 0
+    yaml_changed = update_gateway_yaml_chat_lists(
+        instance,
+        channel=args.channel,
+        allow_add=to_allow,
+        block_add=to_block,
+    )
+    env_changed = False
+    if args.channel == "telegram" and to_allow:
+        env_changed = update_env_chat_ids(instance, add=to_allow)
+    if yaml_changed:
+        print(f"ops/gateway.yaml updated (+{len(to_allow)} allowed, "
+              f"+{len(to_block)} blocked)")
+    if env_changed:
+        print(f".env updated (+{len(to_allow)} TELEGRAM_CHAT_IDS)")
+    return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -204,6 +282,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--channel", default="telegram")
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=cmd_show)
+
+    pm = sub.add_parser(
+        "migrate-to-config",
+        help="lift DB-approved/denied rows into ops/gateway.yaml + .env",
+    )
+    pm.add_argument("--channel", default="telegram")
+    pm.add_argument("--dry-run", action="store_true")
+    pm.set_defaults(func=cmd_migrate_to_config)
 
     pp = sub.add_parser("prune", help="delete chats older than threshold")
     pp.add_argument(

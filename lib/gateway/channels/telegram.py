@@ -10,7 +10,12 @@ from typing import Any, Callable
 
 from .. import chats as chats_module
 from .. import queue as queue_module
-from ..config import ChannelConfig, env_value
+from ..config import ChannelConfig, env_value, load_config_cached
+from ..config_writer import (
+    env_chat_ids as _env_chat_ids,
+    update_env_chat_ids,
+    update_gateway_yaml_chat_lists,
+)
 from ..format import to_markdown_v2
 from ._http import http_json
 from .base import EnqueueFn, LogFn
@@ -73,7 +78,10 @@ class TelegramChannel:
         self.log = log
         self.token = env_value(instance_dir, cfg.token_env)
         self.offset = 0
-        self.allowed = set(cfg.chat_ids)
+        # Allow/block sets resolved per-call from `_authority_sets()` so
+        # external edits to `ops/gateway.yaml` / `.env` take effect without
+        # a gateway restart. The static `self.cfg.chat_ids` is a snapshot
+        # from process start; do not consult it directly on the auth path.
         self.bot_username: str | None = None
         self.bot_user_id: int | None = None
         self._member_count_cache: dict[str, tuple[int, float]] = {}
@@ -139,43 +147,54 @@ class TelegramChannel:
         env = env_value(self.instance_dir, "TELEGRAM_CHAT_ID")
         return str(env) if env else None
 
+    def _authority_sets(self) -> tuple[frozenset[str], frozenset[str]]:
+        """Return `(allowed, blocked)` chat-id sets from config files.
+
+        Reads `ops/gateway.yaml` (`channels.telegram.chat_ids` +
+        `blocked_chat_ids`) and `.env` (`TELEGRAM_CHAT_IDS`). Both
+        sources are mtime-cached so the poll loop stays cheap; an
+        external edit takes effect on the next call once the OS
+        flushes the new mtime.
+        """
+        cfg = load_config_cached(self.instance_dir).channel("telegram")
+        allowed = set(cfg.chat_ids) | set(_env_chat_ids(self.instance_dir))
+        blocked = set(cfg.blocked_chat_ids)
+        return frozenset(allowed), frozenset(blocked)
+
     def _is_authorized(self, chat_id: str) -> bool:
         """Decide if a chat may have its messages dispatched to the brain.
 
-        Default-deny. Order:
-        1. `cfg.chat_ids` (env allowlist) → always allowed (legacy contract).
-        2. DM-with-the-operator → always allowed.
-        3. `chats.auth_status == 'allowed'` → allowed.
-        4. Otherwise → not authorized; message is dropped.
+        Default-deny. Sources of truth are config files only:
+          1. `blocked_chat_ids` in yaml — always reject (overrides allow).
+          2. `chat_ids` in yaml or `TELEGRAM_CHAT_IDS` in `.env` — allow.
+          3. `TELEGRAM_CHAT_ID` (operator's main DM) — allow.
+          4. Otherwise — not authorized; message is dropped.
 
-        Unknown chats (no DB row) and DB lookup failures both fail closed.
-        Operator approves new chats explicitly via `set_auth_status`.
+        No SQLite read on this path. Approvals/rejections live in
+        `ops/gateway.yaml` + `.env`, written by `_handle_callback_query`.
         """
-        if self.allowed and chat_id in self.allowed:
+        allowed, blocked = self._authority_sets()
+        if chat_id in blocked:
+            return False
+        if chat_id in allowed:
             return True
         main = self._main_chat_id()
         if main and chat_id == main:
             return True
-        try:
-            row = chats_module.get_chat(
-                conn=self._get_chats_conn(),
-                channel="telegram",
-                chat_id=chat_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"telegram auth lookup failed chat_id={chat_id}: {exc} — fail closed")
-            return False
-        if row is None:
-            return False
-        return row.auth_status == "allowed"
+        return False
+
+    def _is_blocked(self, chat_id: str) -> bool:
+        """True iff chat_id is on `blocked_chat_ids`. Cheap config-only lookup."""
+        _allowed, blocked = self._authority_sets()
+        return chat_id in blocked
 
     def _handle_my_chat_member(self, update: dict) -> None:
         """Handle a `my_chat_member` update — bot membership changed in a chat.
 
-        We care about three transitions:
-          - bot added (status `member` or `administrator`) → mark `pending`
-            and prompt for auth (skip if already known + not pending).
-          - bot kicked / left → mark `denied` so we stop processing.
+        We care about two transitions:
+          - bot added (status `member` or `administrator`) → prompt for auth.
+          - bot kicked / left → add chat to `blocked_chat_ids` so future
+            re-adds don't reach the operator until explicitly approved.
         DM upgrades / status churn within an already-known chat are ignored.
         """
         mcm = update.get("my_chat_member") or {}
@@ -197,30 +216,28 @@ class TelegramChannel:
             return
         if new_status in ("left", "kicked"):
             try:
-                chats_module.set_auth_status(
-                    conn=self._get_chats_conn(),
-                    channel="telegram",
-                    chat_id=chat_id,
-                    status="denied",
-                )
+                self._block_chat(chat_id)
             except Exception as exc:  # noqa: BLE001
-                self.log(f"telegram auth set on leave failed chat_id={chat_id}: {exc}")
+                self.log(f"telegram block-on-leave failed chat_id={chat_id}: {exc}")
             self.log(
                 f"telegram bot left chat_id={chat_id} type={chat_type} "
-                f"new_status={new_status} — auth_status=denied"
+                f"new_status={new_status} — added to blocked_chat_ids"
             )
 
     def _handle_bot_added(self, chat: dict, added_by: dict | None = None) -> None:
-        """Mark a freshly-joined chat `pending` and prompt main DM for auth.
+        """Prompt main DM for approval of a freshly-joined chat.
 
-        Idempotent: if the chat is already on the explicit allowlist, in a
-        DM, or recorded as `allowed`/`denied`, we do not re-prompt. Only a
-        truly-new chat or one stuck in `pending` triggers a prompt.
+        Idempotent: if the chat is already on the yaml allowlist, in a
+        DM, on the blocklist, or already prompted this process, we do
+        not re-prompt. Auth state lives in config files only — we do
+        record an observability row in the chats table but no
+        `auth_status` is set there.
         """
         chat_id = str(chat.get("id", ""))
         if not chat_id:
             return
-        if self.allowed and chat_id in self.allowed:
+        allowed, blocked = self._authority_sets()
+        if chat_id in allowed or chat_id in blocked:
             return
         chat_type = chat.get("type")
         if chat_type == "private":
@@ -231,19 +248,6 @@ class TelegramChannel:
             return
         title = chat.get("title") or "(untitled)"
         member_count = self._cached_member_count(chat_id)
-        existing = None
-        try:
-            existing = chats_module.get_chat(
-                conn=self._get_chats_conn(),
-                channel="telegram",
-                chat_id=chat_id,
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        if existing is not None and existing.auth_status in ("allowed", "denied"):
-            # Already decided. Don't reset to pending on subsequent
-            # my_chat_member updates (admin promotion, etc.).
-            return
         try:
             chats_module.upsert_chat(
                 conn=self._get_chats_conn(),
@@ -253,11 +257,9 @@ class TelegramChannel:
                 title=title,
                 username=chat.get("username"),
                 member_count=member_count,
-                auth_status="pending",
             )
         except Exception as exc:  # noqa: BLE001
             self.log(f"telegram bot-added upsert failed chat_id={chat_id}: {exc}")
-            return
         # Suppress duplicate prompts within this process lifetime.
         if chat_id in self._auth_prompts_sent:
             return
@@ -370,7 +372,7 @@ class TelegramChannel:
         """Send approval prompt for a new unauthorized sender.
 
         Only sends if:
-        - Chat is marked 'pending' in DB (new or first-time)
+        - Chat is not already on yaml `chat_ids` or `blocked_chat_ids`
         - We haven't already sent a prompt for this chat in this process
         - Main DM and token are available
 
@@ -380,24 +382,9 @@ class TelegramChannel:
         # (even if the process restarts, we'll re-prompt new senders).
         if chat_id in self._auth_prompts_sent:
             return
-
-        # Check DB: if already approved/denied, don't prompt again.
-        try:
-            conn = self._get_chats_conn()
-            c = conn.execute(
-                "SELECT auth_status FROM chats WHERE channel='telegram' AND chat_id=?",
-                (chat_id,),
-            )
-            row = c.fetchone()
-            auth_status = row[0] if row else None
-            # Only prompt if pending (new) or no record yet (shouldn't happen,
-            # but guard against races).
-            if auth_status not in (None, "pending"):
-                return
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"telegram auth status check failed chat_id={chat_id}: {exc}")
-            # Continue anyway — best-effort
-            pass
+        allowed, blocked = self._authority_sets()
+        if chat_id in allowed or chat_id in blocked:
+            return
 
         # Extract message preview for context
         text = message.get("text") or message.get("caption") or ""
@@ -408,7 +395,13 @@ class TelegramChannel:
         self._auth_prompts_sent.add(chat_id)
 
     def _handle_callback_query(self, update: dict) -> None:
-        """Process an inline-keyboard tap. Only chat_auth: prefix is wired."""
+        """Process an inline-keyboard tap. Only chat_auth: prefix is wired.
+
+        Approval/rejection mutates config files (`ops/gateway.yaml` +
+        `.env`), not the SQLite chats table. `_is_authorized` reads
+        from those files on every poll, so the change takes effect
+        without a gateway restart.
+        """
         cq = update.get("callback_query") or {}
         cq_id = cq.get("id")
         data = cq.get("data") or ""
@@ -433,20 +426,19 @@ class TelegramChannel:
         if action not in ("allow", "deny"):
             self._answer_callback(cq_id, "bad action")
             return
-        new_status = "allowed" if action == "allow" else "denied"
-        row = None
         try:
-            row = chats_module.set_auth_status(
-                conn=self._get_chats_conn(),
-                channel="telegram",
-                chat_id=target_chat_id,
-                status=new_status,
-            )
+            title = self._cached_title(target_chat_id) or target_chat_id
+            if action == "allow":
+                self._approve_chat(target_chat_id)
+            else:
+                self._block_chat(target_chat_id)
         except Exception as exc:  # noqa: BLE001
-            self.log(f"telegram auth flip failed chat_id={target_chat_id}: {exc}")
-            self._answer_callback(cq_id, "flip failed")
+            self.log(
+                f"telegram auth write failed chat_id={target_chat_id} "
+                f"action={action}: {exc}"
+            )
+            self._answer_callback(cq_id, "write failed")
             return
-        title = (row.title if row else None) or target_chat_id
         if action == "deny":
             self._leave_chat(target_chat_id)
         # Edit the original prompt to reflect the decision.
@@ -465,8 +457,62 @@ class TelegramChannel:
             "allowed" if action == "allow" else "denied",
         )
         self.log(
-            f"telegram auth flipped chat_id={target_chat_id} action={action}"
+            f"telegram auth flipped chat_id={target_chat_id} action={action} "
+            f"(config-only)"
         )
+
+    def _approve_chat(self, chat_id: str) -> None:
+        """Add `chat_id` to yaml `chat_ids` + `.env` `TELEGRAM_CHAT_IDS`.
+
+        Idempotent. Also removes `chat_id` from `blocked_chat_ids` if
+        present so a previously-rejected chat can be re-approved.
+        """
+        update_gateway_yaml_chat_lists(
+            self.instance_dir,
+            channel="telegram",
+            allow_add=[chat_id],
+            block_remove=[chat_id],
+        )
+        update_env_chat_ids(self.instance_dir, add=[chat_id])
+        # Bust the config cache so the next poll picks up the change
+        # immediately without waiting for an mtime tick.
+        from ..config import clear_config_cache
+
+        clear_config_cache()
+
+    def _block_chat(self, chat_id: str) -> None:
+        """Add `chat_id` to yaml `blocked_chat_ids`. Removes from `chat_ids`.
+
+        Idempotent. `.env` is intentionally NOT touched — rejection
+        lives in yaml only, since `TELEGRAM_CHAT_IDS` is an allowlist.
+        """
+        update_gateway_yaml_chat_lists(
+            self.instance_dir,
+            channel="telegram",
+            block_add=[chat_id],
+            allow_remove=[chat_id],
+        )
+        # Also strip from .env in case it was previously approved.
+        update_env_chat_ids(self.instance_dir, remove=[chat_id])
+        from ..config import clear_config_cache
+
+        clear_config_cache()
+
+    def _cached_title(self, chat_id: str) -> str | None:
+        """Best-effort title lookup from the chats DB for prompt rendering.
+
+        DB stays the audit/observability store; this is a read-only
+        peek for nicer prompt text. Falls back to None silently.
+        """
+        try:
+            row = chats_module.get_chat(
+                conn=self._get_chats_conn(),
+                channel="telegram",
+                chat_id=chat_id,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        return row.title if row is not None else None
 
     def _answer_callback(self, callback_query_id: Any, text: str) -> None:
         if not callback_query_id or not self.token:
@@ -599,6 +645,15 @@ class TelegramChannel:
                             continue
                         chat = message.get("chat") or {}
                         chat_id = str(chat.get("id", ""))
+                        # Hard short-circuit on the operator blocklist before
+                        # any record/audit/HTTP work. Blocked traffic must not
+                        # touch the chats DB or the brain.
+                        if chat_id and self._is_blocked(chat_id):
+                            self.log(
+                                f"telegram dropped blocked chat_id={chat_id} "
+                                f"type={chat.get('type')}"
+                            )
+                            continue
                         # Backstop bot-added detection: some clients only emit
                         # `new_chat_members` on a service message.
                         new_members = message.get("new_chat_members")
@@ -612,8 +667,7 @@ class TelegramChannel:
                         should_process = self._should_process_message(message)
                         # Observability: record every inbound chat (even
                         # unauthorized ones) so the operator can see who
-                        # tried to message and explicitly approve or deny.
-                        # New rows default to auth_status='pending'.
+                        # tried to message. Auth state lives in config files.
                         self._record_chat(chat, message)
                         if not self._is_authorized(chat_id):
                             self.log(
