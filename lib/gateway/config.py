@@ -30,6 +30,9 @@ class ChannelConfig:
     app_token_env: str = ""
     bot_token_env: str = ""
     chat_ids: tuple[str, ...] = ()
+    # Telegram only: chats explicitly rejected via the inline-button
+    # approval flow. Consulted before `chat_ids`. Editable from yaml.
+    blocked_chat_ids: tuple[str, ...] = ()
     brain: str | None = None
     model: str | None = None
     timeout_seconds: int = 25
@@ -419,6 +422,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "app_token_env",
                 "bot_token_env",
                 "chat_ids",
+                "blocked_chat_ids",
                 "brain",
                 "model",
                 "timeout_seconds",
@@ -453,6 +457,12 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     raw_value["chat_ids"], (str, list, tuple)
                 ):
                     errors.append(f"channels.{raw_key}.chat_ids: must be a string or list")
+                if raw_value.get("blocked_chat_ids") is not None and not isinstance(
+                    raw_value["blocked_chat_ids"], (str, list, tuple)
+                ):
+                    errors.append(
+                        f"channels.{raw_key}.blocked_chat_ids: must be a string or list"
+                    )
                 if raw_value.get("paired_with") is not None:
                     paired = _normalize_channel_key(str(raw_value["paired_with"]))
                     if paired not in SUPPORTED_CHANNELS:
@@ -591,6 +601,9 @@ def _load_channel(name: str, raw: dict[str, Any], defaults: ChannelConfig) -> Ch
         app_token_env=str(raw.get("app_token_env") or defaults.app_token_env),
         bot_token_env=str(raw.get("bot_token_env") or defaults.bot_token_env),
         chat_ids=_tuple_str(raw.get("chat_ids", defaults.chat_ids)),
+        blocked_chat_ids=_tuple_str(
+            raw.get("blocked_chat_ids", defaults.blocked_chat_ids)
+        ),
         brain=brain,
         model=str(raw["model"]) if raw.get("model") is not None else defaults.model,
         timeout_seconds=int(raw.get("timeout_seconds") or defaults.timeout_seconds),
@@ -693,6 +706,33 @@ def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
         log_backups=int(raw.get("log_backups") or 5),
         backoff_seconds=backoff_tuple,
     )
+
+
+_CONFIG_CACHE: dict[Path, tuple[float | None, "GatewayConfig"]] = {}
+
+
+def clear_config_cache() -> None:
+    _CONFIG_CACHE.clear()
+
+
+def load_config_cached(instance_dir: Path) -> "GatewayConfig":
+    """Mtime-cached `load_config`. Reloads on `ops/gateway.yaml` change.
+
+    Cheap to call on a hot path (poll loop). On unchanged file, returns
+    a stable reference; on change, reparses + revalidates. Errors are
+    propagated so a typo in yaml still fails loud.
+    """
+    path = config_path(instance_dir)
+    try:
+        mtime: float | None = path.stat().st_mtime
+    except FileNotFoundError:
+        mtime = None
+    cached = _CONFIG_CACHE.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    cfg = load_config(instance_dir)
+    _CONFIG_CACHE[path] = (mtime, cfg)
+    return cfg
 
 
 def load_config(instance_dir: Path) -> GatewayConfig:

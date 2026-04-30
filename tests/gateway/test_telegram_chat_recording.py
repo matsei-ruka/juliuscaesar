@@ -13,9 +13,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import chats  # noqa: E402
+from gateway import config as gateway_config  # noqa: E402
 from gateway.channels import telegram as telegram_module  # noqa: E402
 from gateway.channels.telegram import TelegramChannel  # noqa: E402
 from gateway.config import ChannelConfig  # noqa: E402
+
+
+def _write_minimal_yaml(instance: Path, chat_ids: list[str]) -> None:
+    """Mirror static cfg.chat_ids into ops/gateway.yaml.
+
+    Required because the config-only auth check reads from yaml/.env,
+    not from the in-memory `ChannelConfig` passed to the constructor.
+    """
+    (instance / "ops").mkdir(exist_ok=True)
+    flat = ", ".join(chat_ids) if chat_ids else ""
+    (instance / "ops" / "gateway.yaml").write_text(
+        "default_brain: claude\n"
+        "channels:\n"
+        "  telegram:\n"
+        "    enabled: true\n"
+        "    token_env: TELEGRAM_BOT_TOKEN\n"
+        f"    chat_ids: [{flat}]\n"
+    )
+    gateway_config.clear_config_cache()
 
 
 def _silent_log(_message: str) -> None:
@@ -59,6 +79,7 @@ def _drive(instance: Path, updates, *, exclude_from_allowlist=None):
         token_env="TELEGRAM_BOT_TOKEN",
         chat_ids=chat_ids,
     )
+    _write_minimal_yaml(instance, chat_ids)
     channel = TelegramChannel(instance, cfg, _silent_log)
     channel.token = "test-token"
 
@@ -305,33 +326,36 @@ class TelegramGroupAuthTests(unittest.TestCase):
             self.assertIn("chat_auth:allow:-1001", payload["reply_markup"])
             self.assertIn("chat_auth:deny:-1001", payload["reply_markup"])
 
-    def test_my_chat_member_left_marks_denied(self):
+    def test_my_chat_member_left_blocks_in_yaml(self):
         with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            channel = self._channel(instance)
-            chats.upsert_chat(
-                instance, channel="telegram", chat_id="-1001",
-                title="x", auth_status="allowed",
-            )
-            calls: list[dict] = []
-            orig = self._patch_http(channel, calls)
-            try:
-                update = {
-                    "update_id": 5001,
-                    "my_chat_member": {
-                        "chat": {"id": -1001, "type": "supergroup"},
-                        "from": {"id": 999},
-                        "new_chat_member": {
-                            "user": {"id": 42, "username": "rachelbot"},
-                            "status": "kicked",
+                instance = Path(tmp)
+                _write_minimal_yaml(instance, ["-1001"])
+                channel = self._channel(instance)
+                chats.upsert_chat(
+                    instance, channel="telegram", chat_id="-1001",
+                    title="x",
+                )
+                calls: list[dict] = []
+                orig = self._patch_http(channel, calls)
+                try:
+                    update = {
+                        "update_id": 5001,
+                        "my_chat_member": {
+                            "chat": {"id": -1001, "type": "supergroup"},
+                            "from": {"id": 999},
+                            "new_chat_member": {
+                                "user": {"id": 42, "username": "rachelbot"},
+                                "status": "kicked",
+                            },
                         },
-                    },
-                }
-                channel._handle_my_chat_member(update)
-            finally:
-                telegram_module.http_json = orig
-            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
-            self.assertEqual(row.auth_status, "denied")
+                    }
+                    channel._handle_my_chat_member(update)
+                finally:
+                    telegram_module.http_json = orig
+                from gateway.config import load_config
+                cfg = load_config(instance).channel("telegram")
+                self.assertIn("-1001", cfg.blocked_chat_ids)
+                self.assertNotIn("-1001", cfg.chat_ids)
 
     def test_my_chat_member_for_other_user_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -372,13 +396,14 @@ class TelegramGroupAuthTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row.auth_status, "pending")
 
-    def test_callback_allow_flips_status_and_edits(self):
+    def test_callback_allow_writes_config_and_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
+            _write_minimal_yaml(instance, [])
             channel = self._channel(instance)
             chats.upsert_chat(
                 instance, channel="telegram", chat_id="-1001",
-                title="BNESIM ops", auth_status="pending",
+                title="BNESIM ops",
             )
             calls: list[dict] = []
             orig = self._patch_http(channel, calls)
@@ -398,20 +423,24 @@ class TelegramGroupAuthTests(unittest.TestCase):
                 channel._handle_callback_query(update)
             finally:
                 telegram_module.http_json = orig
-            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
-            self.assertEqual(row.auth_status, "allowed")
+            from gateway.config import load_config
+            from gateway.config_writer import env_chat_ids as _env
+            cfg = load_config(instance).channel("telegram")
+            self.assertIn("-1001", cfg.chat_ids)
+            self.assertIn("-1001", _env(instance))
             urls = [c["url"] for c in calls]
             self.assertTrue(any("editMessageText" in u for u in urls))
             self.assertTrue(any("answerCallbackQuery" in u for u in urls))
             self.assertFalse(any("leaveChat" in u for u in urls))
 
-    def test_callback_deny_flips_status_and_leaves(self):
+    def test_callback_deny_writes_blocklist_and_leaves(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
+            _write_minimal_yaml(instance, [])
             channel = self._channel(instance)
             chats.upsert_chat(
                 instance, channel="telegram", chat_id="-1001",
-                title="BNESIM ops", auth_status="pending",
+                title="BNESIM ops",
             )
             calls: list[dict] = []
             orig = self._patch_http(channel, calls)
@@ -430,18 +459,20 @@ class TelegramGroupAuthTests(unittest.TestCase):
                 channel._handle_callback_query(update)
             finally:
                 telegram_module.http_json = orig
-            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
-            self.assertEqual(row.auth_status, "denied")
+            from gateway.config import load_config
+            cfg = load_config(instance).channel("telegram")
+            self.assertIn("-1001", cfg.blocked_chat_ids)
+            self.assertNotIn("-1001", cfg.chat_ids)
             urls = [c["url"] for c in calls]
             self.assertTrue(any("leaveChat" in u for u in urls))
 
     def test_callback_from_unauthorized_user_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
+            _write_minimal_yaml(instance, [])
             channel = self._channel(instance)
             chats.upsert_chat(
                 instance, channel="telegram", chat_id="-1001",
-                auth_status="pending",
             )
             calls: list[dict] = []
             orig = self._patch_http(channel, calls)
@@ -457,8 +488,11 @@ class TelegramGroupAuthTests(unittest.TestCase):
                 channel._handle_callback_query(update)
             finally:
                 telegram_module.http_json = orig
-            row = chats.get_chat(instance, channel="telegram", chat_id="-1001")
-            self.assertEqual(row.auth_status, "pending")
+            # No auth-state mutation should have occurred.
+            from gateway.config import load_config
+            cfg = load_config(instance).channel("telegram")
+            self.assertNotIn("-1001", cfg.chat_ids)
+            self.assertNotIn("-1001", cfg.blocked_chat_ids)
             urls = [c["url"] for c in calls]
             self.assertTrue(any("answerCallbackQuery" in u for u in urls))
             self.assertFalse(any("editMessageText" in u for u in urls))
@@ -476,10 +510,6 @@ class TelegramGroupAuthTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            chats.upsert_chat(
-                instance, channel="telegram", chat_id="-2001",
-                auth_status="pending",
-            )
             captured = _drive(instance, [update], exclude_from_allowlist={"-2001"})
             self.assertEqual(len(captured), 0)
 
@@ -496,20 +526,13 @@ class TelegramGroupAuthTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            chats.upsert_chat(
-                instance, channel="telegram", chat_id="-2002",
-                auth_status="allowed",
-            )
             captured = _drive(instance, [update])
             self.assertEqual(len(captured), 1)
 
-    def test_legacy_allowlist_overrides_pending(self):
+    def test_yaml_allowlist_authorizes(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            chats.upsert_chat(
-                instance, channel="telegram", chat_id="-3000",
-                auth_status="pending",
-            )
+            _write_minimal_yaml(instance, ["-3000"])
             cfg = ChannelConfig(
                 enabled=True,
                 token_env="TELEGRAM_BOT_TOKEN",
