@@ -640,6 +640,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         log_f.flush()
 
         timed_out = False
+        # JC_IN_WORKER signals the brain it is running as a background worker,
+        # not as the chat session. CLAUDE.md / RULES.md gate the
+        # "spawn workers for dev work" rule on its absence so a worker does
+        # not recursively spawn sub-workers on its own prompt.
+        env = {**os.environ, "JC_IN_WORKER": "1", "JC_WORKER_ID": str(worker_id)}
         try:
             # start_new_session=True puts the adapter in its own session/pgid
             # so killpg on timeout only hits the adapter tree, not the runner.
@@ -650,6 +655,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 stderr=log_f,
                 cwd=str(instance),
                 start_new_session=True,
+                env=env,
             )
             try:
                 exit_code = proc.wait(timeout=worker.timeout_seconds)
