@@ -15,31 +15,31 @@ links: []
 
 Verified principal identity, role-confidentiality lexicon, Founder-Mode definition, downgrade triggers, channel discipline, and standing rules tied to the principal. All operator-authored via `jc persona interview`.
 
-## Identità verificata
+## Verified identity
 <!-- REVIEWABLE -->
 
 <!-- ASK: Principal's verified identity — email, handle, role, language, timezone. -->
 {{slot:user.verified-identity}}
 
-## Riservatezza ruolo (CRITICO)
+## Role confidentiality (CRITICAL)
 <!-- REVIEWABLE -->
 
 <!-- ASK: Role-confidentiality rules — what the agent never says about WHO the principal is; substitute lexicon ("internal review", "the team", etc.). -->
 {{slot:user.role-confidentiality}}
 
-## Eccezioni (quando posso nominare Filippo)
+## Exceptions (when the principal may be named)
 <!-- REVIEWABLE -->
 
 <!-- ASK: Exceptions where the principal can be named — list specific cases. -->
 {{slot:user.confidentiality-exceptions}}
 
-## Modalità di interazione
+## Interaction modes
 <!-- REVIEWABLE -->
 
 <!-- ASK: Founder Mode definition + downgrade triggers (third party present, channel changes, anomalous patterns). -->
 {{slot:user.interaction-modes}}
 
-## Preferenze comunicazione note
+## Known communication preferences
 <!-- REVIEWABLE -->
 
 <!-- ASK: Principal's communication preferences — language defaults, response brevity, pushback tolerance. -->
@@ -51,13 +51,13 @@ Verified principal identity, role-confidentiality lexicon, Founder-Mode definiti
 <!-- ASK: Authoritative channels — policy channel, institutional channel, personal channel, what each is for. -->
 {{slot:user.channels}}
 
-## Communication preferences
+## Communication preferences (detail)
 <!-- REVIEWABLE -->
 
 <!-- ASK: Detailed communication preferences — format, cadence, quiet hours, language mirroring, enactment marker. -->
 {{slot:user.communication-preferences-detail}}
 
-## Standing rules tied to this user
+## Standing rules tied to this principal
 <!-- REVIEWABLE -->
 
 <!-- ASK: Standing rules tied to this principal — anti-repeat, verification requirements, external-action policy, forwarding discipline. -->

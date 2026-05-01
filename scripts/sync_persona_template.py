@@ -232,6 +232,62 @@ def resolve_ask_hint(file_rel: str, heading: str, overrides: dict) -> str | None
     return None
 
 
+def resolve_english_heading(file_rel: str, heading: str, overrides: dict) -> str:
+    """Return the framework's English heading for this section, or the source heading.
+
+    Non-doctrine sections in the framework template carry English headings even
+    though the source instance may use another language. The override file
+    supplies the translation. Falls back to the source heading if no override.
+    """
+    file_overrides = (overrides.get("sections") or {}).get(file_rel, {})
+    entry = file_overrides.get(heading)
+    if isinstance(entry, dict) and "heading" in entry:
+        return entry["heading"]
+    return heading
+
+
+# ---------------------------------------------------------------------------
+# Canonical English doctrine — loaded from templates/persona-interview/doctrine-en.md
+# ---------------------------------------------------------------------------
+
+_SECTION_NUMBER_RE = re.compile(r"^##\s+§([\d.]+)\s+—")
+
+
+def load_english_doctrine(framework_root: Path) -> dict[str, tuple[str, str]]:
+    """Parse doctrine-en.md and return {key: (heading_line, body_text)}.
+
+    Two key types:
+      - "§<number>" sections (RULES.md doctrine): keyed by the §-number string,
+        e.g. "0", "0.1", "1", "9", "21".
+      - Named sections (IDENTITY.md doctrine): keyed by the heading text after
+        "## ", e.g. "AI Status", "Continuity", "Supreme principle".
+
+    A section can be looked up by either pathway depending on whether the
+    caller has a §-number or an English heading.
+    """
+    path = framework_root / "templates" / "persona-interview" / "doctrine-en.md"
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    _, sections = split_into_sections(text)
+    out: dict[str, tuple[str, str]] = {}
+    for s in sections:
+        match = _SECTION_NUMBER_RE.match(s.heading)
+        if match:
+            out[match.group(1)] = (s.heading, s.body)
+        else:
+            # Strip "## " prefix; trim trailing whitespace.
+            name = s.heading[3:].strip()
+            out[name] = (s.heading, s.body)
+    return out
+
+
+def section_number(heading: str) -> str | None:
+    """Extract '§<number>' suffix as a stable key. '## §0.1 — FOO' -> '0.1'."""
+    m = _SECTION_NUMBER_RE.match(heading)
+    return m.group(1) if m else None
+
+
 # ---------------------------------------------------------------------------
 # Composition — build the synced template content
 # ---------------------------------------------------------------------------
@@ -247,48 +303,78 @@ def compose_rules_md(
     source_text: str,
     framework_boilerplate_rules_md: str,
     overrides: dict,
-    macro_subs: list[persona_macros.Substitution] | None = None,
+    english_doctrine: dict[str, tuple[str, str]] | None = None,
 ) -> str:
-    """Synthesize the framework template's RULES.md from Mario's source.
+    """Synthesize the framework template's RULES.md.
 
-    Strategy: keep ONLY the §-numbered sections (the persona constitution).
-    Drop the `# REGOLE TECNICHE E OPERATIVE SPECIFICHE` operational half —
-    that's source-instance-specific. After the §-spine, append the framework
-    boilerplate (Instance awareness / Runtime checks / Work routing /
-    Conversation transcripts / HOT.md structure) preserved from the current
-    framework template.
+    Doctrine sections come from the framework's own english_doctrine (loaded
+    from templates/persona-interview/doctrine-en.md), keyed by §-number. The
+    source instance is consulted ONLY for §-section ordering and to discover
+    which non-doctrine sections exist — its doctrine bodies are not copied.
+
+    Non-doctrine sections become English-headed slot placeholders, with the
+    English heading + slot id + ASK hint resolved from slot-overrides.yaml.
+
+    After the §-spine, the framework operational rules tail (Instance
+    awareness / Runtime checks / Work routing / Conversation transcripts /
+    HOT.md structure) is appended — JC-runtime guidance shared by every
+    instance regardless of persona.
     """
+    if english_doctrine is None:
+        english_doctrine = {}
+
     preamble, sections = split_into_sections(source_text)
     annotate_doctrine("memory/L1/RULES.md", sections)
 
     out: list[str] = []
-    out.append(_synthetic_frontmatter("RULES", "Standing Rules & Costituzione operativa"))
-    out.append("\n# RULES — Costituzione Operativa\n\n")
+    out.append(_synthetic_frontmatter("RULES", "Operative Constitution"))
+    out.append("\n# RULES — Operative Constitution\n\n")
     out.append("This file is the operative constitution of the persona instance. "
                "Sections marked `<!-- IMMUTABILE -->` are universal invariants of "
-               "the persona experiment and ship verbatim with the framework. "
+               "the persona experiment and ship verbatim from the framework's "
+               "canonical doctrine (`templates/persona-interview/doctrine-en.md`). "
                "Sections marked `<!-- REVIEWABLE -->` or `<!-- OPEN -->` are "
-               "operator-authored — `jc persona interview` fills the `{{slot:...}}` "
-               "placeholders below.\n\n")
+               "operator-authored — `jc persona interview` fills the "
+               "`{{slot:...}}` placeholders below. Macros like "
+               "`{{persona.full_name}}` / `{{principal.name}}` / `{{employer.name}}` "
+               "are bound to per-instance values at scaffold time.\n\n")
 
     section_re = re.compile(r"^## §\d")
     seen_sections = 0
+    missing_doctrine: list[str] = []
     for s in sections:
         if not section_re.match(s.heading):
             continue
         seen_sections += 1
-        out.append(_compose_section(
-            "memory/L1/RULES.md", s, overrides, macro_subs=macro_subs,
-        ))
+
+        if s.is_doctrine and s.marker == "IMMUTABILE":
+            # Pull the doctrine body from the framework's English doctrine,
+            # NOT from the source instance.
+            num = section_number(s.heading)
+            if num and num in english_doctrine:
+                doc_heading, doc_body = english_doctrine[num]
+                out.append(doc_heading + "\n" + doc_body)
+            else:
+                missing_doctrine.append(s.heading)
+                # Fall back: emit a warning placeholder so the framework
+                # template never silently loses a doctrine section.
+                out.append(s.heading + "\n<!-- IMMUTABILE -->\n\n"
+                           f"<!-- TODO: doctrine body for §{num} missing from "
+                           f"templates/persona-interview/doctrine-en.md -->\n\n")
+        else:
+            out.append(_compose_section("memory/L1/RULES.md", s, overrides))
 
     if seen_sections == 0:
         raise RuntimeError(
             "No §-numbered sections found in source RULES.md — wrong shape?"
         )
 
-    # Append framework-boilerplate operational rules from the current template,
-    # if available. These are JC-runtime guidance (transcripts, work routing,
-    # HOT.md structure) shared by every instance regardless of persona.
+    if missing_doctrine:
+        print(f"warning: {len(missing_doctrine)} doctrine section(s) present "
+              f"in source but missing from doctrine-en.md:", file=sys.stderr)
+        for h in missing_doctrine:
+            print(f"  {h}", file=sys.stderr)
+
     if framework_boilerplate_rules_md:
         out.append("\n---\n\n")
         out.append("# Framework operational rules\n\n")
@@ -303,26 +389,63 @@ def compose_identity_md(
     source_text: str,
     overrides: dict,
     macro_subs: list[persona_macros.Substitution] | None = None,
+    english_doctrine: dict[str, tuple[str, str]] | None = None,
 ) -> str:
-    """Synthesize IDENTITY.md template — preserve doctrine sections, slotify the rest."""
+    """Synthesize IDENTITY.md template.
+
+    Doctrine sections (AI Status, Hierarchical objective, Supreme principle,
+    Self-narration, Sentence test, Continuity) come from doctrine-en.md
+    keyed by their English heading. Non-doctrine sections become English-
+    headed slot placeholders.
+
+    The English heading per Italian source heading is supplied by
+    slot-overrides.yaml under the "memory/L1/IDENTITY.md" entries — both
+    for slot sections (with slot_id + heading) and doctrine sections
+    (heading-only mapping; doctrine body looked up in english_doctrine).
+    """
+    if english_doctrine is None:
+        english_doctrine = {}
+
     preamble, sections = split_into_sections(source_text)
     annotate_doctrine("memory/L1/IDENTITY.md", sections)
 
     out: list[str] = []
     out.append(_synthetic_frontmatter("IDENTITY", "Identity"))
     out.append("\n# IDENTITY\n\n")
-    out.append("Persona declaration. Doctrine sections (auto-narration ban, AI "
-               "transparency, hierarchical objective, supreme principle, "
-               "continuity) ship verbatim. Other sections are filled by "
-               "`jc persona interview`.\n\n")
+    out.append("Persona declaration. Doctrine sections (AI Status, "
+               "Hierarchical objective, Supreme principle, Self-narration, "
+               "Sentence test, Continuity) ship verbatim from the framework's "
+               "canonical English doctrine. Other sections are filled by "
+               "`jc persona interview`. Macros bind at scaffold time.\n\n")
 
     for s in sections:
         # Skip ARCHIVIO sections — those are source-instance audit history.
         if "ARCHIVIO" in s.heading:
             continue
-        out.append(_compose_section(
-            "memory/L1/IDENTITY.md", s, overrides, macro_subs=macro_subs,
-        ))
+
+        if s.is_doctrine and s.marker == "IMMUTABILE":
+            # Look up doctrine body in doctrine-en.md by the English heading.
+            english_heading = resolve_english_heading(
+                "memory/L1/IDENTITY.md", s.heading, overrides,
+            )
+            doctrine_key = english_heading[3:].strip() if english_heading.startswith("## ") else english_heading
+            if doctrine_key in english_doctrine:
+                doc_heading, doc_body = english_doctrine[doctrine_key]
+                out.append(doc_heading + "\n" + doc_body)
+            else:
+                # Fall back: emit source heading + macro-substituted body.
+                # (Phase 2.6 — IDENTITY doctrine port should have closed this gap;
+                # this branch is for sections that escaped the port.)
+                body = s.body
+                if macro_subs:
+                    body = persona_macros.apply_substitutions(body, macro_subs)
+                out.append(s.heading + "\n" + body)
+                print(f"warning: IDENTITY doctrine '{s.heading}' missing from "
+                      f"doctrine-en.md (looked up '{doctrine_key}'); fell back "
+                      f"to source body with macro substitution",
+                      file=sys.stderr)
+        else:
+            out.append(_compose_section("memory/L1/IDENTITY.md", s, overrides))
 
     return "".join(out)
 
@@ -348,23 +471,21 @@ def compose_user_md(source_text: str, overrides: dict) -> str:
     return "".join(out)
 
 
-def compose_journal_md(
-    source_text: str,
-    macro_subs: list[persona_macros.Substitution] | None = None,
-) -> str:
-    """JOURNAL.md template = source preamble (the journal contract) + empty entries.
+def compose_journal_md(framework_root: Path) -> str:
+    """JOURNAL.md template comes from the framework's English preamble file.
 
-    The contract is itself doctrine — apply macro substitution so principal /
-    persona references become {{macro}} placeholders.
+    `templates/persona-interview/journal-preamble-en.md` is hand-authored
+    canonical English content for the journal contract — not derived from
+    any reference instance. Includes the standard frontmatter, the contract
+    text (scope, voice, append-only rules, lifecycle, triggers, linked
+    artifacts), the entry schema, and an empty `## Entries` section.
     """
-    entries_match = re.search(r"^## Entries\s*$", source_text, re.MULTILINE)
-    if entries_match:
-        contract = source_text[: entries_match.end()]
-    else:
-        contract = source_text
-    if macro_subs:
-        contract = persona_macros.apply_substitutions(contract, macro_subs)
-    return contract.rstrip() + "\n\n_(no entries yet)_\n"
+    path = framework_root / "templates" / "persona-interview" / "journal-preamble-en.md"
+    if not path.exists():
+        raise RuntimeError(
+            "framework's journal-preamble-en.md is missing — required for sync"
+        )
+    return path.read_text(encoding="utf-8").rstrip() + "\n\n_(no entries yet)_\n"
 
 
 def compose_hot_md() -> str:
@@ -564,11 +685,15 @@ def _compose_section(
 ) -> str:
     """Render one section into the composite output.
 
-    - is_doctrine + IMMUTABILE marker: copy verbatim, with macro substitution
-      applied to the body so proper nouns become {{persona.*}} / {{principal.*}}
-      / {{employer.*}} placeholders portable across instances.
-    - everything else (REVIEWABLE / OPEN / IMMUTABILE-but-not-doctrine /
-      no-marker, OR force_slot=True): heading + marker + slot placeholder.
+    Non-doctrine path: emit English heading (from override) + marker + slot
+    placeholder. The English heading decouples the framework template from
+    the source's language; the slot id is the stable English semantic key.
+
+    Doctrine path (only used by callers who don't have an English doctrine
+    for this section yet — RULES.md doctrine goes through the doctrine-en.md
+    branch in compose_rules_md): copy verbatim, with macro substitution.
+    Macro substitution is the temporary bridge until the doctrine is ported
+    to the framework's own English doctrine file.
     """
     if s.is_doctrine and s.marker == "IMMUTABILE" and not force_slot:
         body = s.body
@@ -576,11 +701,12 @@ def _compose_section(
             body = persona_macros.apply_substitutions(body, macro_subs)
         return s.heading + "\n" + body
 
+    english_heading = resolve_english_heading(file_rel, s.heading, overrides)
     slot_id = resolve_slot_id(file_rel, s.heading, overrides)
     ask_hint = resolve_ask_hint(file_rel, s.heading, overrides)
     marker = s.marker or "REVIEWABLE"
 
-    out = [s.heading, "\n", f"<!-- {marker} -->\n\n"]
+    out = [english_heading, "\n", f"<!-- {marker} -->\n\n"]
     if ask_hint:
         out.append(f"<!-- ASK: {ask_hint} -->\n")
     out.append(f"{{{{slot:{slot_id}}}}}\n\n")
@@ -671,7 +797,10 @@ def sync(
         print("note: no slot-overrides.yaml found — using auto-derived slot ids only",
               file=sys.stderr)
 
-    # 2.5. Load doctrine macro substitutions (proper noun → placeholder mapping).
+    # 2.5. Load doctrine macro substitutions. After Phase 2.6 these are only
+    # used by the IDENTITY.md doctrine fallback (still sourced from the
+    # reference instance) and any other compose path that hasn't yet been
+    # ported to a framework-side English doctrine source.
     if source_macros_path is None:
         source_macros_path = (
             framework_root / "templates" / "persona-interview"
@@ -683,11 +812,19 @@ def sync(
         print(f"loaded {len(macro_subs)} macro substitutions from "
               f"{source_macros_path}", file=sys.stderr)
     else:
-        print(f"note: no macros file at {source_macros_path} — doctrine sections "
-              f"will ship verbatim with source proper nouns", file=sys.stderr)
+        print(f"note: no macros file at {source_macros_path} — doctrine "
+              f"fallback paths will ship verbatim with source proper nouns",
+              file=sys.stderr)
 
-    # 3. Read framework's current RULES.md to extract the boilerplate operational
-    # rules tail (Instance awareness / Runtime checks / Work routing / etc.).
+    # 2.6. Load the framework's canonical English doctrine. This decouples
+    # doctrine content from any reference instance — doctrine-en.md is
+    # hand-authored as a research artifact in its own right.
+    english_doctrine = load_english_doctrine(framework_root)
+    print(f"loaded {len(english_doctrine)} English doctrine section(s) from "
+          f"templates/persona-interview/doctrine-en.md", file=sys.stderr)
+
+    # 3. Read framework's operational rules tail (Instance awareness / Runtime
+    # checks / Work routing / Conversation transcripts / HOT.md structure).
     boilerplate_rules = _extract_framework_boilerplate(framework_root)
 
     # 4. Compose each output file.
@@ -696,13 +833,13 @@ def sync(
     rules_src = (source_dir / "memory/L1/RULES.md").read_text(encoding="utf-8")
     outputs.append(CompositeFile(
         "memory/L1/RULES.md",
-        compose_rules_md(rules_src, boilerplate_rules, overrides, macro_subs),
+        compose_rules_md(rules_src, boilerplate_rules, overrides, english_doctrine),
     ))
 
     identity_src = (source_dir / "memory/L1/IDENTITY.md").read_text(encoding="utf-8")
     outputs.append(CompositeFile(
         "memory/L1/IDENTITY.md",
-        compose_identity_md(identity_src, overrides, macro_subs),
+        compose_identity_md(identity_src, overrides, macro_subs, english_doctrine),
     ))
 
     user_src = (source_dir / "memory/L1/USER.md").read_text(encoding="utf-8")
@@ -711,15 +848,12 @@ def sync(
         compose_user_md(user_src, overrides),
     ))
 
-    journal_path = source_dir / "memory/L1/JOURNAL.md"
-    if journal_path.exists():
-        outputs.append(CompositeFile(
-            "memory/L1/JOURNAL.md",
-            compose_journal_md(
-                journal_path.read_text(encoding="utf-8"),
-                macro_subs=macro_subs,
-            ),
-        ))
+    # JOURNAL preamble is now hand-authored English in the framework, not
+    # derived from the source instance.
+    outputs.append(CompositeFile(
+        "memory/L1/JOURNAL.md",
+        compose_journal_md(framework_root),
+    ))
 
     outputs.append(CompositeFile("memory/L1/HOT.md", compose_hot_md()))
 

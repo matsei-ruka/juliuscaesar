@@ -272,3 +272,147 @@ def test_boilerplate_extraction_idempotent(tmp_path: Path):
     a = sync._extract_framework_boilerplate(framework_root)
     b = sync._extract_framework_boilerplate(framework_root)
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Doctrine decoupling — framework's English doctrine is the source of truth,
+# not the reference instance's content.
+# ---------------------------------------------------------------------------
+
+def test_english_doctrine_loads_with_expected_sections():
+    """doctrine-en.md must cover RULES §0/§0.1/§0.2/§1/§9/§11/§14/§16/§18/§19/§21
+    + IDENTITY doctrine (AI Status, Hierarchical objective, Supreme principle,
+    Self-narration, Sentence test, Continuity)."""
+    framework_root = Path(__file__).resolve().parent.parent.parent
+    doctrine = sync.load_english_doctrine(framework_root)
+
+    expected_rules = ["0", "0.1", "0.2", "1", "9", "11", "14", "16", "18", "19", "21"]
+    for num in expected_rules:
+        assert num in doctrine, f"doctrine-en.md missing §{num}"
+
+    expected_identity = [
+        "AI Status",
+        "Hierarchical objective",
+        "Supreme principle",
+        "Self-narration",
+        "Sentence test",
+        "Continuity",
+    ]
+    for name in expected_identity:
+        assert name in doctrine, f"doctrine-en.md missing IDENTITY section '{name}'"
+
+
+def test_english_doctrine_uses_macros_not_proper_nouns():
+    """The framework's English doctrine must use macros, not literal proper
+    nouns from any reference instance — otherwise the framework template
+    leaks Mario-specific identity into doctrine that's supposed to be portable."""
+    framework_root = Path(__file__).resolve().parent.parent.parent
+    doctrine_path = framework_root / "templates" / "persona-interview" / "doctrine-en.md"
+    text = doctrine_path.read_text(encoding="utf-8")
+
+    # Skip the comment block at the top (it can mention reference names as historical context).
+    lines = text.splitlines()
+    in_comment = False
+    body_lines: list[str] = []
+    for line in lines:
+        if "<!--" in line:
+            in_comment = True
+        if not in_comment:
+            body_lines.append(line)
+        if "-->" in line:
+            in_comment = False
+    body = "\n".join(body_lines)
+
+    forbidden = [
+        "Mario Leone",
+        "Filippo Perta",
+        "Omnisage LLC",
+        # Standalone first names allowed in comment context but not in doctrine prose.
+    ]
+    for term in forbidden:
+        assert term not in body, (
+            f"doctrine-en.md body contains literal '{term}' — should be macroed"
+        )
+
+
+def test_sync_does_not_modify_source_instance(tmp_path: Path):
+    """Running the sync against a temporary 'reference' must not write to it.
+
+    Build a small synthetic source instance, snapshot all its file mtimes
+    + contents, run sync against it, verify nothing changed in the source.
+    """
+    framework_root = Path(__file__).resolve().parent.parent.parent
+
+    # Minimal source instance.
+    src = tmp_path / "src_instance"
+    (src / "memory" / "L1").mkdir(parents=True)
+    rules = src / "memory/L1/RULES.md"
+    rules.write_text("""---
+slug: RULES
+---
+
+## §0 — DOTTRINA TRASPARENZA AI
+<!-- IMMUTABILE -->
+
+Doctrine body.
+
+## §2 — TRE MODE OPERATIVI
+<!-- REVIEWABLE -->
+
+Slot body.
+""")
+    identity = src / "memory/L1/IDENTITY.md"
+    identity.write_text("""---
+slug: IDENTITY
+---
+
+## Ruolo
+Stub role body.
+""")
+    user = src / "memory/L1/USER.md"
+    user.write_text("""---
+slug: USER
+---
+
+## Identità verificata
+Stub user body.
+""")
+
+    # Snapshot mtimes + contents.
+    before = {}
+    for path in src.rglob("*"):
+        if path.is_file():
+            before[path] = (path.stat().st_mtime_ns, path.read_bytes())
+
+    # Run sync — write to a tmp framework root so we don't touch the real one.
+    tmp_framework = tmp_path / "framework"
+    (tmp_framework / "templates" / "persona-interview").mkdir(parents=True)
+    (tmp_framework / "templates" / "init-instance" / "memory" / "L1").mkdir(parents=True)
+    # Copy the real framework's persona-interview/ files so the sync has its inputs.
+    import shutil
+    shutil.copy(
+        framework_root / "templates" / "persona-interview" / "doctrine-en.md",
+        tmp_framework / "templates" / "persona-interview" / "doctrine-en.md",
+    )
+    shutil.copy(
+        framework_root / "templates" / "persona-interview" / "journal-preamble-en.md",
+        tmp_framework / "templates" / "persona-interview" / "journal-preamble-en.md",
+    )
+    shutil.copy(
+        framework_root / "templates" / "persona-interview" / "framework-rules-tail.md",
+        tmp_framework / "templates" / "persona-interview" / "framework-rules-tail.md",
+    )
+    shutil.copy(
+        framework_root / "templates" / "persona-interview" / "slot-overrides.yaml",
+        tmp_framework / "templates" / "persona-interview" / "slot-overrides.yaml",
+    )
+
+    rc = sync.sync(src, tmp_framework, write=True)
+    assert rc == 0, "sync exited non-zero"
+
+    # Check source unchanged.
+    after = {}
+    for path in src.rglob("*"):
+        if path.is_file():
+            after[path] = (path.stat().st_mtime_ns, path.read_bytes())
+    assert before == after, "sync mutated the source instance"

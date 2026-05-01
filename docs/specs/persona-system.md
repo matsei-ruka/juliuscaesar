@@ -299,12 +299,27 @@ The reference instance's `lib/self_model/` directory is removed as part of the s
 | 1 | This spec, accepted | ~500 lines | — | done |
 | 2 | `scripts/sync_persona_template.py` + first run from Mario v2.3 → `templates/init-instance/` | medium | spec | done |
 | 2.5 | `lib/persona_macros.py` + `templates/persona-interview/macros-from-reference.yaml` — doctrine parameterization with canonical macro vocabulary; bidirectional translator (apply / bind); macros applied to doctrine sections during sync | small-medium | phase 2 | done |
+| 2.6 | Decouple framework template from any reference's language. `templates/persona-interview/doctrine-en.md` (hand-authored canonical English doctrine, 17 sections covering RULES §0/§0.1/§0.2/§1/§9/§11/§14/§16/§18/§19/§21 + IDENTITY AI Status / Hierarchical objective / Supreme principle / Self-narration / Sentence test / Continuity). `journal-preamble-en.md` (hand-authored English journal contract). English heading translations for all non-doctrine sections via `slot-overrides.yaml`. Sync no longer copies doctrine bodies from any reference; the framework owns its doctrine as a research artifact. Reference instances are never modified by sync — verified by integration test. | medium | phase 2.5 | done |
 | 3 | `templates/persona-interview/questions.yaml` (full slot bank) + composition templates | medium-large | sync output | next |
 | 4 | `lib/self_model/` promoted to framework + tests + heartbeat builtins + CLI router entry | medium | (independent of phase 3) | |
 | 5 | `lib/persona_interview/` + `bin/jc-persona` + `jc setup` integration + macro binding + brownfield overwrite | medium-large | phases 2.5, 3 | |
 | 6 | `docs/research/persona-system.md` — academic-grade research artifact citing the design | small | phases 1–5 | |
 
 Phases 3 and 4 are parallelizable. Phase 5 closes the user-facing loop and binds macros at scaffold time using `lib/persona_macros.bind_macros`. Phase 6 is the research deliverable.
+
+## Doctrine separation principle (added 2026-05-01, Phase 2.6)
+
+The framework template is its own canonical English artifact. Reference instances (such as `/opt/mario_leone_coo`, in Italian) are PEERS, not upstream sources. They evolve in parallel; framework updates never write to any reference instance, and reference-instance edits never auto-propagate into the framework template.
+
+Concretely:
+
+- `templates/persona-interview/doctrine-en.md` is the framework's source of truth for IMMUTABILE doctrine (the constitutional invariants of the persona experiment). It is hand-authored in English, reviewed as a research artifact, and modified only by deliberate framework releases.
+- `templates/persona-interview/journal-preamble-en.md` is the framework's source of truth for the journal contract. Hand-authored in English.
+- `templates/persona-interview/framework-rules-tail.md` holds JC-runtime operational rules. Hand-authored.
+- `templates/persona-interview/slot-overrides.yaml` provides English heading translations for non-doctrine source sections, plus slot id and ASK hint metadata.
+- `scripts/sync_persona_template.py` no longer copies doctrine bodies from any reference. It uses the source only for §-section ordering (which sections exist, in what order). Doctrine bodies come from `doctrine-en.md`. Non-doctrine sections become English-headed slot placeholders. JOURNAL preamble comes from `journal-preamble-en.md`. The boilerplate operational tail comes from `framework-rules-tail.md`.
+
+Updates flow one direction only: framework → framework template (via deliberate authoring of the framework's English files). Reference instances pull updates via their own `jc persona doctor` invocations on their own cadence, and never have their populated content overwritten.
 
 ## Update semantics
 

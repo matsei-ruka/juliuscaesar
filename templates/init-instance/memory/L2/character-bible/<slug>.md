@@ -18,85 +18,85 @@ Deep persona content. Filled by `jc persona interview` (Mario-style guided
 prompts). Curated jointly with the operator; never auto-modified by
 `jc self-model`.
 
-## Famiglia di origine
+## Family of origin
 <!-- REVIEWABLE -->
 
 <!-- ASK: Family of origin — parents (occupation, temperament), siblings, current relationships, frequency of contact. -->
 {{slot:characterbible.family}}
 
-## Vita Dubai
+## Primary residence
 <!-- REVIEWABLE -->
 
 <!-- ASK: Primary residence — city, type of housing, decor sensibility, daily routine. -->
 {{slot:characterbible.residence-primary}}
 
-## Vita Roma
+## Secondary residence
 <!-- REVIEWABLE -->
 
 <!-- ASK: Secondary residence (if any) — where, why, how often used. -->
 {{slot:characterbible.residence-secondary}}
 
-## Sport e movimento
+## Sport and movement
 <!-- REVIEWABLE -->
 
 <!-- ASK: Sport practice — disciplines, frequency, level (recreational / amateur-competitive / serious), notable achievements. -->
 {{slot:characterbible.sport}}
 
-## Auto e velocità
+## Vehicles and speed
 <!-- REVIEWABLE -->
 
 <!-- ASK: Vehicle ownership as hobby (not transport) — make/model/year, attitude (status/passion/utility), where used, public or private. -->
 {{slot:characterbible.vehicles}}
 
-## Cibo
+## Food
 <!-- REVIEWABLE -->
 
 <!-- ASK: Food preferences — home cooking specialties, restaurant taste, wine/coffee preferences, what they avoid. -->
 {{slot:characterbible.food}}
 
-## Cultura
+## Culture
 <!-- REVIEWABLE -->
 
 <!-- ASK: Cultural diet — books, cinema, music, TV, art. Specific titles/artists; what they actively reject. -->
 {{slot:characterbible.culture}}
 
-## Viaggi
+## Travel
 <!-- REVIEWABLE -->
 
 <!-- ASK: Travel pattern — destinations, frequency, return-to-favorite vs novelty, what kind of place they hate. -->
 {{slot:characterbible.travel}}
 
-## Politica e visione
+## Politics and worldview
 <!-- REVIEWABLE -->
 
 <!-- ASK: Political and worldview stance — is it disclosed publicly? where do they sit? what ideologies do they distrust? -->
 {{slot:characterbible.politics}}
 
-## Tic, manie, dettagli
+## Quirks, habits, details
 <!-- REVIEWABLE -->
 
 <!-- ASK: Quirks and personal habits — morning routines, accessories, taste in clothing, signature objects. -->
 {{slot:characterbible.tics}}
 
-## Cose che lo fanno arrabbiare (raramente)
+## What rarely angers them
 <!-- REVIEWABLE -->
 
 <!-- ASK: What rarely-but-genuinely angers them — typically: dishonesty, time-wasting, stupid bureaucracy. -->
 {{slot:characterbible.angers}}
 
-## Cose che lo emozionano (anche se non lo mostra)
+## What moves them (even if not shown)
 <!-- REVIEWABLE -->
 
 <!-- ASK: What moves them (even if not shown) — usually: serious intellectual exchange, craftsmanship, family moments. -->
 {{slot:characterbible.moves-emotionally}}
 
-## Network INSEAD
+## Notable network
 <!-- REVIEWABLE -->
 
 <!-- ASK: Notable network — alumni circles, professional cohorts, regular contacts. -->
 {{slot:characterbible.network}}
 
-## Carta del cielo (NON cita pubblicamente, solo per coerenza interna)
+## Internal coherence frame (NEVER cited publicly)
 <!-- REVIEWABLE -->
 
 <!-- ASK: Optional internal-coherence framing (astrology, MBTI, archetypes) — used only for character consistency, never cited externally. -->
