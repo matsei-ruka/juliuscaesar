@@ -7,9 +7,13 @@ code_anchors:
     symbol: "Subcommands:"
   - path: lib/memory/db.py
     symbol: "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts"
+  - path: lib/memory/db.py
+    symbol: "noindex"
   - path: templates/init-instance/CLAUDE.md
     symbol: "@memory/L1/IDENTITY.md"
-last_verified: 2026-04-25
+  - path: scripts/sync_l1_rules.py
+    symbol: "skipped"
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/instance-layout-and-resolution.md
@@ -53,6 +57,12 @@ Markdown files are the source of truth. `memory/index.sqlite` and `memory/INDEX.
 - L2 slugs include their directory path under `memory/L2`.
 - Markdown frontmatter is required for indexed files.
 - The DB can be deleted and rebuilt from markdown.
+- `noindex: true` in frontmatter skips the file from indexing entirely (PR #34). Counted as "skipped silently" in `rebuild`, not as an error.
+- `state` in frontmatter is parser-validated; `rebuild` uses skip-and-continue rather than aborting on a single bad file (PR #33).
+
+## Migration helpers
+
+`scripts/sync_l1_rules.py` migrates canonical L1 sections (RULES, etc.) into existing instances without overwriting per-instance content (PR #32). Reports which sections it added vs. skipped because they already existed.
 
 ## Open questions / known stale
 

@@ -4,10 +4,10 @@ section: subsystem
 status: active
 code_anchors:
   - path: install.sh
-    symbol: "BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor)"
+    symbol: "BINARIES=("
   - path: bin/jc
     symbol: "case \"$SUB\" in"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/instance-layout-and-resolution.md
@@ -17,7 +17,14 @@ related:
 
 `install.sh` installs JuliusCaesar by creating a venv at `~/.local/share/juliuscaesar/venv`, installing Python dependencies, and writing executable shims into `~/.local/bin`. The shims call the binaries in the current framework checkout, so `git pull` updates behavior without reinstalling.
 
-The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, and `doctor` to matching `jc-*` binaries on PATH.
+The top-level `jc` command is a bash router. It dispatches to matching `jc-*` binaries on PATH. Current subcommand surface (router help in `bin/jc:usage()`):
+
+- Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, `doctor`.
+- Lifecycle: `update` (CalVer framework upgrade), `upgrade` (reconfigure existing instance: channels, brain, triage), `migrate-to-0.3` (one-shot migration helper for 0.2.x instances).
+- Conversation surface: `chats` (Telegram chat directory), `transcripts` (per-conversation chat history read/tail/search).
+- Observability: `company` (fleet observability client — see `lib/company/`).
+- Modeling: `user-model` (autonomous user-model corpus/detector/proposer/applier).
+- Auth: `codex-auth` (inspect/refresh local Codex CLI OAuth state used by the `codex_api` brain).
 
 ## Source of truth
 
@@ -50,3 +57,4 @@ The top-level `jc` command is a bash router. It dispatches `memory`, `heartbeat`
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap still lists public distribution via npm, brew, or curl as future work.
+- 2026-05-01: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.04.28`) used by `jc update` to compare against released framework versions.

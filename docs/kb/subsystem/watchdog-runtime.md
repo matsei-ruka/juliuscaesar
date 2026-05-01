@@ -9,7 +9,7 @@ code_anchors:
     symbol: "main_gateway()"
   - path: templates/init-instance/ops/watchdog.conf
     symbol: "CLAUDE_ARGS_EXTRA"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/config-and-secret-boundaries.md

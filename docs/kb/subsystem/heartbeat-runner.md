@@ -9,7 +9,7 @@ code_anchors:
     symbol: "def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:"
   - path: templates/init-instance/heartbeat/tasks.yaml
     symbol: "only_if_delta"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/adapter-and-delivery-contracts.md
@@ -49,6 +49,8 @@ Named destinations are optional. If absent, delivery falls back to `TELEGRAM_CHA
 - The adapter contract is stdin prompt to stdout response.
 - `SILENT` suppresses delivery.
 - Locks prevent overlapping runs of the same task.
+- MCP servers are enabled for adapter runs (commit 1a180dc); session continuity is preserved between heartbeat runs of the same task.
+- Session id capture uses pre/post JSONL snapshot diff (`snapshot_jsonl` + `capture_session_id`, commit fa37487), not file mtimes — closes the mtime race that previously misattributed sessions when two heartbeats finished within the same second.
 
 ## Open questions / known stale
 

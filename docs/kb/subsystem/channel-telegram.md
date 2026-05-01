@@ -9,10 +9,16 @@ code_anchors:
     symbol: "def _is_authorized"
   - path: lib/gateway/channels/telegram.py
     symbol: "def _handle_callback_query"
+  - path: lib/gateway/channels/telegram.py
+    symbol: "def _authority_sets"
+  - path: lib/gateway/channels/telegram.py
+    symbol: "def _maybe_send_sender_approval_prompt"
+  - path: lib/gateway/channels/telegram_commands.py
+    symbol: "def parse_slash_command"
   - path: lib/gateway/chats.py
-    symbol: "def set_auth_status"
-last_verified: 2026-04-27
-verified_by: Rachel Zane
+    symbol: "def upsert_chat"
+last_verified: 2026-05-01
+verified_by: l.mattei
 related:
   - subsystem/gateway-queue.md
 ---
@@ -29,25 +35,42 @@ Long-poll `getUpdates` channel. Inbound text, voice/audio/video_note (transcribe
 - `my_chat_member` — bot added/kicked. Drives `pending` row + auth prompt.
 - `callback_query` — operator's tap on the Allow/Deny inline keyboard.
 
-## Auth gate
+## Auth gate (config-only, default-deny)
 
-`chats` table (`lib/gateway/chats.py`) tracks `auth_status ∈ {pending, allowed, denied}` per `(channel, chat_id)`.
+**Authority lives in config files, not SQLite.** Re-architected after PR #28 / commit 93d4060 (security: default-deny). `chats` table is now observability only; `auth_status` field is unused on the dispatch path.
 
-Flow:
+`_authority_sets()` returns `(allowed, blocked)` from:
+- `ops/gateway.yaml` `channels.telegram.chat_ids` — allowed.
+- `ops/gateway.yaml` `channels.telegram.blocked_chat_ids` — blocked.
+- `.env` `TELEGRAM_CHAT_IDS` — allowed (legacy).
 
-1. `my_chat_member` with `new_status ∈ {member, administrator}` → `_handle_bot_added` upserts the chat as `pending` (skipped if already `allowed`/`denied`) and DMs the operator with an inline keyboard whose `callback_data = chat_auth:{allow|deny}:{chat_id}`.
-2. Operator taps → `_handle_callback_query` validates `from.id == TELEGRAM_CHAT_ID`, calls `set_auth_status(...)`, edits the prompt message, and on deny calls `leaveChat`.
-3. Each subsequent message hits `_is_authorized(chat_id)`:
-   - Env allowlist (`cfg.chat_ids`) → allow (legacy).
-   - DM with operator (`chat_id == TELEGRAM_CHAT_ID`) → allow.
-   - `chats.auth_status == 'allowed'` → allow.
-   - Lookup error → fail open (logged).
-   - Row missing → fail open (next ingest will record).
-   - Else → drop silently.
+`_is_authorized(chat_id)` precedence (default-deny):
+
+1. `chat_id ∈ blocked` → reject. Blocklist always wins over allowlist.
+2. `chat_id ∈ allowed` → allow.
+3. `chat_id == TELEGRAM_CHAT_ID` (operator's main DM) → allow.
+4. Otherwise → drop silently.
+
+### Approval flows
+
+Two separate prompt paths, both ending in a `chat_auth:{allow|deny}:{chat_id}` inline-keyboard tap:
+
+- **`my_chat_member`** (bot newly added to a group): `_handle_bot_added` DMs the operator. On `left|kicked`, `_block_chat` adds the chat to `blocked_chat_ids` so a re-add does not silently re-prompt.
+- **Unauthorized inbound message**: `_maybe_send_sender_approval_prompt` (PR #28) DMs the operator with a 100-char preview when an unknown sender messages. De-duped via in-process `_auth_prompts_sent` set; the message itself is NOT enqueued or transcripted until approval.
+
+`_handle_callback_query` validates `from.id == TELEGRAM_CHAT_ID`, then `_approve_chat` / `_block_chat` mutate `ops/gateway.yaml` (and `.env` `TELEGRAM_CHAT_IDS`) atomically. `_is_authorized` re-reads config every poll so the flip takes effect with no daemon restart.
+
+### Config-only mode (PR #30, a32c5cc)
+
+`sender_approval.mode` in `gateway.yaml`:
+
+- `gateway` (default): full interactive prompts as above.
+- `config_only`: no prompts; only chats already on the allowlist work. For headless / test setups.
+- `off`: legacy permissive (not recommended; default-deny is the security posture).
 
 ## Cached SQLite connection
 
-`_chats_conn` is opened lazily by `_get_chats_conn()` and reused inside the poll loop to skip per-call `init_db` churn. **The poller calls `self.close()` at the end of every batch.** The callback handler commits `auth_status='allowed'` on a separate write; under SQLite WAL isolation a long-lived reader holds a snapshot from before that commit and would keep seeing `pending`. Closing per cycle forces a fresh read on the next iteration so an Allow tap takes effect on the very next inbound message.
+`_chats_conn` (observability table for `bin/jc-chats`) is opened lazily by `_get_chats_conn()` and reused inside the poll loop. **The poller calls `self.close()` at the end of every batch.** Even though authority is now config-only, closing per cycle keeps connection counts bounded and avoids stale snapshots when the `chats` table is updated by a sibling process (e.g. `bin/jc-chats`).
 
 ## Conversation id
 
@@ -61,15 +84,26 @@ Flow:
 
 ## Slash commands
 
-`telegram_commands.parse_slash_command` strips a leading `/cmd[@bot]` and dispatches via `handle_slash_command`. Unknown commands fall through to normal text dispatch.
+`telegram_commands.parse_slash_command` strips a leading `/cmd[@bot]` and dispatches via `handle_slash_command`. Built-in commands (commit 2f9fda0): `/help`, `/models`, `/compact`. Unknown commands fall through to normal text dispatch.
+
+## Module split
+
+`telegram.py` (the `TelegramChannel` orchestrator) is now thin. Helpers live in sibling modules:
+
+- `telegram_chats.py` — `chats` table interactions for the directory.
+- `telegram_commands.py` — slash command parser + handlers.
+- `telegram_media.py` — voice/photo/document ingest + DashScope transcription.
+- `telegram_outbound.py` — send / typing / message edit, MarkdownV2 escaping via `lib/gateway/format/escaper.py`.
+- `telegram_routing.py` — conversation_id derivation, threaded forum handling, mention parsing.
 
 ## Invariants
 
 - Bot token reads from `<instance>/.env` via `cfg.token_env`; never logged.
-- Group chats never bypass the auth gate. The env allowlist (`TELEGRAM_CHAT_ID` etc.) is the only legacy escape hatch.
-- `_chats_conn` is closed after every poll batch so WAL writes from `callback_query` are visible immediately. Method name is `close()` — there is no `close_conns()` (see 2026-04-27 incident in `## Open questions / known stale`).
+- Default-deny: an unknown chat is silently dropped. Authority is config files only.
+- Blocklist beats allowlist. A re-added group must be re-approved.
 - The poll loop swallows exceptions as `info`-level logs and sleeps 5s. Hard errors do not crash the daemon; they need explicit log review.
 
 ## Open questions / known stale
 
 - 2026-04-27: A typo (`self.close_conns()` instead of `self.close()`) shipped in commit 9c8a45a and went undiagnosed for hours because the poll loop's blanket `except` logged the AttributeError at `info` level. Worth bumping that branch to `warning`/`error` so log filters surface it.
+- 2026-05-01: SQLite `chats.auth_status` field exists but is not consulted by `_is_authorized` anymore. Either drop the column or repurpose for observability — current state is mildly confusing for new readers.

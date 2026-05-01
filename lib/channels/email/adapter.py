@@ -117,7 +117,7 @@ class EmailChannelAdapter:
                 "in_reply_to": msg.in_reply_to,
                 "references": msg.references,
                 "text": prompt_text,
-                "status": status,  # 'allowed', 'blocked', 'unknown'
+                "status": status,  # 'trusted', 'external', 'blocked', 'unknown'
                 "metadata": {
                     "uid": msg.uid,
                     "date": msg.date,
@@ -127,16 +127,20 @@ class EmailChannelAdapter:
 
             dispatched.append(dispatch)
 
-            # Update watermark (always, even for unknown senders)
-            try:
-                uid_int = int(msg.uid)
-                current = self._load_last_uid()
-                if uid_int > current:
-                    self._save_last_uid(uid_int)
-            except ValueError:
-                pass
-
         return dispatched
+
+    def mark_handled_uids(self, uids: list[str]) -> None:
+        """Advance the UID watermark after local durable handling succeeds."""
+        current = self._load_last_uid()
+        highest = current
+        for uid in uids:
+            try:
+                uid_int = int(uid)
+            except (TypeError, ValueError):
+                continue
+            highest = max(highest, uid_int)
+        if highest > current:
+            self._save_last_uid(highest)
 
     def send_reply(
         self,

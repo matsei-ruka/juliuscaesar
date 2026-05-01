@@ -100,8 +100,8 @@ def _config_authority(instance: Path, channel: str) -> tuple[set[str], set[str]]
 def cmd_approve(args: argparse.Namespace) -> int:
     """Approve a chat_id (telegram-style) or a sender email address.
 
-    `--email <addr>` routes to the email-channel allowlist in
-    `ops/gateway.yaml` (`channels.email.senders.allowed`), drains any
+    `--email <addr>` routes to the email-channel trusted sender list in
+    `ops/gateway.yaml` (`channels.email.senders.trusted`), drains any
     pending messages from that sender into the gateway queue, and
     notifies Telegram. Otherwise behaves as the original chat_id flow.
     """
@@ -168,20 +168,22 @@ def cmd_deny(args: argparse.Namespace) -> int:
     return 0
 
 
-def _email_senders(instance: Path) -> tuple[set[str], set[str]]:
-    """Read `(allowed, blocked)` sender sets from `channels.email.senders`."""
+def _email_senders(instance: Path) -> tuple[set[str], set[str], set[str]]:
+    """Read `(trusted, external, blocked)` sender sets from `channels.email.senders`."""
     import yaml as _yaml
     cfg_path = instance / "ops" / "gateway.yaml"
     if not cfg_path.exists():
-        return set(), set()
+        return set(), set(), set()
     try:
         data = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     except _yaml.YAMLError:
-        return set(), set()
+        return set(), set(), set()
     senders = ((data.get("channels") or {}).get("email") or {}).get("senders") or {}
-    allowed = {str(s).lower() for s in (senders.get("allowed") or [])}
+    trusted = {str(s).lower() for s in (senders.get("trusted") or [])}
+    trusted |= {str(s).lower() for s in (senders.get("allowed") or [])}
+    external = {str(s).lower() for s in (senders.get("external") or [])}
     blocked = {str(s).lower() for s in (senders.get("blocklist") or [])}
-    return allowed, blocked
+    return trusted, external, blocked
 
 
 def _update_email_sender_list(
@@ -190,9 +192,9 @@ def _update_email_sender_list(
     allow_add: list[str] | None = None,
     block_add: list[str] | None = None,
 ) -> bool:
-    """Idempotently add a sender to the email allowlist or blocklist.
+    """Idempotently add a sender to the email trusted list or blocklist.
 
-    Removes the sender from the opposite list if present (so a previously
+    Removes the sender from incompatible lists if present (so a previously
     denied sender can be re-approved without manual yaml editing).
     """
     import yaml as _yaml
@@ -217,34 +219,45 @@ def _update_email_sender_list(
     if not isinstance(senders, dict):
         senders = {}
         email["senders"] = senders
-    allowed = list(senders.get("allowed") or [])
+    trusted = list(senders.get("trusted") or senders.get("allowed") or [])
+    external = list(senders.get("external") or [])
     blocked = list(senders.get("blocklist") or [])
 
     changed = False
     for s in allow_add or []:
         s_norm = s.lower().strip()
-        if s_norm and s_norm not in (a.lower() for a in allowed):
-            allowed.append(s_norm)
+        if s_norm and s_norm not in (a.lower() for a in trusted):
+            trusted.append(s_norm)
             changed = True
         # Remove from blocklist if present.
         new_blocked = [b for b in blocked if b.lower() != s_norm]
         if new_blocked != blocked:
             blocked = new_blocked
             changed = True
+        new_external = [e for e in external if e.lower() != s_norm]
+        if new_external != external:
+            external = new_external
+            changed = True
     for s in block_add or []:
         s_norm = s.lower().strip()
         if s_norm and s_norm not in (b.lower() for b in blocked):
             blocked.append(s_norm)
             changed = True
-        new_allowed = [a for a in allowed if a.lower() != s_norm]
-        if new_allowed != allowed:
-            allowed = new_allowed
+        new_trusted = [a for a in trusted if a.lower() != s_norm]
+        if new_trusted != trusted:
+            trusted = new_trusted
+            changed = True
+        new_external = [e for e in external if e.lower() != s_norm]
+        if new_external != external:
+            external = new_external
             changed = True
 
     if not changed:
         return False
 
-    senders["allowed"] = sorted(allowed)
+    senders.pop("allowed", None)
+    senders["trusted"] = sorted(trusted)
+    senders["external"] = sorted(external)
     if blocked:
         senders["blocklist"] = sorted(blocked)
     elif "blocklist" in senders:
@@ -283,13 +296,13 @@ def _notify_telegram_decision(instance: Path, body: str) -> None:
 
 def _approve_email(instance: Path, email_addr: str) -> int:
     addr = email_addr.lower().strip()
-    allowed, _blocked = _email_senders(instance)
-    if addr in allowed:
-        print(f"sender {addr} already on email allowlist (no-op)")
+    trusted, _external, _blocked = _email_senders(instance)
+    if addr in trusted:
+        print(f"sender {addr} already on email trusted list (no-op)")
         return 0
     changed = _update_email_sender_list(instance, allow_add=[addr])
     if changed:
-        print(f"ops/gateway.yaml updated (+channels.email.senders.allowed: {addr})")
+        print(f"ops/gateway.yaml updated (+channels.email.senders.trusted: {addr})")
     drained = _email_dispatcher.drain_pending(instance, addr, action="approve")
     if drained:
         print(f"drained {drained} pending message(s) from {addr} → gateway queue")
@@ -303,7 +316,7 @@ def _approve_email(instance: Path, email_addr: str) -> int:
 
 def _deny_email(instance: Path, email_addr: str) -> int:
     addr = email_addr.lower().strip()
-    _allowed, blocked = _email_senders(instance)
+    _trusted, _external, blocked = _email_senders(instance)
     if addr in blocked:
         print(f"sender {addr} already on email blocklist (no-op)")
         return 0
@@ -449,7 +462,7 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument(
         "--email",
         default=None,
-        help="approve an email sender (writes channels.email.senders.allowed)",
+        help="approve an email sender (writes channels.email.senders.trusted)",
     )
     pa.set_defaults(func=cmd_approve)
 

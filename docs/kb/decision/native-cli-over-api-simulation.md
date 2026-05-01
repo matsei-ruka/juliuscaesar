@@ -4,12 +4,12 @@ section: decision
 status: active
 code_anchors:
   - path: README.md
-    symbol: "No API simulation, no session spoofing, no TOS concerns."
+    symbol: "not API simulation, not session spoofing"
   - path: docs/ARCHITECTURE.md
     symbol: "JC never simulates Claude Code."
   - path: lib/heartbeat/adapters/claude.sh
     symbol: "Use subscription auth"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - domain/personal-assistant-framework.md
@@ -53,3 +53,4 @@ Tradeoffs:
 ## Open questions / known stale
 
 - 2026-04-25: This decision is clear for Claude Code. Long-term behavior for other brains may evolve as their CLIs change.
+- 2026-05-01: Codex now has a parallel direct-API path (`lib/gateway/brains/codex_api.py`, `bin/jc-codex-auth`). It extracts the local Codex CLI's OAuth token to call the OpenAI API directly — used for the triage backend where subprocess-launching `codex exec` per inbound message is too slow. This is a deliberate exception to the "native CLI only" rule, scoped to triage and bound to subscription-issued tokens.

@@ -4,14 +4,14 @@ section: source
 status: active
 code_anchors:
   - path: README.md
-    symbol: "Components (shipped)"
+    symbol: "## Architecture"
   - path: QUICKSTART.md
     symbol: "From zero to a running JuliusCaesar instance"
   - path: docs/ARCHITECTURE.md
-    symbol: "Process model"
+    symbol: "## Process model"
   - path: ROADMAP.md
     symbol: "0.2.0"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 sources:
   - path: README.md
@@ -26,6 +26,8 @@ sources:
     title: Workers spec
   - path: docs/specs/named-workers.md
     title: Named workers spec
+  - path: docs/specs/unified-gateway-0.3.0-remaining.md
+    title: Unified gateway 0.3.0 remaining work
 related:
   - domain/personal-assistant-framework.md
   - subsystem/workers-background-agents.md
@@ -35,16 +37,15 @@ related:
 
 The docs split by audience and stability:
 
-- `README.md`: project pitch, shipped components, contracts, quick start, and architecture pointer.
+- `README.md`: marketing-positioned pitch, competitive positioning vs OpenClaw / Hermes, design contracts, quick start. Reorganized 2026-04-28 (commit 17a5ece).
 - `QUICKSTART.md`: end-to-end setup using `jc setup`, from machine prerequisites to gateway runtime, Telegram/Slack, voice, heartbeat, workers, watchdog, and troubleshooting.
 - `docs/ARCHITECTURE.md`: compact system model and component relationships.
 - `ROADMAP.md`: shipped milestones and future work.
-- `docs/specs/workers.md`: design spec for on-demand background workers.
-- `docs/specs/named-workers.md`: design spec for persistent worker identities and resume behavior.
+- `docs/specs/`: ~19 specs covering workers, named workers, gateway-sender-approval, telegram-* (chat-discovery, group-auth/context/mentions, multimedia, slash-commands, md-rewriter), conversation-transcripts, voice-reply-path, autonomous-user-model, codex-auth-extractor, hot-md-structure, process-hygiene, and unified-gateway-0.3.0-remaining.
 
 ## Current shipped picture
 
-README marks 0.3.0 production gateway work in progress and presents `jc setup` plus `jc gateway` as the main runtime path. Quickstart now treats Telegram and Slack Socket Mode as gateway channels and keeps the old Claude Telegram plugin path as legacy fallback.
+README is now marketing-positioned (vs OpenClaw / Hermes) and lists CalVer baseline `2026.04.28`. Gateway is the production path; legacy Claude Telegram plugin remains as `RUNTIME_MODE=legacy-claude` fallback. Slack Socket Mode and Discord both ship in 0.3.x.
 
 ## Where to look first
 
@@ -58,3 +59,4 @@ README marks 0.3.0 production gateway work in progress and presents `jc setup` p
 ## Open questions / known stale
 
 - 2026-04-25: Specs can be ahead of implementation. Verify code before relying on a spec detail.
+- 2026-05-01: `unified-gateway-0.3.0.md` spec was renamed to `unified-gateway-0.3.0-remaining.md` (scope reduced to remaining work). Anchors elsewhere in KB may still reference the old name.

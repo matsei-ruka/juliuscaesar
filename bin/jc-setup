@@ -164,13 +164,11 @@ write_env() {
     # Empty arg + existing .env value -> preserve existing (defensive; the prompt
     # layer already returns the existing value when the user hits Enter, but this
     # makes write_env safe to call with empty strings from any caller).
-    declare -A new_values=(
-        [DASHSCOPE_API_KEY]="$1"
-        [TELEGRAM_BOT_TOKEN]="$2"
-        [TELEGRAM_CHAT_ID]="$3"
-        [SLACK_APP_TOKEN]="$4"
-        [SLACK_BOT_TOKEN]="$5"
-    )
+    local dashscope="$1"
+    local telegram_token="$2"
+    local telegram_chat="$3"
+    local slack_app_token="$4"
+    local slack_bot_token="$5"
     local key value existing tmp old_umask
     old_umask=$(umask)
     umask 077
@@ -178,7 +176,13 @@ write_env() {
     {
         printf '%s\n' "# JuliusCaesar instance secrets. Do not commit."
         for key in DASHSCOPE_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SLACK_APP_TOKEN SLACK_BOT_TOKEN; do
-            value="${new_values[$key]}"
+            case "$key" in
+                DASHSCOPE_API_KEY) value="$dashscope" ;;
+                TELEGRAM_BOT_TOKEN) value="$telegram_token" ;;
+                TELEGRAM_CHAT_ID) value="$telegram_chat" ;;
+                SLACK_APP_TOKEN) value="$slack_app_token" ;;
+                SLACK_BOT_TOKEN) value="$slack_bot_token" ;;
+            esac
             if [[ -z "$value" && -f "$TARGET/.env" ]]; then
                 existing="$(env_value "$key")"
                 value="$existing"

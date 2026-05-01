@@ -1,4 +1,4 @@
-"""Email channel for JuliusCaesar. IMAP/SMTP with sender allowlist."""
+"""Email channel for JuliusCaesar. IMAP/SMTP with trusted/external/blocklist senders."""
 
 from .adapter import EmailChannelAdapter
 from .authorization import SenderAuthorizer

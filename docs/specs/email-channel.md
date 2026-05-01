@@ -1,309 +1,364 @@
-# Email Channel Specification
+# Email Channel Operating Spec
 
-**Status:** Design  
-**Author:** Claude Code  
-**Target:** JuliusCaesar v0.3.0+  
-**Scope:** Add email (IMAP/SMTP) as a bidirectional JC channel, replacing the heartbeat-based email-watch pattern with first-class channel support.
+Status: Design consolidation
+Date: 2026-05-01
+Branch: `feat/email-channel`
 
-## Overview
+## Goal
 
-Email becomes a standard JC channel alongside Telegram, Slack, Discord, and Voice. The channel:
-1. Polls IMAP for new messages at configurable intervals
-2. Routes messages from approved senders directly to the assistant as prompts
-3. Routes messages from unknown senders to Telegram for approval/block/ignore decisions
-4. Sends assistant responses back to email senders via SMTP with full threading
-5. Prevents prompt injection via HTML stripping, body truncation, and sender sandboxing
+Make email a first-class JuliusCaesar gateway channel for corporate operators.
+The channel receives mail through IMAP, routes accepted messages through the
+gateway, and sends replies through SMTP. Unknown inbound senders and external
+outbound replies are handled through explicit operator workflows.
 
-## Architecture
+This spec replaces the split `email-channel` and `email-draft-approval` drafts.
+It defines one lifecycle from inbox fetch to outbound reply.
 
-### Components
+## Product promise
 
-**1. Email Adapter (`lib/channels/email/adapter.py`)**
-- Plugs into gateway's channel dispatch like Telegram/Slack
-- Implements `ChannelAdapter` protocol: `receive()`, `send()`, `acknowledge()`
-- State: IMAP UID watermark stored in `state/channels/email/last_uid`
-- Polling: heartbeat task or standalone daemon (configurable; heartbeat preferred for single-instance)
+Email support is corporate-useful when an operator can:
 
-**2. IMAP Client (`lib/channels/email/imap_client.py`)**
-- Wraps `imaplib.IMAP4_SSL` with connection pooling
-- Methods: `connect()`, `fetch_new(since_uid)`, `fetch_unread()`, `search(criteria)`, `disconnect()`
-- Uses `BODY.PEEK` + readonly select (no server-side side effects)
-- Handles encoding normalization, multipart extraction, charset fallback
+- connect a mailbox without custom scripting;
+- decide who may reach the assistant;
+- review outbound replies for external contacts;
+- recover from IMAP, SMTP, Telegram, or gateway outages;
+- inspect what happened after the fact.
 
-**3. SMTP Client (`lib/channels/email/smtp_client.py`)**
-- Wraps `smtplib.SMTP` with STARTTLS
-- Methods: `send(msg)`, `archive_to_sent(msg, folder)`
-- Automatic copy to IMAP Sent folder (idempotent create if missing)
-- Threading headers: `In-Reply-To`, `References`
+## Non-goals
 
-**4. Sender Authorization (`lib/channels/email/authorization.py`)**
-- Reads allowlist/blocklist from `ops/gateway.yaml` + `.env` overrides
-- Hot-reload on mtime change (like PR #30)
-- Fallback: unknown senders → Telegram notification, await approval
+- Do not build a general email client.
+- Do not support arbitrary mailbox delegation in the first release.
+- Do not parse or execute attachments in the first release.
+- Do not require public OpenAI API keys.
+- Do not silently send external corporate email without an explicit policy.
 
-**5. Injection Sanitization (`lib/channels/email/sanitize.py`)**
-- HTML→text conversion (strip tags, preserve structure)
-- Body truncation: 8000 chars max (configurable; soft limit with "… [truncated]" notice)
-- Encoding normalization (UTF-8, replaces invalid bytes)
-- Sender wrapper: `[EMAIL from <addr>, subject: "..."]` → body
-- No `From:` injection (rewrite with authenticated sender, not user-controlled)
+## Sender tiers
 
-**6. Polling Task (`bin/jc-email-poller`)**
-- Optional standalone daemon (for high-frequency polling)
-- Default: heartbeat fetch task `heartbeat/fetch/email-poll.sh`
-- Connects → fetches new since UID → dispatch to gateway → saves watermark
-- Logs: `state/channels/email/poll.log`
+Email sender policy lives under `channels.email.senders` in
+`ops/gateway.yaml`.
 
-### Data Flow
-
-```
-[IMAP inbox]
-     ↓
-[email-poller: fetch_new(last_uid)]
-     ↓
-[sender in allowlist?]
-  ├─ YES → [sanitize body] → [dispatch to gateway as prompt]
-  └─ NO  → [notify Telegram: "New from X"] 
-           ├─ User approves  → [add to allowlist, hot-reload] → [dispatch]
-           ├─ User denies   → [add to blocklist, hot-reload] → [discard]
-           └─ User ignores  → [keep pending, retry next poll]
-     ↓
-[Assistant generates response]
-     ↓
-[email-send: SMTP → Sent folder]
-     ↓
-[Telegram notification: "Replied to X"]
+```yaml
+channels:
+  email:
+    senders:
+      trusted:
+        - alice@corp.com
+      external:
+        - client@example.com
+      blocklist:
+        - spam@example.net
 ```
 
-### Gateway Config Schema
+Resolution order:
 
-Location: `ops/gateway.yaml`
+1. `blocklist` -> discard and record an ops event.
+2. `trusted` -> enqueue inbound message and auto-send the assistant reply.
+3. `external` -> enqueue inbound message, but store the outbound reply as a
+   draft for operator approval.
+4. unknown -> persist pending inbound message, notify the operator, wait for an
+   approve/deny decision.
+
+Migration:
+
+- Existing `senders.allowed` entries become `senders.trusted`.
+- Existing `senders.blocklist` is preserved.
+- `senders.external` starts empty unless the operator configures it.
+- The loader may accept `allowed` as a backward-compatible alias, but writers
+  should emit only the three-tier format.
+
+## Inbound lifecycle
+
+```text
+IMAP fetch
+  -> parse + sanitize
+  -> persist local record
+  -> classify sender tier
+  -> trusted/external: enqueue gateway event
+  -> unknown: persist pending and notify operator
+  -> blocklist: record drop and stop
+  -> advance UID watermark only after durable local handling succeeds
+```
+
+The UID watermark must never advance merely because a message was fetched. It
+advances only after the message is either enqueued, persisted as pending,
+recorded as blocked, or recorded as a permanent parse failure. This prevents
+unknown-sender messages from disappearing when the operator ignores the first
+notification.
+
+Pending inbound messages live in local state and are drained after approval:
+
+```text
+state/channels/email/pending/<safe_sender_key>/<message_uid>.json
+```
+
+The sender key must be safe and canonical. Use URL-safe base64 of the normalized
+email address or a hash prefix plus metadata in the JSON body. Do not use raw
+email addresses as path segments.
+
+## Outbound lifecycle
+
+When the gateway produces an assistant response for an email event:
+
+1. Resolve the original sender tier from current config.
+2. For `trusted`, send via SMTP immediately.
+3. For `external`, persist a draft and notify the operator.
+4. For unknown or blocklisted senders, do not send. Record the skipped send.
+
+External sender draft flow:
+
+```text
+external inbound email
+  -> gateway event
+  -> assistant response
+  -> draft stored locally
+  -> operator notified on Telegram
+  -> approve: SMTP send + mark sent
+  -> reject: mark rejected, no send
+  -> edit: update draft text, require approval again
+```
+
+Drafts live in:
+
+```text
+state/channels/email/drafts/<safe_sender_key>/<draft_id>.json
+```
+
+Draft schema:
+
+```json
+{
+  "draft_id": "draft_20260501_000001",
+  "sender": "client@example.com",
+  "sender_key": "Y2xpZW50QGV4YW1wbGUuY29t",
+  "subject": "Re: Project status",
+  "message_id": "<msg@client.example>",
+  "in_reply_to": "<msg@client.example>",
+  "references": ["<root@example>", "<msg@client.example>"],
+  "draft_text": "Thank you for your inquiry...",
+  "draft_timestamp": "2026-05-01T10:30:00Z",
+  "edit_count": 0,
+  "state": "pending",
+  "meta": {
+    "delivery_channel": "email",
+    "email_uid": "123",
+    "conversation_id": "email:client@example.com"
+  }
+}
+```
+
+## CLI surface
+
+Prefer a dedicated email command group:
+
+```bash
+jc email pending list [--sender <addr>]
+jc email pending approve <sender>
+jc email pending deny <sender>
+jc email drafts list [--sender <addr>]
+jc email drafts show <draft_id>
+jc email drafts approve <draft_id>
+jc email drafts reject <draft_id>
+jc email drafts edit <draft_id> <text>
+jc email doctor
+jc email test-imap
+jc email test-smtp
+```
+
+Compatibility aliases may remain:
+
+```bash
+jc-chats approve --email <addr>
+jc-chats deny --email <addr>
+```
+
+The alias should print the equivalent `jc email` command once that CLI exists.
+
+## Configuration
+
+Minimal config:
 
 ```yaml
 channels:
   email:
     enabled: true
-    
-    # IMAP polling
     imap:
-      host: mail.example.com
+      host: ${IMAP_HOST}
       port: 993
-      user: ${IMAP_USER}              # from .env
-      password: ${IMAP_PASSWORD}      # from .env
-      mailbox: INBOX
-      poll_interval: 300              # seconds; 0 = disabled
-      body_limit: 8000                # chars; truncate if exceeded
-    
-    # SMTP sending
-    smtp:
-      host: mail.example.com
-      port: 587
       user: ${IMAP_USER}
       password: ${IMAP_PASSWORD}
-      sent_folder: Sent               # auto-create if missing
-      signature: |                    # appended to outgoing
-        --
-        Mario Leone
-        COO, Omnisage LLC
-        mario.leone@scovai.com
-    
-    # Sender approval
+      mailbox: INBOX
+      poll_interval: 300
+      body_limit: 8000
+    smtp:
+      host: ${SMTP_HOST}
+      port: 587
+      user: ${SMTP_USER}
+      password: ${SMTP_PASSWORD}
+      sent_folder: Sent
+      signature: ""
     senders:
-      allowed:
-        - mario.leone@scovai.com
-        - filippo.perta@scovai.com
-        - sergio.gutierrez@scovai.com
-      
-      blocklist:
-        - noreply@sendgrid.com        # opt-out of notifications
-        - marketing@spam.com
-      
-      # Unknown senders: notify Telegram?
+      trusted: []
+      external: []
+      blocklist: []
+    approvals:
+      telegram_chat_id: ${TELEGRAM_CHAT_ID}
       notify_on_unknown: true
-      telegram_chat_id: 28547271      # or pull from User memory
-    
-    # State file
+      notify_on_draft: true
     state:
       last_uid_file: state/channels/email/last_uid
+      pending_dir: state/channels/email/pending
+      drafts_dir: state/channels/email/drafts
       log_file: state/channels/email/poll.log
 ```
 
-### .env Variables
+Environment variables:
 
 ```bash
 IMAP_HOST=mail.example.com
-IMAP_PORT=993                    # optional, default 993
-IMAP_USER=mario.leone@scovai.com
-IMAP_PASSWORD=<app-password>     # NOT account password
-SMTP_PORT=587                    # optional, default 587
+IMAP_PORT=993
+IMAP_USER=assistant@example.com
+IMAP_PASSWORD=<app-password>
+SMTP_HOST=mail.example.com
+SMTP_PORT=587
+SMTP_USER=assistant@example.com
+SMTP_PASSWORD=<app-password>
 ```
 
-## Request/Response Format
+If SMTP credentials are omitted, fall back to IMAP credentials only when the
+host configuration explicitly allows that.
 
-### Incoming Email → Prompt
+## Message shape
+
+Inbound gateway event:
 
 ```json
 {
-  "channel": "email",
-  "channel_id": "uid_<UID>",
-  "conversation_id": "email_<sender_addr>",
-  "user_id": "email_sender_<addr>",
-  "sender": "mario.leone@scovai.com",
-  "sender_name": "Mario Leone",
-  "subject": "API key provisioned for Sergio",
-  "message_id": "<abc123@scovai.com>",
-  "headers": {
-    "in_reply_to": "<prev@scovai.com>",
-    "references": ["<root@scovai.com>", "<prev@scovai.com>"]
-  },
-  "text": "[EMAIL from mario.leone@scovai.com, subject: \"API key provisioned for Sergio\"]\n\nCiao,\n\nFilippo has authorized the API key generation...\n\n[… full body, 8000 chars max …]"
+  "source": "email",
+  "source_message_id": "uid_123",
+  "conversation_id": "email:client@example.com",
+  "user_id": "email:client@example.com",
+  "content": "[EMAIL from client@example.com, subject: \"Project status\"]\n\n...",
+  "meta": {
+    "delivery_channel": "email",
+    "email_to": "client@example.com",
+    "email_subject": "Project status",
+    "email_message_id": "<msg@client.example>",
+    "email_references": ["<root@example>"],
+    "email_uid": "123",
+    "sender_tier": "external"
+  }
 }
 ```
 
-### Outgoing Response → Email
+Outgoing SMTP reply uses:
 
-```json
-{
-  "channel": "email",
-  "conversation_id": "email_mario.leone@scovai.com",
-  "to": ["mario.leone@scovai.com"],
-  "cc": [],
-  "subject": "Re: API key provisioned for Sergio",
-  "headers": {
-    "in_reply_to": "<abc123@scovai.com>",
-    "references": ["<abc123@scovai.com>"]
-  },
-  "text": "Ricevuto. Key salvata in vault.\n\n[signature auto-appended]"
-}
+- authenticated SMTP account as `From`;
+- original sender as `To`;
+- `Re:` subject normalization;
+- `In-Reply-To` and `References` for threading;
+- configured signature appended after the assistant response.
+
+## Sanitization and sender confidence
+
+The channel must sanitize content before it reaches the model:
+
+- prefer `text/plain`;
+- convert `text/html` to text if needed;
+- normalize encodings to UTF-8;
+- truncate long bodies with an explicit marker;
+- wrap the body with sender and subject context;
+- never pass raw HTML or raw headers as instructions.
+
+For the first corporate pilot, sender identity confidence may be policy-based:
+
+- trusted senders are trusted only within a controlled mailbox/provider setup;
+- the channel records available authentication headers for audit;
+- if provider authentication results are absent or fail, the message should be
+  treated as `external` or `unknown`, not `trusted`.
+
+Future hardening can add strict DKIM/SPF/DMARC policy, but the current product
+contract is simpler: do not pretend the `From` header alone is verified.
+
+## Observability
+
+Every lifecycle transition should produce a structured log entry:
+
+- fetched
+- parsed
+- persisted
+- enqueued
+- pending
+- approved
+- denied
+- drafted
+- edited
+- sent
+- rejected
+- failed
+- blocked
+
+Counters needed for corporate pilot:
+
+- fetched messages
+- pending inbound messages
+- approved senders
+- denied senders
+- drafts pending
+- drafts sent
+- drafts rejected
+- SMTP failures
+- IMAP failures
+- oldest pending age
+- oldest draft age
+
+## Tests
+
+Required tests:
+
+- sender tier resolution, including blocklist precedence;
+- old `allowed` config migrates to `trusted`;
+- unknown sender persists pending before UID advances;
+- approving pending sender drains local pending store into gateway queue;
+- denied pending sender is removed without enqueue;
+- raw sender addresses are not used as filesystem path segments;
+- external sender response creates a draft and does not SMTP-send;
+- trusted sender response SMTP-sends immediately;
+- draft approve sends once and marks final state;
+- draft reject never sends;
+- draft edit requires a later approve;
+- Telegram notification failure does not lose pending/draft state;
+- `jc email doctor` reports missing credentials and stale pending/draft items.
+
+## Rollout
+
+Pilot readiness:
+
+1. Configure one controlled mailbox.
+2. Run `jc email test-imap`.
+3. Run `jc email test-smtp`.
+4. Send a trusted-sender email and verify auto-reply.
+5. Send an unknown-sender email and verify pending approval.
+6. Promote one external sender and verify draft approval.
+7. Confirm logs and counters match the observed flow.
+
+Roll back by setting:
+
+```yaml
+channels:
+  email:
+    enabled: false
 ```
 
-## Security & Injection Prevention
+Disabling the channel must not delete pending messages, drafts, or UID state.
 
-### HTML Stripping
+## Definition of done
 
-MIME emails often arrive as multipart with text/html. The adapter:
-1. Prefers `text/plain` part (if available)
-2. Falls back to `text/html` → strip tags (keep text content)
-3. Never passes raw HTML to the model
-4. Handles `Content-Transfer-Encoding` (base64, quoted-printable)
+Email is pilot-ready when:
 
-### Sender Spoofing Prevention
-
-- IMAP `From:` header is server-verified (IMAP server is trusted)
-- Assistant response always uses authenticated `IMAP_USER` as `From:`
-- No user-controlled `From:` injection possible
-- Allowlist is the firewall: unknown senders can't inject prompts
-
-### Body Truncation
-
-- Soft limit: 8000 chars (configurable in `gateway.yaml`)
-- Exceeding messages get `[… message truncated, continue in original email …]` notice
-- Full body still accessible via `conversation_id` + retry with `--body-offset` (future enhancement)
-
-### Rate Limiting
-
-- Per-sender: max 1 inbound per minute (configurable)
-- Burst protection: reject if >5 pending messages from same sender
-- Prevents `fork bomb` via email
-
-## Hot-Reload & Approval Workflow
-
-### Adding Sender to Allowlist
-
-Interactive flow via Telegram:
-```
-[EMAIL from unknown@corp.com, subject "Meeting notes"]
-
-Approve / Deny / Ignore?
-
-👤 User taps [Approve unknown@corp.com]
-   ↓
-[jc-chats approve --email unknown@corp.com]
-   ↓
-[ops/gateway.yaml: append to senders.allowed]
-   ↓
-[gateway reloads config on next mtime check (~5s)]
-   ↓
-[email queued and now dispatched as prompt]
-```
-
-Same pattern as PR #30 (config-only sender approval for Telegram).
-
-### Rejection & Blocklist
-
-```
-[User taps [Deny unknown@corp.com]]
-   ↓
-[jc-chats deny --email unknown@corp.com]
-   ↓
-[ops/gateway.yaml: append to senders.blocklist]
-   ↓
-[reload] → future mail from blocklist → silent discard (no notification)
-```
-
-## Implementation Phases
-
-### Phase 1: MVP (Core Channel)
-- [x] IMAP/SMTP clients (wrap existing email-check.py / email-send.py logic)
-- [x] Email adapter + gateway integration
-- [x] Allowlist/blocklist config in `gateway.yaml`
-- [x] HTML stripping + body truncation
-- [x] Threading headers (In-Reply-To, References)
-- [x] Heartbeat polling task
-- [ ] ~2500 LOC, 95% test coverage
-
-### Phase 2: UX (Approval Workflow)
-- [ ] `jc-chats approve/deny --email <addr>` subcommands
-- [ ] Hot-reload integration (mtime watch + reload trigger)
-- [ ] Telegram notification UI
-- [ ] Conversation memory keying (thread continuity)
-
-### Phase 3: Polish (Optional)
-- [ ] Per-sender rate limits (YAML config)
-- [ ] Body offset + pagination (for long emails)
-- [ ] DKIM/SPF validation on inbound
-- [ ] Delivery status notifications (bounces)
-- [ ] Forwarding rules (CC manager@, etc.)
-
-## Testing
-
-### Unit Tests
-- `test_imap_client.py` — connection, fetch, UID handling, encoding
-- `test_smtp_client.py` — send, archive, threading headers
-- `test_sanitize.py` — HTML strip, truncation, injection attempts
-- `test_authorization.py` — allowlist/blocklist logic, hot-reload
-
-### Integration Tests
-- Full round-trip: send email → fetch → dispatch → reply → check Sent folder
-- Multipart handling (HTML + plain text, attachments)
-- Threading continuity (In-Reply-To chains)
-- Config reload without dropping in-flight messages
-
-### Security Tests
-- Injection attempts: `From:` spoofing, HTML execution, script tags
-- Rate limiting: burst detection, backoff
-- Blocklist: ensure blocked senders never reach model
-
-## Rollout Plan
-
-1. **Deploy to sergio_dev_ops** — test with Mario's emails (allowed senders only)
-2. **Smoke test** — verify threading, Sent folder archive, Telegram notifications
-3. **Deploy to FrancescoDatini** — full approval workflow
-4. **Deploy to rachel_zane** — (optional; Luca may not use email channel)
-5. **Remove heartbeat fetch tasks** — migrate to channel poller
-
-## Open Questions / Future
-
-- Should email channel support **team mailboxes** (shared inboxes)?
-  - Current design: 1 mailbox per instance (IMAP_USER)
-  - Future: multi-account with sender routing
-- **Attachment handling?** Current scope: text only, ignore attachments
-  - Phase 3: pass attachment metadata to model, ask about fetch?
-- **Reply-to vs From?** Currently always reply to sender's address
-  - Variant: forward to team instead of direct reply?
-
-## References
-
-- PR #30: config-only sender approval (authorization pattern)
-- `ops/email-check.py`, `ops/email-send.py` (existing Sergio setup)
-- `lib/channels/telegram/adapter.py` (gateway integration template)
+- the consolidated lifecycle is implemented;
+- setup and doctor commands make misconfiguration obvious;
+- UID state cannot lose unknown messages;
+- external outbound drafts cannot send without approval;
+- operator decisions are durable and auditable;
+- focused email tests pass;
+- existing Telegram gateway tests still pass.

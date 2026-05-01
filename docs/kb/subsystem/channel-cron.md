@@ -5,8 +5,8 @@ status: active
 code_anchors:
   - path: lib/gateway/channels/cron.py
     symbol: "class CronChannel:"
-last_verified: 2026-04-25
-verified_by: claude
+last_verified: 2026-05-01
+verified_by: l.mattei
 related:
   - subsystem/gateway-queue.md
   - subsystem/heartbeat-runner.md

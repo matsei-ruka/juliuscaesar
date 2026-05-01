@@ -7,8 +7,8 @@ code_anchors:
     symbol: "class JcEventsChannel:"
   - path: bin/jc-workers
     symbol: "def _write_worker_event"
-last_verified: 2026-04-25
-verified_by: claude
+last_verified: 2026-05-01
+verified_by: l.mattei
 related:
   - subsystem/gateway-queue.md
   - subsystem/workers-background-agents.md

@@ -49,7 +49,7 @@ class TestPollCli(unittest.TestCase):
                   user: mario@scovai.com
                   poll_interval: 0
                 senders:
-                  allowed:
+                  trusted:
                     - mario@scovai.com
                   blocklist:
                     - spam@x.com
@@ -57,7 +57,7 @@ class TestPollCli(unittest.TestCase):
             """
         ).strip()
 
-    def test_poll_dispatches_allowed_via_adapter_mock(self):
+    def test_poll_dispatches_trusted_via_adapter_mock(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             _write_gateway_yaml(instance, self._yaml())
@@ -75,7 +75,7 @@ class TestPollCli(unittest.TestCase):
                     "in_reply_to": None,
                     "references": [],
                     "text": "[EMAIL ...] hello",
-                    "status": "allowed",
+                    "status": "trusted",
                     "metadata": {"uid": "1"},
                 },
                 {
@@ -122,8 +122,9 @@ class TestPollCli(unittest.TestCase):
                 ).fetchall()
             finally:
                 conn.close()
-            self.assertEqual(len(rows), 1)  # blocked dropped, allowed enqueued
+            self.assertEqual(len(rows), 1)  # blocked dropped, trusted enqueued
             self.assertEqual(rows[0]["source_message_id"], "uid_1")
+            fake_adapter.mark_handled_uids.assert_called_once_with(["1", "2"])
 
             # Poll log was created.
             log = instance / "state" / "channels" / "email" / "poll.log"

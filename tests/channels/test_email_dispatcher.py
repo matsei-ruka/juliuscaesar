@@ -33,12 +33,12 @@ def _make_msg(uid: str, sender: str, status: str, **overrides):
 
 
 class TestDispatchAllowed(unittest.TestCase):
-    def test_allowed_messages_get_enqueued(self):
+    def test_trusted_messages_get_enqueued(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             messages = [
-                _make_msg("100", "mario@scovai.com", "allowed"),
-                _make_msg("101", "filippo@scovai.com", "allowed"),
+                _make_msg("100", "mario@scovai.com", "trusted"),
+                _make_msg("101", "filippo@scovai.com", "trusted"),
             ]
             result = email_dispatcher.dispatch_messages(
                 instance_dir=instance, messages=messages, cfg={"notify_on_unknown": False}
@@ -60,6 +60,7 @@ class TestDispatchAllowed(unittest.TestCase):
             meta = json.loads(rows[0]["meta"])
             self.assertEqual(meta["delivery_channel"], "email")
             self.assertEqual(meta["email_to"], "mario@scovai.com")
+            self.assertEqual(meta["sender_tier"], "trusted")
             self.assertIn("body 100", rows[0]["content"])
 
     def test_allowed_uses_injected_enqueue(self):
@@ -72,12 +73,30 @@ class TestDispatchAllowed(unittest.TestCase):
             instance = Path(tmp)
             email_dispatcher.dispatch_messages(
                 instance_dir=instance,
-                messages=[_make_msg("1", "mario@scovai.com", "allowed")],
+                messages=[_make_msg("1", "mario@scovai.com", "trusted")],
                 enqueue=fake_enqueue,
             )
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0]["source"], "email")
         self.assertEqual(captured[0]["meta"]["delivery_channel"], "email")
+        self.assertEqual(captured[0]["meta"]["sender_tier"], "trusted")
+
+    def test_external_messages_get_enqueued_with_external_tier(self):
+        captured = []
+
+        def fake_enqueue(**kwargs):
+            captured.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            result = email_dispatcher.dispatch_messages(
+                instance_dir=instance,
+                messages=[_make_msg("2", "client@example.com", "external")],
+                enqueue=fake_enqueue,
+            )
+        self.assertEqual(result.dispatched, 1)
+        self.assertEqual(result.handled_uids, ["2"])
+        self.assertEqual(captured[0]["meta"]["sender_tier"], "external")
 
 
 class TestDispatchBlocked(unittest.TestCase):
@@ -115,7 +134,9 @@ class TestDispatchUnknown(unittest.TestCase):
             self.assertEqual(kwargs.get("chat_id_override"), "999")
             self.assertIn("newguy@corp.com", args[1])
 
-            pdir = email_dispatcher.pending_dir(instance) / "newguy@corp.com"
+            pdir = email_dispatcher.pending_dir(instance) / email_dispatcher._sender_key(
+                "newguy@corp.com"
+            )
             self.assertTrue(pdir.is_dir())
             files = list(pdir.glob("*.json"))
             self.assertEqual(len(files), 1)
@@ -132,6 +153,22 @@ class TestDispatchUnknown(unittest.TestCase):
                     cfg={"notify_on_unknown": False},
                 )
             notify.assert_not_called()
+
+    def test_unknown_sender_uses_safe_path_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            sender = 'weird/name+tag"@corp.com'
+            email_dispatcher.dispatch_messages(
+                instance_dir=instance,
+                messages=[_make_msg("302", sender, "unknown")],
+                cfg={"notify_on_unknown": False},
+            )
+            raw_path = email_dispatcher.pending_dir(instance) / sender
+            safe_path = email_dispatcher.pending_dir(instance) / email_dispatcher._sender_key(
+                sender
+            )
+            self.assertFalse(raw_path.exists())
+            self.assertTrue(safe_path.is_dir())
 
 
 class TestDrainPending(unittest.TestCase):
@@ -156,7 +193,9 @@ class TestDrainPending(unittest.TestCase):
                 conn.close()
             self.assertEqual(n, 2)
             # Pending dir cleared.
-            sender_dir = email_dispatcher.pending_dir(instance) / "alice@x.com"
+            sender_dir = email_dispatcher.pending_dir(instance) / email_dispatcher._sender_key(
+                "alice@x.com"
+            )
             self.assertFalse(sender_dir.exists())
 
     def test_drain_deny_drops_messages(self):
@@ -188,7 +227,7 @@ class TestMetaShape(unittest.TestCase):
         msg = _make_msg(
             "9",
             "mario@scovai.com",
-            "allowed",
+            "trusted",
             references=["<root@x.com>", "<prev@x.com>"],
             in_reply_to="<prev@x.com>",
         )
@@ -199,6 +238,40 @@ class TestMetaShape(unittest.TestCase):
         self.assertEqual(meta["email_message_id"], "<9@scovai.com>")
         self.assertEqual(meta["email_in_reply_to"], "<prev@x.com>")
         self.assertEqual(meta["email_references"], ["<root@x.com>", "<prev@x.com>"])
+        self.assertEqual(meta["sender_tier"], "trusted")
+
+
+class TestDrafts(unittest.TestCase):
+    def test_enqueue_draft_persists_safe_sender_path_and_notifies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            meta = {
+                "email_to": 'client/name"@example.com',
+                "email_subject": "Status",
+                "email_message_id": "<1@example.com>",
+                "email_uid": "777",
+                "sender_tier": "external",
+            }
+            with patch.object(email_dispatcher, "_send_telegram_notify") as notify:
+                draft_id = email_dispatcher.enqueue_draft(
+                    instance,
+                    response="Draft body",
+                    meta=meta,
+                    cfg={"approvals": {"telegram_chat_id": "123"}},
+                )
+            self.assertEqual(draft_id, "draft_777")
+            raw_path = email_dispatcher.drafts_dir(instance) / meta["email_to"]
+            safe_path = (
+                email_dispatcher.drafts_dir(instance)
+                / email_dispatcher._sender_key(meta["email_to"])
+                / "draft_777.json"
+            )
+            self.assertFalse(raw_path.exists())
+            self.assertTrue(safe_path.exists())
+            saved = json.loads(safe_path.read_text())
+            self.assertEqual(saved["sender"], meta["email_to"])
+            self.assertEqual(saved["state"], "pending")
+            notify.assert_called_once()
 
 
 if __name__ == "__main__":

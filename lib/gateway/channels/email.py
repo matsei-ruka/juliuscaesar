@@ -1,9 +1,9 @@
 """Email channel — gateway integration.
 
 Polls IMAP via `lib.channels.email.EmailChannelAdapter`, dispatches inbound
-messages through `email_dispatcher.dispatch_messages` (allowed → enqueue,
-unknown → Telegram notify + pending, blocked → silent drop), and sends
-outbound responses via SMTP using meta supplied by the runtime.
+messages through `email_dispatcher.dispatch_messages` (trusted/external →
+enqueue, unknown → Telegram notify + pending, blocked → silent drop), and sends
+or drafts outbound responses using meta supplied by the runtime.
 
 The internal poller can be disabled by setting `imap.poll_interval: 0` in
 gateway.yaml — typical deployments drive polling externally via the
@@ -139,6 +139,8 @@ class EmailChannel:
             f"email poll: dispatched={result.dispatched} "
             f"pending={result.pending} blocked={result.blocked}"
         )
+        if hasattr(adapter, "mark_handled_uids"):
+            adapter.mark_handled_uids(result.handled_uids)
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
         """Send a reply via SMTP. Requires meta keys set by the inbound enqueue."""
@@ -148,6 +150,16 @@ class EmailChannel:
         if not recipient:
             self.log("email send skipped — no recipient in meta")
             return None
+        cfg_raw = _load_email_config(self.instance_dir)
+        if meta.get("sender_tier") == "external":
+            draft_id = email_dispatcher.enqueue_draft(
+                self.instance_dir,
+                response=response,
+                meta=meta,
+                cfg=cfg_raw,
+                log=self.log,
+            )
+            return f"draft:{draft_id}"
         adapter = self._build_adapter()
         if adapter is None:
             return None

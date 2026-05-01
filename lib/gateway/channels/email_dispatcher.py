@@ -2,7 +2,8 @@
 `heartbeat/fetch/email-poll.sh` external cron script.
 
 Routes EmailChannelAdapter outputs:
-  - status='allowed'  → enqueue to gateway queue (source='email')
+  - status='trusted'  → enqueue to gateway queue (source='email')
+  - status='external' → enqueue to gateway queue (outbound reply drafts)
   - status='unknown'  → notify Telegram + persist message JSON to
                         `state/channels/email/pending/<uid>.json`
   - status='blocked'  → silent drop
@@ -18,11 +19,13 @@ Also exposes a `poll` CLI entrypoint:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -33,12 +36,15 @@ __all__ = [
     "DispatchResult",
     "dispatch_messages",
     "drain_pending",
+    "drafts_dir",
+    "enqueue_draft",
     "pending_dir",
     "main",
 ]
 
 
 PENDING_REL = Path("state/channels/email/pending")
+DRAFTS_REL = Path("state/channels/email/drafts")
 
 
 @dataclass
@@ -46,6 +52,18 @@ class DispatchResult:
     dispatched: int = 0
     pending: int = 0
     blocked: int = 0
+    handled_uids: list[str] = field(default_factory=list)
+
+
+def _sender_key(sender: str) -> str:
+    """Return a filesystem-safe stable key for a normalized email address."""
+    normalized = (sender or "unknown").lower().strip()
+    token = base64.urlsafe_b64encode(normalized.encode("utf-8")).decode("ascii")
+    return token.rstrip("=") or "unknown"
+
+
+def _message_uid(msg: dict[str, Any]) -> str:
+    return str(msg.get("metadata", {}).get("uid") or msg.get("channel_id") or "0")
 
 
 def pending_dir(instance_dir: Path) -> Path:
@@ -53,12 +71,16 @@ def pending_dir(instance_dir: Path) -> Path:
     return instance_dir / PENDING_REL
 
 
+def drafts_dir(instance_dir: Path) -> Path:
+    """Where external-sender outbound replies wait for approval."""
+    return instance_dir / DRAFTS_REL
+
+
 def _write_pending(instance_dir: Path, msg: dict[str, Any]) -> Path:
     """Persist `msg` under `<sender>/<uid>.json` so drain_pending can find it."""
     sender = (msg.get("sender") or "unknown").lower().strip()
-    uid = str(msg.get("metadata", {}).get("uid") or msg.get("channel_id") or "0")
-    safe_sender = "".join(c if c.isalnum() or c in "._-@" else "_" for c in sender)
-    path = pending_dir(instance_dir) / safe_sender / f"{uid}.json"
+    uid = _message_uid(msg)
+    path = pending_dir(instance_dir) / _sender_key(sender) / f"{uid}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(msg, default=str), encoding="utf-8")
     return path
@@ -80,6 +102,7 @@ def _meta_for_event(msg: dict[str, Any]) -> dict[str, Any]:
         "email_references": msg.get("references") or [],
         "email_uid": str(msg.get("metadata", {}).get("uid", "")),
         "channel_id": msg.get("channel_id"),
+        "sender_tier": "trusted" if msg.get("status") == "allowed" else msg.get("status"),
     }
 
 
@@ -174,6 +197,82 @@ def _format_unknown_notification(msg: dict[str, Any]) -> str:
     )
 
 
+def _approval_cfg(cfg: dict[str, Any]) -> tuple[bool, str | None, bool]:
+    approvals = cfg.get("approvals") if isinstance(cfg.get("approvals"), dict) else {}
+    notify_on_unknown = bool(
+        approvals.get("notify_on_unknown", cfg.get("notify_on_unknown", True))
+    )
+    notify_on_draft = bool(approvals.get("notify_on_draft", True))
+    notify_chat_id = approvals.get("telegram_chat_id", cfg.get("telegram_chat_id"))
+    notify_chat_id = str(notify_chat_id) if notify_chat_id else None
+    return notify_on_unknown, notify_chat_id, notify_on_draft
+
+
+def _format_draft_notification(draft: dict[str, Any]) -> str:
+    draft_id = draft["draft_id"]
+    sender = draft["sender"]
+    subject = draft["subject"]
+    preview = (draft["draft_text"] or "")[:500].replace("\n", " ").strip()
+    if len(draft.get("draft_text") or "") > 500:
+        preview += "..."
+    return (
+        "Email draft pending approval\n\n"
+        f"From: `{sender}`\n"
+        f"Subject: {subject}\n"
+        f"Draft: `{draft_id}`\n\n"
+        f"{preview}\n\n"
+        f"Approve: `jc email drafts approve {draft_id}`\n"
+        f"Reject: `jc email drafts reject {draft_id}`\n"
+        f"Edit: `jc email drafts edit {draft_id} <text>`"
+    )
+
+
+def enqueue_draft(
+    instance_dir: Path,
+    *,
+    response: str,
+    meta: dict[str, Any],
+    cfg: Optional[dict[str, Any]] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Persist an external-sender outbound reply as a draft and notify Telegram."""
+    if log is None:
+        log = lambda _msg: None  # noqa: E731
+    cfg = cfg or {}
+    sender = str(meta.get("email_to") or meta.get("recipient") or meta.get("sender") or "unknown")
+    uid = str(meta.get("email_uid") or meta.get("channel_id") or "manual")
+    draft_id = f"draft_{uid}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    draft = {
+        "draft_id": draft_id,
+        "sender": sender,
+        "sender_key": _sender_key(sender),
+        "subject": meta.get("email_subject") or meta.get("subject") or "(no subject)",
+        "message_id": meta.get("email_message_id") or meta.get("message_id"),
+        "in_reply_to": meta.get("email_message_id") or meta.get("in_reply_to"),
+        "references": meta.get("email_references") or meta.get("references") or [],
+        "draft_text": response,
+        "draft_timestamp": now,
+        "edit_count": 0,
+        "state": "pending",
+        "meta": meta,
+    }
+    path = drafts_dir(instance_dir) / draft["sender_key"] / f"{draft_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(draft, indent=2, default=str), encoding="utf-8")
+    log(f"email draft queued draft_id={draft_id} sender={sender} path={path}")
+
+    _notify_on_unknown, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
+    if notify_on_draft:
+        _send_telegram_notify(
+            instance_dir,
+            _format_draft_notification(draft),
+            chat_id_override=notify_chat_id,
+            log=log,
+        )
+    return draft_id
+
+
 def dispatch_messages(
     *,
     instance_dir: Path,
@@ -190,28 +289,30 @@ def dispatch_messages(
     if log is None:
         log = lambda _msg: None  # noqa: E731
     cfg = cfg or {}
-    notify_on_unknown = bool(cfg.get("notify_on_unknown", True))
-    notify_chat_id = cfg.get("telegram_chat_id")
-    notify_chat_id = str(notify_chat_id) if notify_chat_id else None
+    notify_on_unknown, notify_chat_id, _notify_on_draft = _approval_cfg(cfg)
 
     result = DispatchResult()
     for msg in messages:
         status = msg.get("status", "unknown")
         sender = msg.get("sender", "(unknown)")
-        if status == "allowed":
+        uid = _message_uid(msg)
+        if status in {"allowed", "trusted", "external"}:
             try:
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=enqueue)
                 result.dispatched += 1
+                result.handled_uids.append(uid)
                 log(f"email dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001
                 log(f"email enqueue failed sender={sender}: {exc}")
         elif status == "blocked":
             result.blocked += 1
+            result.handled_uids.append(uid)
             log(f"email dropped (blocked) sender={sender}")
         else:  # unknown
             try:
                 path = _write_pending(instance_dir, msg)
                 result.pending += 1
+                result.handled_uids.append(uid)
                 log(f"email pending sender={sender} path={path}")
             except OSError as exc:
                 log(f"email pending write failed sender={sender}: {exc}")
@@ -241,8 +342,7 @@ def drain_pending(
     if log is None:
         log = lambda _msg: None  # noqa: E731
     sender_norm = sender.lower().strip()
-    safe = "".join(c if c.isalnum() or c in "._-@" else "_" for c in sender_norm)
-    sender_dir = pending_dir(instance_dir) / safe
+    sender_dir = pending_dir(instance_dir) / _sender_key(sender_norm)
     if not sender_dir.is_dir():
         return 0
     count = 0
@@ -255,7 +355,7 @@ def drain_pending(
             continue
         if action == "approve":
             try:
-                msg["status"] = "allowed"
+                msg["status"] = "trusted"
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=None)
                 log(f"pending dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001
@@ -344,6 +444,8 @@ def _cli_poll(args: argparse.Namespace) -> int:
         f"poll done: dispatched={result.dispatched} "
         f"pending={result.pending} blocked={result.blocked}"
     )
+    if hasattr(adapter, "mark_handled_uids"):
+        adapter.mark_handled_uids(result.handled_uids)
     return 0
 
 

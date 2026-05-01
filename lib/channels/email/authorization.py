@@ -1,4 +1,4 @@
-"""Sender authorization: allowlist/blocklist with hot-reload."""
+"""Sender authorization: trusted/external/blocklist with hot-reload."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ __all__ = ["SenderAuthorizer", "update_sender_list"]
 
 
 def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> None:
-    """Update sender allowlist or blocklist in gateway.yaml (atomic, idempotent).
+    """Update sender policy list in gateway.yaml (atomic, idempotent).
 
     Used by jc-chats approve/deny CLI to manage senders atomically.
     """
@@ -26,6 +26,8 @@ def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> 
     email_cfg = channels.get("email", {})
     senders_cfg = email_cfg.get("senders", {})
 
+    if list_name == "allowed":
+        list_name = "trusted"
     senders_list = senders_cfg.get(list_name, [])
     if not isinstance(senders_list, list):
         senders_list = []
@@ -51,7 +53,7 @@ def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> 
 
 
 class SenderAuthorizer:
-    """Manages sender allowlist/blocklist with mtime-based hot-reload."""
+    """Manages sender tiers with mtime-based hot-reload."""
 
     def __init__(
         self,
@@ -66,7 +68,8 @@ class SenderAuthorizer:
         self.config_path = Path(config_path)
         self.check_interval = check_interval
         self.last_mtime = 0.0
-        self.allowed: set[str] = set()
+        self.trusted: set[str] = set()
+        self.external: set[str] = set()
         self.blocked: set[str] = set()
         self.last_check = 0.0
         self._reload()
@@ -82,7 +85,8 @@ class SenderAuthorizer:
             return
 
         self.last_mtime = mtime
-        self.allowed = set()
+        self.trusted = set()
+        self.external = set()
         self.blocked = set()
 
         if not self.config_path.exists():
@@ -93,9 +97,18 @@ class SenderAuthorizer:
             email_cfg = config.get("channels", {}).get("email", {})
             senders_cfg = email_cfg.get("senders", {})
 
+            trusted = senders_cfg.get("trusted", [])
+            if isinstance(trusted, list):
+                self.trusted = {s.lower() for s in trusted if s}
+
+            # Backward compatibility for Phase 1-3 configs.
             allowed = senders_cfg.get("allowed", [])
             if isinstance(allowed, list):
-                self.allowed = {s.lower() for s in allowed if s}
+                self.trusted |= {s.lower() for s in allowed if s}
+
+            external = senders_cfg.get("external", [])
+            if isinstance(external, list):
+                self.external = {s.lower() for s in external if s}
 
             blocked = senders_cfg.get("blocklist", [])
             if isinstance(blocked, list):
@@ -105,7 +118,7 @@ class SenderAuthorizer:
             pass
 
     def check(self, sender_email: str) -> str:
-        """Classify sender: 'allowed' | 'blocked' | 'unknown'.
+        """Classify sender: 'trusted' | 'external' | 'blocked' | 'unknown'.
 
         Hot-reloads config on mtime change (~5s polling).
         """
@@ -118,6 +131,8 @@ class SenderAuthorizer:
 
         if sender in self.blocked:
             return "blocked"
-        if sender in self.allowed:
-            return "allowed"
+        if sender in self.trusted:
+            return "trusted"
+        if sender in self.external:
+            return "external"
         return "unknown"

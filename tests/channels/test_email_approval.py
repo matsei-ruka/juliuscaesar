@@ -1,7 +1,7 @@
 """Tests for `jc-chats approve/deny --email <addr>` workflow.
 
 Covers:
-- gateway.yaml allowlist/blocklist mutation
+- gateway.yaml trusted/blocklist mutation
 - pending-message drain on approve (→ enqueue)
 - pending-message drain on deny (→ drop)
 - Telegram notification fired (mocked subprocess)
@@ -67,23 +67,28 @@ def _seed_pending(instance: Path, sender: str, uids: list[str]) -> None:
     )
 
 
-def _read_email_senders(instance: Path) -> tuple[set[str], set[str]]:
+def _read_email_senders(instance: Path) -> tuple[set[str], set[str], set[str]]:
     cfg = yaml.safe_load((instance / "ops" / "gateway.yaml").read_text())
     senders = ((cfg.get("channels") or {}).get("email") or {}).get("senders") or {}
-    return set(senders.get("allowed") or []), set(senders.get("blocklist") or [])
+    return (
+        set(senders.get("trusted") or []),
+        set(senders.get("external") or []),
+        set(senders.get("blocklist") or []),
+    )
 
 
 class TestApproveEmail(unittest.TestCase):
-    def test_approve_writes_yaml_allowed(self):
+    def test_approve_writes_yaml_trusted(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             rc, out, err = _run(
                 ["approve", "--email", "mario@scovai.com"], instance
             )
             self.assertEqual(rc, 0, err)
-            self.assertIn("channels.email.senders.allowed", out)
-            allowed, blocked = _read_email_senders(instance)
-            self.assertIn("mario@scovai.com", allowed)
+            self.assertIn("channels.email.senders.trusted", out)
+            trusted, external, blocked = _read_email_senders(instance)
+            self.assertIn("mario@scovai.com", trusted)
+            self.assertNotIn("mario@scovai.com", external)
             self.assertNotIn("mario@scovai.com", blocked)
 
     def test_approve_drains_pending_to_queue(self):
@@ -110,20 +115,42 @@ class TestApproveEmail(unittest.TestCase):
             _run(["approve", "--email", "alice@x.com"], instance)
             rc, out, _ = _run(["approve", "--email", "alice@x.com"], instance)
             self.assertEqual(rc, 0)
-            self.assertIn("already on email allowlist", out)
+            self.assertIn("already on email trusted list", out)
 
     def test_approve_removes_from_blocklist(self):
         """Re-approving a previously denied sender clears the blocklist entry."""
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             _run(["deny", "--email", "carol@x.com"], instance)
-            allowed, blocked = _read_email_senders(instance)
+            trusted, _external, blocked = _read_email_senders(instance)
             self.assertIn("carol@x.com", blocked)
             rc, _, _ = _run(["approve", "--email", "carol@x.com"], instance)
             self.assertEqual(rc, 0)
-            allowed, blocked = _read_email_senders(instance)
-            self.assertIn("carol@x.com", allowed)
+            trusted, external, blocked = _read_email_senders(instance)
+            self.assertIn("carol@x.com", trusted)
+            self.assertNotIn("carol@x.com", external)
             self.assertNotIn("carol@x.com", blocked)
+
+    def test_approve_migrates_legacy_allowed_to_trusted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "ops").mkdir(parents=True)
+            (instance / "ops" / "gateway.yaml").write_text(
+                "channels:\n"
+                "  email:\n"
+                "    senders:\n"
+                "      allowed: [legacy@x.com]\n"
+                "      external: [mario@scovai.com]\n",
+                encoding="utf-8",
+            )
+            rc, out, err = _run(["approve", "--email", "mario@scovai.com"], instance)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("channels.email.senders.trusted", out)
+            cfg = yaml.safe_load((instance / "ops" / "gateway.yaml").read_text())
+            senders = cfg["channels"]["email"]["senders"]
+            self.assertNotIn("allowed", senders)
+            self.assertEqual(senders["trusted"], ["legacy@x.com", "mario@scovai.com"])
+            self.assertEqual(senders["external"], [])
 
 
 class TestDenyEmail(unittest.TestCase):
@@ -133,8 +160,9 @@ class TestDenyEmail(unittest.TestCase):
             rc, out, err = _run(["deny", "--email", "spam@x.com"], instance)
             self.assertEqual(rc, 0, err)
             self.assertIn("channels.email.senders.blocklist", out)
-            allowed, blocked = _read_email_senders(instance)
+            trusted, _external, blocked = _read_email_senders(instance)
             self.assertIn("spam@x.com", blocked)
+            self.assertNotIn("spam@x.com", trusted)
 
     def test_deny_drops_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
