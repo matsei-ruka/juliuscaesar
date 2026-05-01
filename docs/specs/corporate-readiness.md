@@ -49,6 +49,7 @@ easier to audit.
 - Setup is repeatable across instances.
 - Support runbooks exist for common failures.
 - Metrics reveal stuck queues, stale drafts, broken pollers, and failed sends.
+- Fleet snapshots expose email pending/draft health for multi-instance views.
 - Logs are structured enough to reconstruct a customer-visible action.
 - Upgrades preserve instance customization.
 - The product has clear packaging: Personal Ops, Business Pilot, Corporate Ops.
@@ -161,3 +162,31 @@ Before calling a feature corporate-ready, answer:
 - Email channel work is tied to operator workflows.
 - Future implementation issues can be prioritized by product value and
   operational solidity.
+
+## Phase 3 acceptance
+
+- Email state has shared helpers for pending inbound messages, outbound drafts,
+  UID watermarks, and lifecycle metrics.
+- Email state records lifecycle events in local JSONL for operator forensics.
+- `jc email doctor` reports credential presence, UID watermark, pending count,
+  draft states, and oldest pending/draft ages.
+- `jc email senders` owns sender policy listing and tier changes.
+- Operators can list/show/drain pending inbound messages without touching
+  files directly.
+- Operators can list/show/edit/approve/reject outbound drafts.
+- Failed SMTP sends mark drafts `failed` and record a local lifecycle event.
+
+## Phase 4 acceptance
+
+- An email operations runbook exists.
+- Rollback is documented as disabling the channel without deleting state.
+- Stuck pending messages, stale drafts, IMAP failures, and SMTP failures have
+  explicit first-response commands.
+
+## Phase 5 acceptance
+
+- Packaging is documented as Personal Ops, Business Pilot, and Corporate Ops.
+- The pricing story is tied to workflows and operational evidence, not model
+  access or novelty.
+- A sample Business Pilot / Corporate Ops email gateway config exists.
+- Company snapshots include email channel metrics for dashboard integration.

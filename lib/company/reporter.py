@@ -92,11 +92,31 @@ def build_snapshot(instance_dir: Path) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
+    channel_metrics: dict[str, Any] = {}
+    try:
+        from gateway.channels import email_state  # type: ignore
+
+        email_metrics = email_state.metrics(instance_dir)
+        if "email" in channels_enabled or email_metrics["pending"] or email_metrics["drafts"]:
+            channel_metrics["email"] = {
+                "last_uid": email_metrics["last_uid"],
+                "pending": email_metrics["pending"],
+                "drafts": email_metrics["drafts"],
+                "draft_states": email_metrics["draft_states"],
+                "oldest_pending_age_seconds": email_metrics["oldest_pending_age_seconds"],
+                "oldest_draft_age_seconds": email_metrics["oldest_draft_age_seconds"],
+                "event_counts_recent": email_metrics["event_counts_recent"],
+                "last_event": email_metrics["last_event"],
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "queue_depth": queue_depth,
         "brain_runtime": brain_runtime,
         "triage_backend": triage_backend,
         "channels_enabled": channels_enabled,
+        "channel_metrics": channel_metrics,
         "error_rate_5m": 0.0,
         "cpu_pct": 0.0,
         "memory_mb": 0,

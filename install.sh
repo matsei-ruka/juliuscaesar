@@ -19,7 +19,7 @@ SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$SHARE_DIR/venv"
 DEPS=(pyyaml python-dotenv dashscope requests websocket-client)
-BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor jc-upgrade jc-update jc-migrate-to-0.3 jc-company jc-chats jc-transcripts jc-user-model jc-codex-auth)
+BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor jc-upgrade jc-update jc-migrate-to-0.3 jc-company jc-chats jc-email jc-transcripts jc-user-model jc-codex-auth jc-completion)
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 

@@ -1,0 +1,44 @@
+# Example Business Pilot / Corporate Ops gateway config.
+#
+# Non-secret runtime config belongs in ops/gateway.yaml. IMAP/SMTP host, user,
+# and password values stay in the instance .env.
+
+default_brain: codex
+
+gateway:
+  poll_interval_seconds: 2
+  max_retries: 3
+  lease_seconds: 600
+
+channels:
+  telegram:
+    enabled: true
+    chat_ids: []
+    blocked_chat_ids: []
+
+  email:
+    enabled: true
+    poll_interval_seconds: 60
+    mailbox: INBOX
+    mark_seen: false
+    max_messages_per_poll: 25
+    senders:
+      trusted:
+        - operator@example.com
+      external:
+        - client@example.com
+      blocklist: []
+    approvals:
+      notify_on_unknown: true
+      notify_on_draft: true
+      telegram_chat_id: null
+
+triage:
+  backend: codex_api
+  confidence_threshold: 0.65
+
+sender_approval:
+  mode: config_only
+
+codex:
+  sandbox: read-only

@@ -183,6 +183,9 @@ class Brain:
     def extra_env(self) -> dict[str, str]:
         return {}
 
+    def extra_args_for_event(self, event: Event) -> tuple[str, ...]:
+        return ()
+
     def capture_session_id(self, started_at: str) -> str | None:
         return None
 
@@ -256,7 +259,12 @@ class Brain:
             stderr_handle = stderr_path.open("wb")
             try:
                 try:
-                    cmd = [str(self.adapter_path()), model or "", *self.override.extra_args]
+                    cmd = [
+                        str(self.adapter_path()),
+                        model or "",
+                        *self.extra_args_for_event(event),
+                        *self.override.extra_args,
+                    ]
                     proc = subprocess.Popen(
                         cmd,
                         stdin=subprocess.PIPE,

@@ -9,8 +9,7 @@ Routes EmailChannelAdapter outputs:
   - status='blocked'  → silent drop
 
 Pending messages are drained when an operator runs
-`jc-chats approve --email <addr>` or `... deny --email <addr>` —
-that path is implemented in `bin/jc-chats`, which calls `drain_pending`.
+`jc email senders trust <addr>`, `external <addr>`, or `block <addr>`.
 
 Also exposes a `poll` CLI entrypoint:
     python3 -m gateway.channels.email_dispatcher poll --instance-dir <path>
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import yaml
+from . import email_state
 
 
 __all__ = [
@@ -43,8 +43,8 @@ __all__ = [
 ]
 
 
-PENDING_REL = Path("state/channels/email/pending")
-DRAFTS_REL = Path("state/channels/email/drafts")
+PENDING_REL = email_state.PENDING_REL
+DRAFTS_REL = email_state.DRAFTS_REL
 
 
 @dataclass
@@ -68,12 +68,12 @@ def _message_uid(msg: dict[str, Any]) -> str:
 
 def pending_dir(instance_dir: Path) -> Path:
     """Where unknown-sender messages are persisted while awaiting approval."""
-    return instance_dir / PENDING_REL
+    return email_state.pending_dir(instance_dir)
 
 
 def drafts_dir(instance_dir: Path) -> Path:
     """Where external-sender outbound replies wait for approval."""
-    return instance_dir / DRAFTS_REL
+    return email_state.drafts_dir(instance_dir)
 
 
 def _write_pending(instance_dir: Path, msg: dict[str, Any]) -> Path:
@@ -81,8 +81,7 @@ def _write_pending(instance_dir: Path, msg: dict[str, Any]) -> Path:
     sender = (msg.get("sender") or "unknown").lower().strip()
     uid = _message_uid(msg)
     path = pending_dir(instance_dir) / _sender_key(sender) / f"{uid}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(msg, default=str), encoding="utf-8")
+    email_state.write_json_atomic(path, msg)
     return path
 
 
@@ -192,8 +191,9 @@ def _format_unknown_notification(msg: dict[str, Any]) -> str:
         f"**From:** {name} `{sender}`\n"
         f"**Subject:** {subject}\n\n"
         f"_{preview}_\n\n"
-        f"Approve: `jc-chats approve --email {sender}`\n"
-        f"Deny: `jc-chats deny --email {sender}`"
+        f"Trust: `jc email senders trust {sender}`\n"
+        f"External: `jc email senders external {sender}`\n"
+        f"Block: `jc email senders block {sender}`"
     )
 
 
@@ -258,8 +258,14 @@ def enqueue_draft(
         "meta": meta,
     }
     path = drafts_dir(instance_dir) / draft["sender_key"] / f"{draft_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(draft, indent=2, default=str), encoding="utf-8")
+    email_state.write_json_atomic(path, draft)
+    email_state.record_event(
+        instance_dir,
+        "draft_queued",
+        draft_id=draft_id,
+        sender=sender,
+        path=str(path),
+    )
     log(f"email draft queued draft_id={draft_id} sender={sender} path={path}")
 
     _notify_on_unknown, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
@@ -301,20 +307,50 @@ def dispatch_messages(
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=enqueue)
                 result.dispatched += 1
                 result.handled_uids.append(uid)
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_dispatched",
+                    uid=uid,
+                    sender=sender,
+                    status=status,
+                )
                 log(f"email dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_dispatch_failed",
+                    uid=uid,
+                    sender=sender,
+                    status=status,
+                    error=str(exc),
+                )
                 log(f"email enqueue failed sender={sender}: {exc}")
         elif status == "blocked":
             result.blocked += 1
             result.handled_uids.append(uid)
+            email_state.record_event(instance_dir, "inbound_blocked", uid=uid, sender=sender)
             log(f"email dropped (blocked) sender={sender}")
         else:  # unknown
             try:
                 path = _write_pending(instance_dir, msg)
                 result.pending += 1
                 result.handled_uids.append(uid)
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_pending",
+                    uid=uid,
+                    sender=sender,
+                    path=str(path),
+                )
                 log(f"email pending sender={sender} path={path}")
             except OSError as exc:
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_pending_failed",
+                    uid=uid,
+                    sender=sender,
+                    error=str(exc),
+                )
                 log(f"email pending write failed sender={sender}: {exc}")
                 continue
             if notify_on_unknown:
@@ -336,11 +372,14 @@ def drain_pending(
 ) -> int:
     """Process all pending messages for `sender`.
 
-    `action='approve'` → enqueue each; `action='deny'` → discard.
+    `action='approve'` → enqueue as trusted; `action='external'` → enqueue
+    as external; `action='deny'` → discard.
     Returns count of messages handled. Sender folder is removed afterwards.
     """
     if log is None:
         log = lambda _msg: None  # noqa: E731
+    if action not in {"approve", "external", "deny"}:
+        raise ValueError("action must be 'approve', 'external', or 'deny'")
     sender_norm = sender.lower().strip()
     sender_dir = pending_dir(instance_dir) / _sender_key(sender_norm)
     if not sender_dir.is_dir():
@@ -353,15 +392,28 @@ def drain_pending(
             log(f"pending parse failed {path}: {exc}")
             path.unlink(missing_ok=True)
             continue
-        if action == "approve":
+        if action in {"approve", "external"}:
             try:
-                msg["status"] = "trusted"
+                msg["status"] = "external" if action == "external" else "trusted"
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=None)
+                email_state.record_event(
+                    instance_dir,
+                    "pending_external" if action == "external" else "pending_approved",
+                    uid=_message_uid(msg),
+                    sender=sender,
+                    status=msg["status"],
+                )
                 log(f"pending dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001
                 log(f"pending enqueue failed {path}: {exc}")
                 continue
         else:
+            email_state.record_event(
+                instance_dir,
+                "pending_denied",
+                uid=_message_uid(msg),
+                sender=sender,
+            )
             log(f"pending dropped uid={msg.get('channel_id')} sender={sender}")
         path.unlink(missing_ok=True)
         count += 1
@@ -430,8 +482,10 @@ def _cli_poll(args: argparse.Namespace) -> int:
     try:
         messages = adapter.fetch_new_messages()
     except Exception as exc:  # noqa: BLE001
+        email_state.record_event(instance, "poll_fetch_failed", error=str(exc))
         log(f"poll error: fetch_new_messages: {exc}")
         return 1
+    email_state.record_event(instance, "poll_fetched", count=len(messages))
     log(f"poll: fetched={len(messages)}")
     result = dispatch_messages(
         instance_dir=instance,

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# jc-completion — print shell completion scripts for the `jc` CLI.
+
+set -euo pipefail
+
+TOP="memory heartbeat voice watchdog workers chats email transcripts gateway company init setup update upgrade doctor user-model codex-auth migrate-to-0.3 completion help version"
+
+usage() {
+    cat <<'EOF'
+jc-completion — print shell completion scripts.
+
+Usage:
+  jc completion bash
+  jc completion zsh
+
+Install examples:
+  jc completion bash > ~/.local/share/bash-completion/completions/jc
+  jc completion zsh  > ~/.zsh/completions/_jc
+EOF
+}
+
+bash_completion() {
+    cat <<'EOF'
+_jc_complete() {
+    local cur prev sub
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    local top="memory heartbeat voice watchdog workers chats email transcripts gateway company init setup update upgrade doctor user-model codex-auth migrate-to-0.3 completion help version"
+    if [[ $COMP_CWORD -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$top" -- "$cur") )
+        return 0
+    fi
+
+    sub="${COMP_WORDS[1]}"
+    case "$sub" in
+        memory)       COMPREPLY=( $(compgen -W "new write read search link lint log rebuild consolidate --instance-dir" -- "$cur") ) ;;
+        heartbeat)    COMPREPLY=( $(compgen -W "run --instance-dir" -- "$cur") ) ;;
+        voice)        COMPREPLY=( $(compgen -W "speak transcribe enroll list-voices --instance-dir" -- "$cur") ) ;;
+        watchdog)     COMPREPLY=( $(compgen -W "tick install uninstall status status-v2 tail reset reload migrate test-notify --instance-dir" -- "$cur") ) ;;
+        workers)      COMPREPLY=( $(compgen -W "spawn list show tail cancel gc reconcile history --instance-dir" -- "$cur") ) ;;
+        chats)        COMPREPLY=( $(compgen -W "list approve deny show migrate-to-config prune --instance-dir" -- "$cur") ) ;;
+        email)        COMPREPLY=( $(compgen -W "doctor test-imap test-smtp pending senders drafts --instance-dir" -- "$cur") ) ;;
+        transcripts)  COMPREPLY=( $(compgen -W "read tail search get list --instance-dir" -- "$cur") ) ;;
+        gateway)      COMPREPLY=( $(compgen -W "init status run start stop restart tail logs enqueue claim complete fail list events retry config validate-config work-once metrics reload --instance-dir" -- "$cur") ) ;;
+        company)      COMPREPLY=( $(compgen -W "register status alert approval replay --instance-dir" -- "$cur") ) ;;
+        setup)        COMPREPLY=( $(compgen -W "--defaults --force --start --no-start --install-watchdog --no-watchdog --no-wait --channel" -- "$cur") ) ;;
+        update)       COMPREPLY=( $(compgen -W "--check-only --yes" -- "$cur") ) ;;
+        upgrade)      COMPREPLY=( $(compgen -W "--instance-dir --defaults --restart" -- "$cur") ) ;;
+        doctor)       COMPREPLY=( $(compgen -W "--instance-dir --fix" -- "$cur") ) ;;
+        user-model)   COMPREPLY=( $(compgen -W "run-now status review apply reject install uninstall --instance-dir" -- "$cur") ) ;;
+        codex-auth)   COMPREPLY=( $(compgen -W "status refresh token --auth-file --client-id --refresh-skew-seconds" -- "$cur") ) ;;
+        completion)   COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") ) ;;
+    esac
+}
+complete -F _jc_complete jc
+EOF
+}
+
+zsh_completion() {
+    cat <<'EOF'
+#compdef jc
+
+local -a top
+top=(memory heartbeat voice watchdog workers chats email transcripts gateway company init setup update upgrade doctor user-model codex-auth migrate-to-0.3 completion help version)
+
+if (( CURRENT == 2 )); then
+  _describe 'jc command' top
+  return
+fi
+
+case "$words[2]" in
+  memory)       _values 'memory command' new write read search link lint log rebuild consolidate ;;
+  heartbeat)    _values 'heartbeat command' run ;;
+  voice)        _values 'voice command' speak transcribe enroll list-voices ;;
+  watchdog)     _values 'watchdog command' tick install uninstall status status-v2 tail reset reload migrate test-notify ;;
+  workers)      _values 'workers command' spawn list show tail cancel gc reconcile history ;;
+  chats)        _values 'chats command' list approve deny show migrate-to-config prune ;;
+  email)        _values 'email command' doctor test-imap test-smtp pending senders drafts ;;
+  transcripts)  _values 'transcripts command' read tail search get list ;;
+  gateway)      _values 'gateway command' init status run start stop restart tail logs enqueue claim complete fail list events retry config validate-config work-once metrics reload ;;
+  company)      _values 'company command' register status alert approval replay ;;
+  user-model)   _values 'user-model command' run-now status review apply reject install uninstall ;;
+  codex-auth)   _values 'codex-auth command' status refresh token ;;
+  completion)   _values 'shell' bash zsh ;;
+esac
+EOF
+}
+
+case "${1:-}" in
+    bash) bash_completion ;;
+    zsh) zsh_completion ;;
+    -h|--help|help|"") usage ;;
+    *) echo "unknown shell: $1" >&2; usage >&2; exit 2 ;;
+esac

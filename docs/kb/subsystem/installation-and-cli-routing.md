@@ -19,9 +19,9 @@ related:
 
 The top-level `jc` command is a bash router. It dispatches to matching `jc-*` binaries on PATH. Current subcommand surface (router help in `bin/jc:usage()`):
 
-- Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, `doctor`.
+- Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, `doctor`, `completion`.
 - Lifecycle: `update` (CalVer framework upgrade), `upgrade` (reconfigure existing instance: channels, brain, triage), `migrate-to-0.3` (one-shot migration helper for 0.2.x instances).
-- Conversation surface: `chats` (Telegram chat directory), `transcripts` (per-conversation chat history read/tail/search).
+- Conversation surface: `chats` (Telegram chat directory), `email` (email channel operations), `transcripts` (per-conversation chat history read/tail/search).
 - Observability: `company` (fleet observability client — see `lib/company/`).
 - Modeling: `user-model` (autonomous user-model corpus/detector/proposer/applier).
 - Auth: `codex-auth` (inspect/refresh local Codex CLI OAuth state used by the `codex_api` brain).
@@ -29,7 +29,8 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 ## Source of truth
 
 - `install.sh` owns dependency setup and shim generation.
-- `bin/jc` owns the public router surface.
+- `bin/jc` owns the public router surface, including the first-class `email`
+  subcommand that dispatches to `jc-email`.
 - Individual binaries own subcommand behavior.
 - `bin/jc-setup` owns the guided first-run configurator.
 
@@ -42,9 +43,17 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - Python binaries run through the venv wrapper with the framework `lib/` on `PYTHONPATH`.
 - Native bash binaries are invoked directly by their shim.
 - The router preserves `--instance-dir <path>` or `--instance-dir=<path>` when placed before the subcommand.
-- `jc setup` uses `jc init` underneath, writes `.env`, L1 memory, `ops/watchdog.conf`, `ops/gateway.yaml`, rebuilds the memory index, and runs `jc doctor`.
+- `jc setup` uses `jc init` underneath, detects logged-in coding tools,
+  selects a default brain, configures Telegram as the first communication
+  channel, waits for the first message unless `--no-wait` is passed, writes
+  `.env` plus `ops/gateway.yaml`, creates bootstrap L1 memory, and rebuilds the
+  memory index.
+- `jc completion` prints bash/zsh shell completion scripts.
 - `jc gateway` owns the unified gateway surface: durable SQLite queue initialization, daemon lifecycle, Telegram/Slack polling, brain dispatch, enqueue, claim, complete/fail, retry, config, logs, and status/list inspection.
-- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`.
+- `jc email` owns email-channel operations: doctor, IMAP/SMTP credential
+  checks, sender policy, pending inbound inspection/drain, and outbound draft
+  review.
+- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`. It also reports email-channel credential presence and local pending/draft metrics.
 
 ## Failure modes
 
@@ -52,6 +61,8 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - If a different clone already owns the shims, install fails until the user chooses the existing clone or forces overwrite.
 - If `jc` cannot find `jc-<subcommand>` on PATH, it exits 127 and tells the user to run `install.sh`.
 - The router must handle subcommands with no global flags on macOS Bash under `set -u`; empty global arg arrays are not expanded unconditionally.
+- Bash command help paths should return usage for `-h`, `--help`, and `help`;
+  this is covered for `jc-init`, `jc-update`, `jc-upgrade`, and `jc-doctor`.
 - If the target for `jc init` is non-empty, it refuses portably on macOS and Linux, except for `.git`, `.gitignore`, `README.md`, and `LICENSE`.
 
 ## Open questions / known stale

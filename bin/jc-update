@@ -11,19 +11,43 @@
 
 set -euo pipefail
 
+usage() {
+    cat <<'EOF'
+jc-update — Check and apply framework updates.
+
+Usage:
+  jc update [--check-only] [--yes]
+
+Options:
+  --check-only   Only report whether an update is available.
+  --yes          Apply without prompting.
+  -h, --help     Show this help.
+EOF
+}
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 JC_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
 # Parse args
 CHECK_ONLY=0
+ASSUME_YES=0
 while (( $# )); do
     case "$1" in
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
         --check-only)
             CHECK_ONLY=1
             shift
             ;;
+        --yes|-y)
+            ASSUME_YES=1
+            shift
+            ;;
         *)
             echo "Unknown option: $1" >&2
+            usage >&2
             exit 2
             ;;
     esac
@@ -65,16 +89,18 @@ fi
 
 echo ""
 echo "⚠️  Update available: $LOCAL → $REMOTE"
-read -p "Pull and restart? [y/N] " -r
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Cancelled."
-    exit 0
+if [[ "$ASSUME_YES" != 1 ]]; then
+    read -p "Pull latest main with fast-forward only? [y/N] " -r
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
 fi
 
 echo "Pulling latest code..."
 cd "$JC_ROOT"
 git fetch origin
-git reset --hard origin/main
+git merge --ff-only origin/main
 
 echo "Reloading watchdog..."
 if command -v jc-watchdog >/dev/null 2>&1; then

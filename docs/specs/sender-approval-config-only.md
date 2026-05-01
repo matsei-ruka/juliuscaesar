@@ -293,8 +293,10 @@ Per-instance, one-shot:
    `"telegram: N DB approvals not in config — run 'jc chats migrate-to-config'"`.
 3. Operator runs `jc chats migrate-to-config`.
 4. Re-run gateway. The auth check now reads from yaml + env.
-5. Optional: `jc chats migrate-to-config --prune-db` to wipe the DB
-   `auth_status` column to NULL (informational-only).
+5. No DB prune step in this phase. `auth_status` remains a `TEXT NOT NULL`
+   historical/status column until a later schema migration removes or replaces
+   it. Operators should not be told to null it out, and the CLI must not expose
+   a prune flag unless the schema is changed in the same release.
 
 For `rachel_zane` specifically: operator's primary DM `28547271` is
 already in `chat_ids`. Secondary `8130606104` is not — needs to be
@@ -350,8 +352,9 @@ Plus full `pytest tests/` to confirm no other consumer relies on
   `update_yaml_chat_lists`, `update_env_chat_ids`.
 - `lib/gateway/channels/telegram.py` — rewrite `_is_authorized` to
   consult cached cfg only; rewrite `_handle_callback_query` to write
-  config files; drop the early-poll blocklist check; remove
-  `_get_chats_conn` reads from auth path.
+  config files; keep the early-poll `blocked_chat_ids` short-circuit before
+  `_record_chat` so denied traffic does not create fresh audit rows; remove
+  `_get_chats_conn` reads from the authorization path.
 - `lib/gateway/channels/telegram_chats.py` — stop passing
   `auth_status` from `record_chat` (already does).
 - `bin/jc-chats` — add `migrate-to-config` subcommand; rewrite

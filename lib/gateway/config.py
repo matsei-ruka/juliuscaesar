@@ -21,6 +21,8 @@ SUPPORTED_TRIAGE_BACKENDS = (
     "codex_api",
 )
 REJECTED_CHANNELS = {"web": "web channel removed in 0.3.0; use `jc gateway enqueue` for local testing"}
+CODEX_SANDBOX_VALUES = {"read-only", "workspace-write", "yolo", "danger", "danger-full-access"}
+CODEX_YOLO_SANDBOX_VALUES = {"yolo", "danger", "danger-full-access"}
 
 
 @dataclass(frozen=True)
@@ -494,6 +496,24 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 for key in body:
                     if key not in {"bin", "sandbox", "yolo", "timeout_seconds", "extra_args"}:
                         errors.append(f"brains.{name}.{key}: unknown field")
+                if body.get("sandbox") is not None:
+                    sandbox = str(body["sandbox"])
+                    if str(name) == "codex" and sandbox not in CODEX_SANDBOX_VALUES:
+                        errors.append(
+                            "brains.codex.sandbox: must be one of "
+                            "read-only, workspace-write, yolo, danger, danger-full-access"
+                        )
+                if body.get("yolo") is not None and not isinstance(body["yolo"], bool):
+                    errors.append(f"brains.{name}.yolo: must be boolean")
+                if (
+                    str(name) == "codex"
+                    and body.get("yolo") is True
+                    and body.get("sandbox") is not None
+                    and str(body["sandbox"]) not in CODEX_YOLO_SANDBOX_VALUES
+                ):
+                    errors.append(
+                        "brains.codex: yolo=true conflicts with non-yolo sandbox"
+                    )
                 if body.get("timeout_seconds") is not None:
                     _validate_positive_int(errors, f"brains.{name}.timeout_seconds", body["timeout_seconds"])
                 if body.get("extra_args") is not None and not isinstance(body["extra_args"], (list, tuple)):

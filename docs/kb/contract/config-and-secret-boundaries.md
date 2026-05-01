@@ -38,7 +38,7 @@ Common keys:
 - `SLACK_APP_TOKEN` for Slack Socket Mode.
 - `SLACK_BOT_TOKEN` for Slack delivery.
 
-`jc init` creates `.env` when missing under a restrictive umask and applies mode 600. `jc setup` rewrites `.env` from guided answers through a mode-600 temp file, preserving existing values as prompt defaults. Secret prompts do not echo typed values.
+`jc init` creates `.env` when missing under a restrictive umask and applies mode 600. `jc setup` rewrites `.env` from guided answers through a mode-600 temp file, preserving existing values as prompt defaults. Secret prompts do not echo typed values when attached to a TTY.
 
 ## Config files
 

@@ -12,6 +12,25 @@
 
 set -euo pipefail
 
+usage() {
+    cat <<'EOF'
+jc-init — scaffold a new JuliusCaesar instance from templates/init-instance/.
+
+Usage:
+  jc init [<path>]
+
+If <path> is omitted, uses the current directory when it is empty or contains
+only allowed files like .git, .gitignore, README.md, or LICENSE.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+esac
+
 FRAMEWORK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
 TEMPLATE_DIR="$FRAMEWORK_ROOT/templates/init-instance"
 

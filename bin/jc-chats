@@ -23,6 +23,7 @@ if _LIB.exists() and str(_LIB) not in sys.path:
 
 from gateway import chats  # type: ignore  # noqa: E402
 from gateway.channels import email_dispatcher as _email_dispatcher  # type: ignore  # noqa: E402
+from gateway.channels import email_policy as _email_policy  # type: ignore  # noqa: E402
 from gateway.config import load_config  # type: ignore  # noqa: E402
 from gateway.config_writer import (  # type: ignore  # noqa: E402
     env_chat_ids,
@@ -170,20 +171,8 @@ def cmd_deny(args: argparse.Namespace) -> int:
 
 def _email_senders(instance: Path) -> tuple[set[str], set[str], set[str]]:
     """Read `(trusted, external, blocked)` sender sets from `channels.email.senders`."""
-    import yaml as _yaml
-    cfg_path = instance / "ops" / "gateway.yaml"
-    if not cfg_path.exists():
-        return set(), set(), set()
-    try:
-        data = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    except _yaml.YAMLError:
-        return set(), set(), set()
-    senders = ((data.get("channels") or {}).get("email") or {}).get("senders") or {}
-    trusted = {str(s).lower() for s in (senders.get("trusted") or [])}
-    trusted |= {str(s).lower() for s in (senders.get("allowed") or [])}
-    external = {str(s).lower() for s in (senders.get("external") or [])}
-    blocked = {str(s).lower() for s in (senders.get("blocklist") or [])}
-    return trusted, external, blocked
+    policy = _email_policy.read_policy(instance)
+    return set(policy.trusted), set(policy.external), set(policy.blocklist)
 
 
 def _update_email_sender_list(
@@ -197,77 +186,20 @@ def _update_email_sender_list(
     Removes the sender from incompatible lists if present (so a previously
     denied sender can be re-approved without manual yaml editing).
     """
-    import yaml as _yaml
-    from gateway.config_writer import atomic_write_text
-
-    cfg_path = instance / "ops" / "gateway.yaml"
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    text = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
-    data = _yaml.safe_load(text) if text else {}
-    if not isinstance(data, dict):
-        data = {}
-
-    channels = data.setdefault("channels", {})
-    if not isinstance(channels, dict):
-        channels = {}
-        data["channels"] = channels
-    email = channels.setdefault("email", {})
-    if not isinstance(email, dict):
-        email = {}
-        channels["email"] = email
-    senders = email.setdefault("senders", {})
-    if not isinstance(senders, dict):
-        senders = {}
-        email["senders"] = senders
-    trusted = list(senders.get("trusted") or senders.get("allowed") or [])
-    external = list(senders.get("external") or [])
-    blocked = list(senders.get("blocklist") or [])
-
     changed = False
     for s in allow_add or []:
-        s_norm = s.lower().strip()
-        if s_norm and s_norm not in (a.lower() for a in trusted):
-            trusted.append(s_norm)
-            changed = True
-        # Remove from blocklist if present.
-        new_blocked = [b for b in blocked if b.lower() != s_norm]
-        if new_blocked != blocked:
-            blocked = new_blocked
-            changed = True
-        new_external = [e for e in external if e.lower() != s_norm]
-        if new_external != external:
-            external = new_external
-            changed = True
+        try:
+            if _email_policy.set_sender_tier(instance, s, "trusted"):
+                changed = True
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     for s in block_add or []:
-        s_norm = s.lower().strip()
-        if s_norm and s_norm not in (b.lower() for b in blocked):
-            blocked.append(s_norm)
-            changed = True
-        new_trusted = [a for a in trusted if a.lower() != s_norm]
-        if new_trusted != trusted:
-            trusted = new_trusted
-            changed = True
-        new_external = [e for e in external if e.lower() != s_norm]
-        if new_external != external:
-            external = new_external
-            changed = True
-
-    if not changed:
-        return False
-
-    senders.pop("allowed", None)
-    senders["trusted"] = sorted(trusted)
-    senders["external"] = sorted(external)
-    if blocked:
-        senders["blocklist"] = sorted(blocked)
-    elif "blocklist" in senders:
-        del senders["blocklist"]
-
-    new_text = _yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    if new_text == text:
-        return False
-    atomic_write_text(cfg_path, new_text)
-    return True
+        try:
+            if _email_policy.set_sender_tier(instance, s, "blocklist"):
+                changed = True
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+    return changed
 
 
 def _notify_telegram_decision(instance: Path, body: str) -> None:

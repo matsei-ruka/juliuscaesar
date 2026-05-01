@@ -138,6 +138,8 @@ Draft schema:
   "draft_timestamp": "2026-05-01T10:30:00Z",
   "edit_count": 0,
   "state": "pending",
+  "failure_error": null,
+  "failed_timestamp": null,
   "meta": {
     "delivery_channel": "email",
     "email_uid": "123",
@@ -154,6 +156,10 @@ Prefer a dedicated email command group:
 jc email pending list [--sender <addr>]
 jc email pending approve <sender>
 jc email pending deny <sender>
+jc email senders list [--json]
+jc email senders trust <sender>
+jc email senders external <sender>
+jc email senders block <sender>
 jc email drafts list [--sender <addr>]
 jc email drafts show <draft_id>
 jc email drafts approve <draft_id>
@@ -171,7 +177,8 @@ jc-chats approve --email <addr>
 jc-chats deny --email <addr>
 ```
 
-The alias should print the equivalent `jc email` command once that CLI exists.
+The alias should remain for compatibility, but new operator guidance should use
+the first-class `jc email` commands.
 
 ## Configuration
 
@@ -324,10 +331,13 @@ Required tests:
 - external sender response creates a draft and does not SMTP-send;
 - trusted sender response SMTP-sends immediately;
 - draft approve sends once and marks final state;
+- draft approve failure marks `failed` and records a lifecycle event;
 - draft reject never sends;
 - draft edit requires a later approve;
 - Telegram notification failure does not lose pending/draft state;
 - `jc email doctor` reports missing credentials and stale pending/draft items.
+- Company `gateway.snapshot` includes email pending/draft/lifecycle metrics
+  when the channel is enabled or local email state exists.
 
 ## Rollout
 
@@ -339,7 +349,8 @@ Pilot readiness:
 4. Send a trusted-sender email and verify auto-reply.
 5. Send an unknown-sender email and verify pending approval.
 6. Promote one external sender and verify draft approval.
-7. Confirm logs and counters match the observed flow.
+7. Confirm logs, `jc email doctor`, and Company snapshot counters match the
+   observed flow.
 
 Roll back by setting:
 
