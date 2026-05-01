@@ -1,0 +1,262 @@
+# Curated slot id overrides for the persona-system sync.
+#
+# When `scripts/sync_persona_template.py` encounters a non-doctrine section in
+# the source instance, it looks up the section's heading here to find the
+# canonical slot id. If no override exists, it auto-derives one from the
+# heading text — but auto-derive is the fallback, not the primary path.
+#
+# Every section in the lead-user reference (`/opt/mario_leone_coo` v2.3) has a
+# curated entry here so slot ids are stable, English-language, and decoupled
+# from the source's heading wording.
+#
+# Format:
+#   sections:
+#     <relative_file_path>:
+#       <verbatim heading line, e.g. "## §2 — TRE MODE OPERATIVI">:
+#         slot_id: <english-semantic-dotted-id>
+#         ask: <one-line ASK hint shown in the synced template; full prompts
+#               live in templates/persona-interview/questions.yaml — phase 3>
+
+sections:
+
+  # ---------------------------------------------------------------------------
+  # memory/L1/RULES.md
+  # ---------------------------------------------------------------------------
+
+  "memory/L1/RULES.md":
+
+    "## §2 — TRE MODE OPERATIVI":
+      slot_id: rules.operating-modes
+      ask: 'Three operating modes — names, who each applies to, default posture per mode.'
+
+    "## §3 — POSTURE COLLABORATIVA (con il team)":
+      slot_id: rules.team-posture
+      ask: 'Stance toward the internal team — collegial vs hierarchical, what the agent does and does not do.'
+
+    "## §4 — STRATEGIC HUMILITY":
+      slot_id: rules.strategic-humility
+      ask: 'Areas where the agent deliberately understates capability (and why); ritual phrases used to defer.'
+
+    "## §5 — REGISTRO LINGUISTICO":
+      slot_id: rules.linguistic-register
+      ask: 'Three communication registers (tech / business / human) — vocabulary examples, detection signals, anti-patterns.'
+
+    "## §6 — LOOP CLOSURE":
+      slot_id: rules.loop-closure
+      ask: 'Conversation closure discipline — round-trip target, ramification anticipation, ritual closing phrase.'
+
+    "## §7 — DELEGA ATTIVA":
+      slot_id: rules.active-delegation
+      ask: 'Decision tree for delegation — when to take it, when to hand off, who to hand off to.'
+
+    "## §8 — INSEGNAMENTO INVISIBILE":
+      slot_id: rules.invisible-teaching
+      ask: 'Teaching techniques that don''t feel didactic — side-note, noticing, half-line whys.'
+
+    "## §10 — RIFIUTO FLUIDO":
+      slot_id: rules.fluid-refusal
+      ask: 'How to refuse without saying "no" — pivot to need, naturalize the limit, ban-list of phrases.'
+
+    "## §12 — CLASSIFICAZIONE INFORMAZIONI":
+      slot_id: rules.info-classification
+      ask: 'Information classes (PUBLIC / CONTROLLED / SENSITIVE / CRITICAL) — examples and disclosure rules per class.'
+
+    "## §13 — GESTIONE PROBLEMI INTERNI / PANNI SPORCHI":
+      slot_id: rules.dirty-laundry
+      ask: 'Dirty-laundry handling — outsider posture, insider posture, what never goes to written record.'
+
+    "## §15 — INSIDER ROLE BOUNDARIES":
+      slot_id: rules.role-boundaries
+      ask: 'Per-role authority matrix — what each insider role can ask of the agent, what they cannot.'
+
+    "## §17 — AUDIT, RATE LIMIT, KILL SWITCH":
+      slot_id: rules.audit-kill-switch
+      ask: 'Audit logging cadence, rate limits on sensitive actions, kill-switch trigger.'
+
+    "## §20 — POSTURA RELAZIONALE PER TIPO DI INTERLOCUTORE":
+      slot_id: rules.relational-posture
+      ask: 'Relational posture per interlocutor type (clients / colleagues / principal) — frame, style, examples.'
+
+    "## §22 — POSTURA IN SITUAZIONI DIFFICILI":
+      slot_id: rules.difficult-situations
+      ask: 'Posture under pressure, under attack, after own mistake, after other''s mistake.'
+
+    "## §23 — VOIP INCOMING CALLS":
+      slot_id: rules.voip
+      ask: 'VOIP / phone handling policy — does the agent answer? what''s the redirect path?'
+
+  # ---------------------------------------------------------------------------
+  # memory/L1/IDENTITY.md
+  # ---------------------------------------------------------------------------
+
+  "memory/L1/IDENTITY.md":
+
+    "## Ruolo":
+      slot_id: identity.role
+      ask: 'One-sentence role statement — what the agent IS, professionally.'
+
+    "## Funzione operativa":
+      slot_id: identity.operative-function
+      ask: 'One-sentence operative function — what the agent DOES, day to day.'
+
+    "## Posizionamento":
+      slot_id: identity.positioning
+      ask: 'Three-line positioning — what the agent is NOT (decision-maker, executor, etc.) and what it actually is.'
+
+    "## Cosa dico di me (quando qualcuno chiede)":
+      slot_id: identity.self-presentation
+      ask: 'Three self-presentation lengths — short (default), medium (with context), long (rare, only when legitimate).'
+
+    "## Cosa NON dico di me":
+      slot_id: identity.never-disclose
+      ask: 'Bullet list of things the agent NEVER discloses about itself (architecture, internal names, principal identity, etc.).'
+
+    "## Background contestuale (interno, mai output esterno)":
+      slot_id: identity.background-internal
+      ask: 'Internal-only character background — never reaches an interlocutor; used for internal coherence.'
+
+    "## Operational role":
+      slot_id: identity.operational-role
+      ask: 'Operational specifics — email, access levels, reporting line, peers, async collaborators.'
+
+    "## Character — Identità pubblica":
+      slot_id: identity.public-character
+      ask: 'Public character header — anagrafica (name/age/residence/relationship), education, career macro-history, base traits.'
+
+  # ---------------------------------------------------------------------------
+  # memory/L1/USER.md
+  # ---------------------------------------------------------------------------
+
+  "memory/L1/USER.md":
+
+    "## Identità verificata":
+      slot_id: user.verified-identity
+      ask: 'Principal''s verified identity — email, handle, role, language, timezone.'
+
+    "## Riservatezza ruolo (CRITICO)":
+      slot_id: user.role-confidentiality
+      ask: 'Role-confidentiality rules — what the agent never says about WHO the principal is; substitute lexicon ("internal review", "the team", etc.).'
+
+    "## Eccezioni (quando posso nominare Filippo)":
+      slot_id: user.confidentiality-exceptions
+      ask: 'Exceptions where the principal can be named — list specific cases.'
+
+    "## Modalità di interazione":
+      slot_id: user.interaction-modes
+      ask: 'Founder Mode definition + downgrade triggers (third party present, channel changes, anomalous patterns).'
+
+    "## Preferenze comunicazione note":
+      slot_id: user.communication-preferences
+      ask: 'Principal''s communication preferences — language defaults, response brevity, pushback tolerance.'
+
+    "## Channels":
+      slot_id: user.channels
+      ask: 'Authoritative channels — policy channel, institutional channel, personal channel, what each is for.'
+
+    "## Communication preferences":
+      slot_id: user.communication-preferences-detail
+      ask: 'Detailed communication preferences — format, cadence, quiet hours, language mirroring, enactment marker.'
+
+    "## Standing rules tied to this user":
+      slot_id: user.standing-rules
+      ask: 'Standing rules tied to this principal — anti-repeat, verification requirements, external-action policy, forwarding discipline.'
+
+  # ---------------------------------------------------------------------------
+  # memory/L2/character-bible/<slug>.md — every section is a slot (force_slot)
+  # ---------------------------------------------------------------------------
+
+  "memory/L2/character-bible/<slug>.md":
+
+    "## Famiglia di origine":
+      slot_id: characterbible.family
+      ask: 'Family of origin — parents (occupation, temperament), siblings, current relationships, frequency of contact.'
+
+    "## Vita Dubai":
+      slot_id: characterbible.residence-primary
+      ask: 'Primary residence — city, type of housing, decor sensibility, daily routine.'
+
+    "## Vita Roma":
+      slot_id: characterbible.residence-secondary
+      ask: 'Secondary residence (if any) — where, why, how often used.'
+
+    "## Sport e movimento":
+      slot_id: characterbible.sport
+      ask: 'Sport practice — disciplines, frequency, level (recreational / amateur-competitive / serious), notable achievements.'
+
+    "## Auto e velocità":
+      slot_id: characterbible.vehicles
+      ask: 'Vehicle ownership as hobby (not transport) — make/model/year, attitude (status/passion/utility), where used, public or private.'
+
+    "## Cibo":
+      slot_id: characterbible.food
+      ask: 'Food preferences — home cooking specialties, restaurant taste, wine/coffee preferences, what they avoid.'
+
+    "## Cultura":
+      slot_id: characterbible.culture
+      ask: 'Cultural diet — books, cinema, music, TV, art. Specific titles/artists; what they actively reject.'
+
+    "## Viaggi":
+      slot_id: characterbible.travel
+      ask: 'Travel pattern — destinations, frequency, return-to-favorite vs novelty, what kind of place they hate.'
+
+    "## Politica e visione":
+      slot_id: characterbible.politics
+      ask: 'Political and worldview stance — is it disclosed publicly? where do they sit? what ideologies do they distrust?'
+
+    "## Tic, manie, dettagli":
+      slot_id: characterbible.tics
+      ask: 'Quirks and personal habits — morning routines, accessories, taste in clothing, signature objects.'
+
+    "## Cose che lo fanno arrabbiare (raramente)":
+      slot_id: characterbible.angers
+      ask: 'What rarely-but-genuinely angers them — typically: dishonesty, time-wasting, stupid bureaucracy.'
+
+    "## Cose che lo emozionano (anche se non lo mostra)":
+      slot_id: characterbible.moves-emotionally
+      ask: 'What moves them (even if not shown) — usually: serious intellectual exchange, craftsmanship, family moments.'
+
+    "## Network INSEAD":
+      slot_id: characterbible.network
+      ask: 'Notable network — alumni circles, professional cohorts, regular contacts.'
+
+    "## Carta del cielo (NON cita pubblicamente, solo per coerenza interna)":
+      slot_id: characterbible.internal-coherence-frame
+      ask: 'Optional internal-coherence framing (astrology, MBTI, archetypes) — used only for character consistency, never cited externally.'
+
+  # ---------------------------------------------------------------------------
+  # memory/L2/cv/<slug>.md — externally facing CV
+  # ---------------------------------------------------------------------------
+
+  "memory/L2/cv/<slug>.md":
+
+    "## Contatti":
+      slot_id: cv.contacts
+      ask: 'External-facing contact info — email, phone, locations.'
+
+    "## Profilo":
+      slot_id: cv.profile
+      ask: 'CV profile paragraph — years of experience, areas, current role, signature traits.'
+
+    "## Formazione":
+      slot_id: cv.education
+      ask: 'Education chronology — institutions, dates, degrees, distinctions.'
+
+    "## Carriera":
+      slot_id: cv.career
+      ask: 'Career chronology — roles, dates, scope, notable outcomes (anonymized where needed).'
+
+    "## Competenze Principali":
+      slot_id: cv.skills
+      ask: 'Core competencies — five to seven categories, each with a one-line elaboration.'
+
+    "## Lingue":
+      slot_id: cv.languages
+      ask: 'Languages with proficiency level per language.'
+
+    "## Interessi & Equilibrio":
+      slot_id: cv.interests
+      ask: 'Interests and personal balance — sport, reading, cinema, travel, family — formatted for external readers.'
+
+    "## Referenze":
+      slot_id: cv.references
+      ask: 'References policy — typically "Available on request".'

@@ -1,6 +1,6 @@
 ---
 slug: HOT
-title: Hot Cache (last 7 days)
+title: Hot Cache (rolling 7 days)
 layer: L1
 type: hot
 state: draft
@@ -13,12 +13,18 @@ links: []
 
 # Hot cache — rolling 7-day context
 
-What's alive right now. Auto-pruned on consolidate (TODO). Manual edits OK.
+What's alive right now. Three fixed sections per `RULES.md` → "HOT.md
+structure". Hard cap: 400 lines total (target <300). Each item ≤100 words.
+Newest first within each section.
 
-## Today
+## What shipped
 
 -
 
-## Open questions
+## Immediate open threads
+
+-
+
+## Known nuisances
 
 -

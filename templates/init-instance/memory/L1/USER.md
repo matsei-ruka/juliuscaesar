@@ -1,37 +1,65 @@
 ---
 slug: USER
-title: User profile
+title: User profile — principal
 layer: L1
 type: user
 state: draft
 created: TODO
 updated: TODO
 last_verified: ""
-tags: [user, profile]
+tags: [user]
 links: []
 ---
 
-# Who the assistant is helping
+# USER — principal
 
-This file should describe the user, preferences, and durable operating context.
-`jc setup` fills it during the guided first run.
+Verified principal identity, role-confidentiality lexicon, Founder-Mode definition, downgrade triggers, channel discipline, and standing rules tied to the principal. All operator-authored via `jc persona interview`.
 
-## Identity
+## Identità verificata
+<!-- REVIEWABLE -->
 
-- Name:
-- Call-name:
-- Timezone:
-- Role:
+<!-- ASK: Principal's verified identity — email, handle, role, language, timezone. -->
+{{slot:user.verified-identity}}
+
+## Riservatezza ruolo (CRITICO)
+<!-- REVIEWABLE -->
+
+<!-- ASK: Role-confidentiality rules — what the agent never says about WHO the principal is; substitute lexicon ("internal review", "the team", etc.). -->
+{{slot:user.role-confidentiality}}
+
+## Eccezioni (quando posso nominare Filippo)
+<!-- REVIEWABLE -->
+
+<!-- ASK: Exceptions where the principal can be named — list specific cases. -->
+{{slot:user.confidentiality-exceptions}}
+
+## Modalità di interazione
+<!-- REVIEWABLE -->
+
+<!-- ASK: Founder Mode definition + downgrade triggers (third party present, channel changes, anomalous patterns). -->
+{{slot:user.interaction-modes}}
+
+## Preferenze comunicazione note
+<!-- REVIEWABLE -->
+
+<!-- ASK: Principal's communication preferences — language defaults, response brevity, pushback tolerance. -->
+{{slot:user.communication-preferences}}
+
+## Channels
+<!-- REVIEWABLE -->
+
+<!-- ASK: Authoritative channels — policy channel, institutional channel, personal channel, what each is for. -->
+{{slot:user.channels}}
 
 ## Communication preferences
+<!-- REVIEWABLE -->
 
-- Format:
-- Cadence:
-- Quiet hours:
-- Language mirroring:
+<!-- ASK: Detailed communication preferences — format, cadence, quiet hours, language mirroring, enactment marker. -->
+{{slot:user.communication-preferences-detail}}
 
-## Standing rules
+## Standing rules tied to this user
+<!-- REVIEWABLE -->
 
-- Anti-repeat:
-- Verification requirements:
-- External-action policy:
+<!-- ASK: Standing rules tied to this principal — anti-repeat, verification requirements, external-action policy, forwarding discipline. -->
+{{slot:user.standing-rules}}
+
