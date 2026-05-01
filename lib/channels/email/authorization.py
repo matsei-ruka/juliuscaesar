@@ -2,13 +2,52 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
-__all__ = ["SenderAuthorizer"]
+__all__ = ["SenderAuthorizer", "update_sender_list"]
+
+
+def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> None:
+    """Update sender allowlist or blocklist in gateway.yaml (atomic, idempotent).
+
+    Used by jc-chats approve/deny CLI to manage senders atomically.
+    """
+    if not config_path.exists():
+        return
+
+    config = yaml.safe_load(config_path.read_text()) or {}
+    channels = config.get("channels", {})
+    email_cfg = channels.get("email", {})
+    senders_cfg = email_cfg.get("senders", {})
+
+    senders_list = senders_cfg.get(list_name, [])
+    if not isinstance(senders_list, list):
+        senders_list = []
+
+    sender = sender_email.lower().strip()
+    if sender not in senders_list:
+        senders_list.append(sender)
+        senders_cfg[list_name] = sorted(senders_list)
+        email_cfg["senders"] = senders_cfg
+        channels["email"] = email_cfg
+        config["channels"] = channels
+
+        content = yaml.dump(config, default_flow_style=False)
+        fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, prefix=".gateway.", suffix=".yaml")
+        try:
+            os.write(fd, content.encode("utf-8"))
+            os.close(fd)
+            os.replace(tmp_path, config_path)
+        except Exception:
+            os.close(fd)
+            os.unlink(tmp_path)
+            raise
 
 
 class SenderAuthorizer:
@@ -82,36 +121,3 @@ class SenderAuthorizer:
         if sender in self.allowed:
             return "allowed"
         return "unknown"
-
-    def add_allowed(self, sender_email: str) -> None:
-        """Add sender to allowlist in gateway.yaml."""
-        self._update_list("allowed", sender_email)
-
-    def add_blocked(self, sender_email: str) -> None:
-        """Add sender to blocklist in gateway.yaml."""
-        self._update_list("blocklist", sender_email)
-
-    def _update_list(self, list_name: str, sender_email: str) -> None:
-        """Add sender to list in gateway.yaml (idempotent)."""
-        if not self.config_path.exists():
-            return
-
-        config = yaml.safe_load(self.config_path.read_text()) or {}
-        channels = config.get("channels", {})
-        email_cfg = channels.get("email", {})
-        senders_cfg = email_cfg.get("senders", {})
-
-        senders_list = senders_cfg.get(list_name, [])
-        if not isinstance(senders_list, list):
-            senders_list = []
-
-        sender = sender_email.lower().strip()
-        if sender not in senders_list:
-            senders_list.append(sender)
-            senders_cfg[list_name] = sorted(senders_list)
-            email_cfg["senders"] = senders_cfg
-            channels["email"] = email_cfg
-            config["channels"] = channels
-
-            self.config_path.write_text(yaml.dump(config, default_flow_style=False))
-            self._reload()

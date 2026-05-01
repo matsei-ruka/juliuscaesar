@@ -79,8 +79,13 @@ def wrap_email_prompt(
     # Sanitize body
     sanitized_body, was_truncated = sanitize_body(body, is_html, max_chars)
 
+    # Strip newlines from sender/subject to prevent prompt injection
+    # (RFC 5322 allows encoded newlines; we normalize to single-line display)
+    safe_sender = sender.replace("\r", "").replace("\n", " ").strip()
+    safe_subject = subject.replace("\r", "").replace("\n", " ").strip()
+
     # Build prompt
-    header = f'[EMAIL from {sender}, subject: "{subject}"]'
+    header = f'[EMAIL from {safe_sender}, subject: "{safe_subject}"]'
     prompt = f"{header}\n\n{sanitized_body}"
 
     return prompt
