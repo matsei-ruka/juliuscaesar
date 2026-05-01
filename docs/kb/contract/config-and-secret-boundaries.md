@@ -4,14 +4,14 @@ section: contract
 status: active
 code_anchors:
   - path: README.md
-    symbol: "Secrets live in `<instance>/.env`"
+    symbol: "**Secrets**: `<instance>/.env`"
   - path: bin/jc-init
     symbol: "chmod 600 \"$TARGET/.env\""
   - path: bin/jc-doctor
     symbol: "TELEGRAM_BOT_TOKEN valid"
   - path: lib/heartbeat/runner.py
     symbol: "load_dotenv(str(env_file))"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/instance-layout-and-resolution.md
@@ -81,3 +81,9 @@ Common keys:
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap lists a config schema validator as future work.
+- 2026-05-01: Newer config surfaces that `jc doctor` does not yet validate end-to-end:
+  - `ops/gateway.yaml` `sender_approval:` block (`mode: off | config_only | gateway`, `allow_list:`, `deny_list:`).
+  - `ops/gateway.yaml` `triage:` block (backend `claude-channel`/`codex_api`/`heuristic`, model, confidence threshold).
+  - `ops/gateway.yaml` `codex_auth:` block consumed by the `codex_api` brain wrapper.
+  - `ops/company.yaml` for the fleet observability client (`lib/company/`).
+  - `OPENAI_API_KEY` style env vars: not used; Codex direct-API path uses the local Codex CLI's OAuth token via `bin/jc-codex-auth`.

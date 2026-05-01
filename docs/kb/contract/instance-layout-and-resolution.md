@@ -4,14 +4,14 @@ section: contract
 status: active
 code_anchors:
   - path: README.md
-    symbol: "Instance dir resolution"
+    symbol: "Instance resolution"
   - path: bin/jc-init
     symbol: "Refusing: $TARGET is already an instance"
   - path: bin/jc-memory
     symbol: "def resolve_instance_dir(arg: str | None) -> Path:"
   - path: templates/init-instance/CLAUDE.md
     symbol: "@memory/L1/HOT.md"
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - domain/personal-assistant-framework.md
@@ -68,3 +68,4 @@ Expected base layout:
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap lists richer instance templates as future work.
+- 2026-05-01: Several runtime-derived directories now appear under `<instance>/state/` once subsystems run: `state/gateway/` (queue, pid, log), `state/workers/`, `state/cron/`, `state/events/`, `state/transcripts/` (per-conversation chat transcripts via `jc-transcripts`), `state/sessions/` (gateway session map), `state/process_sessions.json`. None are scaffolded by `jc init`; they create themselves on first use and stay ignored by the instance `.gitignore`.

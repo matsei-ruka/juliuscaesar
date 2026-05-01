@@ -5,7 +5,7 @@
 > frontmatter tell you what code the entry depends on; re-grep before acting
 > on anything you read here.
 >
-> **Last rebuilt**: 2026-04-25
+> **Last rebuilt**: 2026-05-01
 
 ## How to use
 

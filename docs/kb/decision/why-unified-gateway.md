@@ -7,10 +7,10 @@ code_anchors:
     symbol: "class GatewayRuntime:"
   - path: lib/gateway/router.py
     symbol: "def route("
-  - path: docs/specs/unified-gateway-0.3.0.md
+  - path: docs/specs/unified-gateway-0.3.0-remaining.md
     symbol: "# Spec: Unified Gateway"
-last_verified: 2026-04-25
-verified_by: claude
+last_verified: 2026-05-01
+verified_by: l.mattei
 related:
   - subsystem/gateway-queue.md
   - decision/native-cli-over-api-simulation.md
@@ -78,3 +78,9 @@ Tradeoffs:
   contract) is still 0.3.1 work.
 - 2026-04-25: Voice as a transparent transformer (rather than paired channel)
   remains an open option for 0.4.0.
+- 2026-05-01: Spec moved from `unified-gateway-0.3.0.md` to
+  `unified-gateway-0.3.0-remaining.md` — most of the original spec shipped.
+  Subsystems beyond the original spec now live in-tree:
+  `lib/gateway/triage`, `lib/gateway/recovery`, `lib/gateway/transcripts`,
+  `lib/gateway/process_sessions`, `lib/gateway/sessions.py`, sender approval,
+  and Slack Socket Mode.

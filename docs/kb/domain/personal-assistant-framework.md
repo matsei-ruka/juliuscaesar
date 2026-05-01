@@ -4,10 +4,10 @@ section: domain
 status: active
 code_anchors:
   - path: README.md
-    symbol: "JuliusCaesar takes the architecture and runs it on the real `claude` CLI"
+    symbol: "## Why JuliusCaesar"
   - path: docs/ARCHITECTURE.md
-    symbol: "Two-repo model"
-last_verified: 2026-04-25
+    symbol: "## Two-repo model"
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - decision/native-cli-over-api-simulation.md
@@ -48,3 +48,4 @@ Typical bootstrapping:
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap says skill loading, docs site, config schema validation, and CI remain future or partial work.
+- 2026-05-01: 2026.04.28 CalVer baseline shipped; `jc update` performs in-place framework upgrades. `jc upgrade` reconfigures an existing instance's channels/brain/triage. New runtime subsystems (`lib/gateway/triage`, `lib/gateway/recovery`, `lib/gateway/transcripts`, `lib/gateway/process_sessions`, `lib/company/`, `bin/jc-user-model`) ship in 0.3.x but are not yet covered by their own KB entries.

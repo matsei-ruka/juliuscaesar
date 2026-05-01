@@ -11,7 +11,7 @@ code_anchors:
     symbol: "def transcribe("
   - path: lib/voice/enroll.py
     symbol: "def enroll("
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/config-and-secret-boundaries.md

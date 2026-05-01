@@ -11,7 +11,7 @@ code_anchors:
     symbol: "CREATE TABLE IF NOT EXISTS workers"
   - path: docs/specs/workers.md
     symbol: "Heartbeat is cron-driven scheduled tasks; workers are user-triggered on-demand tasks."
-last_verified: 2026-04-25
+last_verified: 2026-05-01
 verified_by: l.mattei
 related:
   - contract/adapter-and-delivery-contracts.md
@@ -58,6 +58,7 @@ Session capture is best-effort and brain-specific:
 - Workers run detached from the spawning shell.
 - Notifications enqueue gateway delivery events when `ops/gateway.yaml` exists; older instances fall back to the shared `send_telegram.sh` helper.
 - Adapter failures are recorded in the DB and last stderr line where possible.
+- Adapter subprocess env includes `JC_IN_WORKER=1` and `JC_WORKER_ID=<id>` (commit 1e8661c) so brains can refuse `jc workers spawn` calls from inside a worker — the recursion would otherwise pin a queue lease while the parent runs unbounded.
 
 ## Open questions / known stale
 
