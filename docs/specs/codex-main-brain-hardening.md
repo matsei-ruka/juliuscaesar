@@ -171,7 +171,7 @@ Resolution order:
 
 1. `brains.codex.yolo: true` -> `CODEX_SANDBOX=yolo`
 2. `brains.codex.sandbox: <value>` -> `CODEX_SANDBOX=<value>`
-3. unset -> default adapter sandbox
+3. unset -> default sandbox for the invocation class
 
 If both `yolo: true` and `sandbox` are set to a non-yolo value, config
 validation should fail. Safety settings must not be ambiguous.
@@ -182,8 +182,9 @@ Recommended defaults:
 - Worker / coding tasks: `workspace-write`
 - Explicit maintenance task with operator consent: `yolo`
 
-The existing adapter default of `workspace-write` is too permissive for normal
-chat if Codex is the main brain.
+For normal gateway chat, an unset Codex sandbox must resolve to `read-only`.
+The existing adapter default of `workspace-write` is too permissive if Codex is
+the main brain. Coding workers may still opt into `workspace-write` explicitly.
 
 ### Codex model aliases
 
@@ -361,9 +362,11 @@ Work:
 3. Make the default gateway Codex sandbox configurable and document recommended
    `read-only`.
 4. Pass image paths as `--image` flags when present in event metadata.
-5. Pass `--ask-for-approval never` for non-interactive gateway calls, unless
-   Codex CLI already defaults to non-interactive never-approval mode. Verify
-   against the installed CLI before implementing.
+5. Do not pass `--ask-for-approval never`; the installed `codex exec --help`
+   for this workspace does not expose that flag. Use only supported
+   non-interactive `codex exec` arguments (`--sandbox`, `--image`, `--model`,
+   `-c sandbox_mode=...` for resume) and gate any future approval flag behind a
+   CLI help/version probe.
 
 Acceptance:
 
@@ -375,6 +378,7 @@ Required test cases:
 
 - `brains.codex.yolo: true` produces the dangerous bypass flag.
 - `brains.codex.sandbox: read-only` produces read-only sandbox args.
+- Unset gateway chat Codex sandbox resolves to read-only, not workspace-write.
 - Invalid sandbox value fails before adapter execution.
 - `image_path` metadata adds `--image <path>`.
 - Adapter argv matches current `codex exec --help`.

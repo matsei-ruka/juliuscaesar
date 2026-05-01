@@ -7,13 +7,14 @@
 # is a fresh conversation — DOES NOT resume any prior session.
 #
 # Sandbox mode is controlled by $CODEX_SANDBOX:
-#   workspace-write  (default) — codex may edit files inside the working dir
-#   read-only                  — codex may read but not write
+#   read-only        (default) — codex may read but not write
+#   workspace-write            — codex may edit files inside the working dir
 #   yolo                       — bypass all approvals + sandbox (DANGEROUS)
 set -euo pipefail
 
 MODEL="${1:-}"
-SANDBOX="${CODEX_SANDBOX:-workspace-write}"
+shift || true
+SANDBOX="${CODEX_SANDBOX:-read-only}"
 
 if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not installed. See https://developers.openai.com/codex/cli" >&2
@@ -58,6 +59,10 @@ fi
 
 if [[ -n "$MODEL" ]]; then
     ARGS+=("--model" "$MODEL")
+fi
+
+if [[ $# -gt 0 ]]; then
+    ARGS+=("$@")
 fi
 
 # Prompt comes from stdin via the `-` positional.
