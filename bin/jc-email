@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""jc-email - operator CLI for the JuliusCaesar email channel."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import smtplib
+import ssl
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from gateway.config import env_values  # type: ignore  # noqa: E402
+from gateway.channels import email_dispatcher, email_state  # type: ignore  # noqa: E402
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("memory",))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _email_cfg(instance: Path) -> dict[str, Any]:
+    path = instance / "ops" / "gateway.yaml"
+    if not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    channels = data.get("channels") if isinstance(data, dict) else {}
+    cfg = (channels or {}).get("email") if isinstance(channels, dict) else {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _env(instance: Path) -> dict[str, str]:
+    vals = env_values(instance)
+    return {key: vals.get(key, "") for key in ("IMAP_HOST", "IMAP_PORT", "IMAP_USER", "IMAP_PASSWORD", "SMTP_PORT")}
+
+
+def _adapter(instance: Path):
+    from channels.email import EmailChannelAdapter  # type: ignore
+
+    return EmailChannelAdapter(instance_dir=instance, config=_email_cfg(instance), env=_env(instance))
+
+
+def _age(value: int | None) -> str:
+    if value is None:
+        return "-"
+    if value < 60:
+        return f"{value}s"
+    if value < 3600:
+        return f"{value // 60}m"
+    if value < 86400:
+        return f"{value // 3600}h"
+    return f"{value // 86400}d"
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    cfg = _email_cfg(instance)
+    env = _env(instance)
+    m = email_state.metrics(instance)
+    enabled = cfg.get("enabled", False)
+    print(f"instance: {instance}")
+    print(f"enabled:  {enabled}")
+    print(f"config:   {instance / 'ops' / 'gateway.yaml'}")
+    for key in ("IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD"):
+        print(f"{key}: {'ok' if env.get(key) else 'missing'}")
+    print(f"last_uid: {m['last_uid']}")
+    print(f"pending:  {m['pending']} oldest={_age(m['oldest_pending_age_seconds'])}")
+    states = ", ".join(f"{k}={v}" for k, v in sorted(m["draft_states"].items())) or "none"
+    print(f"drafts:   {m['drafts']} ({states}) oldest_pending={_age(m['oldest_draft_age_seconds'])}")
+    return 0 if enabled and env.get("IMAP_HOST") and env.get("IMAP_USER") and env.get("IMAP_PASSWORD") else 1
+
+
+def cmd_test_imap(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    adapter = _adapter(instance)
+    try:
+        adapter.imap_client.connect()
+        adapter.imap_client.select_readonly(adapter.imap_mailbox)
+    finally:
+        adapter.imap_client.disconnect()
+    print(f"imap ok: {adapter.imap_host}:{adapter.imap_port} mailbox={adapter.imap_mailbox}")
+    return 0
+
+
+def cmd_test_smtp(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    adapter = _adapter(instance)
+    client = adapter.smtp_client
+    smtp = smtplib.SMTP(client.host, client.smtp_port, timeout=client.timeout)
+    try:
+        smtp.ehlo()
+        smtp.starttls(context=ssl.create_default_context())
+        smtp.ehlo()
+        smtp.login(client.user, client.password)
+    finally:
+        try:
+            smtp.quit()
+        except Exception:
+            pass
+    print(f"smtp ok: {client.host}:{client.smtp_port} user={client.user}")
+    return 0
+
+
+def _print_pending(record: email_state.StateRecord) -> None:
+    data = record.data
+    uid = (data.get("metadata") or {}).get("uid") or data.get("channel_id") or record.path.stem
+    print(f"{uid}\t{data.get('sender', '-')}\t{data.get('subject', '-')}")
+
+
+def cmd_pending_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    records = email_state.pending_records(instance)
+    if args.sender:
+        sender = args.sender.lower().strip()
+        records = [
+            record for record in records
+            if str(record.data.get("sender", "")).lower().strip() == sender
+        ]
+    if args.json:
+        print(json.dumps([r.data for r in records], indent=2, default=str))
+        return 0
+    for record in records:
+        _print_pending(record)
+    if not records:
+        print("no pending inbound messages")
+    return 0
+
+
+def cmd_pending_show(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    for record in email_state.pending_records(instance):
+        uid = str((record.data.get("metadata") or {}).get("uid") or record.data.get("channel_id") or record.path.stem)
+        if uid == args.uid:
+            print(json.dumps(record.data, indent=2, default=str))
+            return 0
+    raise SystemExit(f"pending uid not found: {args.uid}")
+
+
+def cmd_pending_approve(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    count = email_dispatcher.drain_pending(instance, args.sender, action="approve")
+    print(f"approved pending sender={args.sender} drained={count}")
+    return 0
+
+
+def cmd_pending_deny(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    count = email_dispatcher.drain_pending(instance, args.sender, action="deny")
+    print(f"denied pending sender={args.sender} dropped={count}")
+    return 0
+
+
+def _draft_summary(record: email_state.StateRecord) -> str:
+    data = record.data
+    return f"{data.get('draft_id')}\t{data.get('state', '-')}\t{data.get('sender', '-')}\t{data.get('subject', '-')}"
+
+
+def cmd_drafts_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    states = None if args.all else {"pending"}
+    records = email_state.draft_records(instance, states=states)
+    if args.sender:
+        sender = args.sender.lower().strip()
+        records = [
+            record for record in records
+            if str(record.data.get("sender", "")).lower().strip() == sender
+        ]
+    if args.json:
+        print(json.dumps([r.data for r in records], indent=2, default=str))
+        return 0
+    for record in records:
+        print(_draft_summary(record))
+    if not records:
+        print("no drafts")
+    return 0
+
+
+def _find_draft_or_die(instance: Path, draft_id: str) -> email_state.StateRecord:
+    record = email_state.find_draft(instance, draft_id)
+    if record is None:
+        raise SystemExit(f"draft not found: {draft_id}")
+    return record
+
+
+def cmd_drafts_show(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    record = _find_draft_or_die(instance, args.draft_id)
+    print(json.dumps(record.data, indent=2, default=str))
+    return 0
+
+
+def cmd_drafts_edit(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    record = _find_draft_or_die(instance, args.draft_id)
+    text = sys.stdin.read() if args.text in (None, "-") else args.text
+    edit_count = int(record.data.get("edit_count") or 0) + 1
+    email_state.update_draft(
+        record,
+        draft_text=text,
+        edit_count=edit_count,
+        edited_timestamp=email_state.now_ts(),
+    )
+    print(f"draft edited: {args.draft_id} edit_count={edit_count}")
+    return 0
+
+
+def cmd_drafts_reject(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    record = _find_draft_or_die(instance, args.draft_id)
+    email_state.update_draft(record, state="rejected", rejected_timestamp=email_state.now_ts())
+    print(f"draft rejected: {args.draft_id}")
+    return 0
+
+
+def cmd_drafts_approve(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    record = _find_draft_or_die(instance, args.draft_id)
+    data = record.data
+    if data.get("state") != "pending":
+        raise SystemExit(f"draft {args.draft_id} is not pending (state={data.get('state')})")
+    adapter = _adapter(instance)
+    subject = str(data.get("subject") or "(no subject)")
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+    references = data.get("references") or []
+    if isinstance(references, str):
+        references = [references]
+    message_id = adapter.send_reply(
+        conversation_id=str((data.get("meta") or {}).get("conversation_id") or ""),
+        recipient=str(data.get("sender")),
+        subject=subject,
+        body=str(data.get("draft_text") or ""),
+        in_reply_to=data.get("in_reply_to"),
+        references=list(references),
+    )
+    email_state.update_draft(
+        record,
+        state="sent",
+        sent_timestamp=email_state.now_ts(),
+        sent_message_id=message_id,
+    )
+    print(f"draft sent: {args.draft_id} message_id={message_id}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="jc-email")
+    parser.add_argument("--instance-dir", help="override instance dir")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    doctor = sub.add_parser("doctor", help="summarize email config and state")
+    doctor.set_defaults(func=cmd_doctor)
+    sub.add_parser("test-imap", help="connect/login/select the configured IMAP mailbox").set_defaults(func=cmd_test_imap)
+    sub.add_parser("test-smtp", help="connect/login to the configured SMTP server").set_defaults(func=cmd_test_smtp)
+
+    pending = sub.add_parser("pending", help="inspect and drain pending inbound messages")
+    psub = pending.add_subparsers(dest="pending_cmd", required=True)
+    pl = psub.add_parser("list", help="list pending inbound messages")
+    pl.add_argument("--sender", default=None, help="filter by sender address")
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_pending_list)
+    ps = psub.add_parser("show", help="show one pending message by UID")
+    ps.add_argument("uid")
+    ps.set_defaults(func=cmd_pending_show)
+    pa = psub.add_parser("approve", help="drain pending messages for sender into queue")
+    pa.add_argument("sender")
+    pa.set_defaults(func=cmd_pending_approve)
+    pd = psub.add_parser("deny", help="drop pending messages for sender")
+    pd.add_argument("sender")
+    pd.set_defaults(func=cmd_pending_deny)
+
+    drafts = sub.add_parser("drafts", help="inspect and approve outbound drafts")
+    dsub = drafts.add_subparsers(dest="draft_cmd", required=True)
+    dl = dsub.add_parser("list", help="list pending drafts")
+    dl.add_argument("--sender", default=None, help="filter by sender address")
+    dl.add_argument("--all", action="store_true", help="include sent/rejected drafts")
+    dl.add_argument("--json", action="store_true")
+    dl.set_defaults(func=cmd_drafts_list)
+    ds = dsub.add_parser("show", help="show one draft")
+    ds.add_argument("draft_id")
+    ds.set_defaults(func=cmd_drafts_show)
+    de = dsub.add_parser("edit", help="replace draft body with arg or stdin")
+    de.add_argument("draft_id")
+    de.add_argument("text", nargs="?")
+    de.set_defaults(func=cmd_drafts_edit)
+    da = dsub.add_parser("approve", help="send one pending draft")
+    da.add_argument("draft_id")
+    da.set_defaults(func=cmd_drafts_approve)
+    dr = dsub.add_parser("reject", help="reject one pending draft")
+    dr.add_argument("draft_id")
+    dr.set_defaults(func=cmd_drafts_reject)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

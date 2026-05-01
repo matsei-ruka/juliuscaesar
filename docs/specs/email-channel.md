@@ -171,7 +171,8 @@ jc-chats approve --email <addr>
 jc-chats deny --email <addr>
 ```
 
-The alias should print the equivalent `jc email` command once that CLI exists.
+The alias should remain for compatibility, but new operator guidance should use
+the first-class `jc email` commands.
 
 ## Configuration
 

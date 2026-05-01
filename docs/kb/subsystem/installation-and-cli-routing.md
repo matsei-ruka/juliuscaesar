@@ -21,7 +21,7 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 
 - Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, `doctor`.
 - Lifecycle: `update` (CalVer framework upgrade), `upgrade` (reconfigure existing instance: channels, brain, triage), `migrate-to-0.3` (one-shot migration helper for 0.2.x instances).
-- Conversation surface: `chats` (Telegram chat directory), `transcripts` (per-conversation chat history read/tail/search).
+- Conversation surface: `chats` (Telegram chat directory), `email` (email channel operations), `transcripts` (per-conversation chat history read/tail/search).
 - Observability: `company` (fleet observability client — see `lib/company/`).
 - Modeling: `user-model` (autonomous user-model corpus/detector/proposer/applier).
 - Auth: `codex-auth` (inspect/refresh local Codex CLI OAuth state used by the `codex_api` brain).
@@ -29,7 +29,8 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 ## Source of truth
 
 - `install.sh` owns dependency setup and shim generation.
-- `bin/jc` owns the public router surface.
+- `bin/jc` owns the public router surface, including the first-class `email`
+  subcommand that dispatches to `jc-email`.
 - Individual binaries own subcommand behavior.
 - `bin/jc-setup` owns the guided first-run configurator.
 
@@ -44,6 +45,8 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - The router preserves `--instance-dir <path>` or `--instance-dir=<path>` when placed before the subcommand.
 - `jc setup` uses `jc init` underneath, writes `.env`, L1 memory, `ops/watchdog.conf`, `ops/gateway.yaml`, rebuilds the memory index, and runs `jc doctor`.
 - `jc gateway` owns the unified gateway surface: durable SQLite queue initialization, daemon lifecycle, Telegram/Slack polling, brain dispatch, enqueue, claim, complete/fail, retry, config, logs, and status/list inspection.
+- `jc email` owns email-channel operations: doctor, IMAP/SMTP credential
+  checks, pending inbound inspection/drain, and outbound draft review.
 - `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`.
 
 ## Failure modes

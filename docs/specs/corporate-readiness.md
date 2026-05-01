@@ -161,3 +161,26 @@ Before calling a feature corporate-ready, answer:
 - Email channel work is tied to operator workflows.
 - Future implementation issues can be prioritized by product value and
   operational solidity.
+
+## Phase 3 acceptance
+
+- Email state has shared helpers for pending inbound messages, outbound drafts,
+  UID watermarks, and lifecycle metrics.
+- `jc email doctor` reports credential presence, UID watermark, pending count,
+  draft states, and oldest pending/draft ages.
+- Operators can list/show/drain pending inbound messages without touching
+  files directly.
+- Operators can list/show/edit/approve/reject outbound drafts.
+
+## Phase 4 acceptance
+
+- An email operations runbook exists.
+- Rollback is documented as disabling the channel without deleting state.
+- Stuck pending messages, stale drafts, IMAP failures, and SMTP failures have
+  explicit first-response commands.
+
+## Phase 5 acceptance
+
+- Packaging is documented as Personal Ops, Business Pilot, and Corporate Ops.
+- The pricing story is tied to workflows and operational evidence, not model
+  access or novelty.

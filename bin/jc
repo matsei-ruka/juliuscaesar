@@ -11,6 +11,7 @@
 #   watchdog     Supervisor for the instance's live claude session.
 #   workers      On-demand background agents.
 #   chats        Telegram chat directory.
+#   email        Email channel operations.
 #   transcripts  Per-conversation chat transcripts (read/tail/search).
 #   gateway      Durable event queue and gateway runtime.
 #   company      Fleet observability client (The Company).
@@ -37,6 +38,7 @@ Subcommands:
   watchdog     Live session supervisor (jc-watchdog).
   workers      On-demand background agents (jc-workers).
   chats        Telegram chat directory (jc-chats).
+  email        Email channel operations (jc-email).
   transcripts  Per-conversation chat transcripts (jc-transcripts).
   gateway      Durable event queue and gateway runtime (jc-gateway).
   company      Fleet observability client (jc-company).
@@ -99,7 +101,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|chats|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3)
+    memory|heartbeat|voice|watchdog|workers|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

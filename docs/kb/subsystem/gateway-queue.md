@@ -27,6 +27,8 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `lib/gateway/queue.py`: SQLite backend and event state transitions.
 - `lib/gateway/runtime.py`: dispatcher loop that claims events and runs/delivers work.
 - `lib/gateway/channels/`: per-channel clients — `telegram.py` (split: `telegram_chats.py`, `telegram_commands.py`, `telegram_media.py`, `telegram_outbound.py`, `telegram_routing.py`), `slack.py`, `discord.py`, `voice.py`, `cron.py`, `jc_events.py`, plus `registry.py`/`base.py`/`channel_lifecycle.py`.
+- `lib/gateway/channels/email_state.py`: shared file-backed state helpers for
+  email pending messages, drafts, UID watermarks, and local lifecycle metrics.
 - `lib/gateway/brain.py` + `lib/gateway/brains/<name>.py`: per-brain Python wrappers; legacy `brain.py` is the fallback path for brains without a wrapper.
 - `lib/gateway/router.py`: per-event brain selection (default → cron-pinned → triage → sticky → override).
 - `lib/gateway/triage/`: pluggable triage backends — `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and `metrics`.
@@ -36,6 +38,8 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `lib/gateway/chats.py`: Telegram chat directory + auth status (read by `bin/jc-chats`).
 - `lib/gateway/format/escaper.py`: Telegram MarkdownV2 rewriter.
 - `bin/jc-gateway`: CLI for queue inspection, daemon lifecycle, logs, config, events, and retry.
+- `bin/jc-email`: CLI for email channel doctor, credential tests, pending
+  inbound inspection/drain, and outbound draft approval.
 - `<instance>/state/gateway/queue.db`: durable queue database.
 - `<instance>/ops/gateway.yaml`: non-secret runtime config.
 - `<instance>/state/gateway/jc-gateway.pid`: daemon PID file.
@@ -73,6 +77,14 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `retry`
 - `config`
 - `work-once` for local smoke testing with an echo worker
+
+`jc email` supports:
+
+- `doctor`
+- `test-imap`
+- `test-smtp`
+- `pending list/show/approve/deny`
+- `drafts list/show/edit/approve/reject`
 
 ## Invariants
 

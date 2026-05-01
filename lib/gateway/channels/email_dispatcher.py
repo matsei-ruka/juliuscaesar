@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import yaml
+from . import email_state
 
 
 __all__ = [
@@ -43,8 +44,8 @@ __all__ = [
 ]
 
 
-PENDING_REL = Path("state/channels/email/pending")
-DRAFTS_REL = Path("state/channels/email/drafts")
+PENDING_REL = email_state.PENDING_REL
+DRAFTS_REL = email_state.DRAFTS_REL
 
 
 @dataclass
@@ -68,12 +69,12 @@ def _message_uid(msg: dict[str, Any]) -> str:
 
 def pending_dir(instance_dir: Path) -> Path:
     """Where unknown-sender messages are persisted while awaiting approval."""
-    return instance_dir / PENDING_REL
+    return email_state.pending_dir(instance_dir)
 
 
 def drafts_dir(instance_dir: Path) -> Path:
     """Where external-sender outbound replies wait for approval."""
-    return instance_dir / DRAFTS_REL
+    return email_state.drafts_dir(instance_dir)
 
 
 def _write_pending(instance_dir: Path, msg: dict[str, Any]) -> Path:
@@ -81,8 +82,7 @@ def _write_pending(instance_dir: Path, msg: dict[str, Any]) -> Path:
     sender = (msg.get("sender") or "unknown").lower().strip()
     uid = _message_uid(msg)
     path = pending_dir(instance_dir) / _sender_key(sender) / f"{uid}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(msg, default=str), encoding="utf-8")
+    email_state.write_json_atomic(path, msg)
     return path
 
 
@@ -258,8 +258,7 @@ def enqueue_draft(
         "meta": meta,
     }
     path = drafts_dir(instance_dir) / draft["sender_key"] / f"{draft_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(draft, indent=2, default=str), encoding="utf-8")
+    email_state.write_json_atomic(path, draft)
     log(f"email draft queued draft_id={draft_id} sender={sender} path={path}")
 
     _notify_on_unknown, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
