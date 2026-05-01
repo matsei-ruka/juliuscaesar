@@ -45,6 +45,7 @@ Routed public subcommands:
 | `jc doctor` | `jc-doctor` | diagnostics | Instance and environment health checks |
 | `jc user-model` | `jc-user-model` | user model | Autonomous user model proposal loop |
 | `jc codex-auth` | `jc-codex-auth` | auth | Local Codex OAuth token inspection/refresh |
+| `jc self-model` | `jc-self-model` | persona | Autonomous self-observation loop (proposes JOURNAL/RULES/IDENTITY edits) |
 | `jc migrate-to-0.3` | `jc-migrate-to-0.3` | migration | Bootstrap older instances for unified gateway |
 | `jc completion` | `jc-completion` | shell UX | Print bash/zsh completion scripts |
 
