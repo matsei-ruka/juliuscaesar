@@ -9,6 +9,7 @@ from ..config import ChannelConfig, GatewayConfig
 from .base import Channel, LogFn
 from .cron import CronChannel
 from .discord import DiscordChannel
+from .email import EmailChannel
 from .jc_events import JcEventsChannel
 from .slack import SlackSocketModeChannel
 from .telegram import TelegramChannel
@@ -22,6 +23,7 @@ _CHANNEL_FACTORIES = {
     "voice": VoiceChannel,
     "jc-events": JcEventsChannel,
     "cron": CronChannel,
+    "email": EmailChannel,
 }
 
 

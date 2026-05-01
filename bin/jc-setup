@@ -2,11 +2,13 @@
 # jc-setup - guided first-run configurator for a JuliusCaesar instance.
 #
 # Usage:
-#   jc-setup [<path>] [--defaults] [--start] [--install-watchdog]
+#   jc-setup [<path>] [--defaults] [--force] [--start] [--install-watchdog]
 #
-# This is the friendly path. It uses jc-init for the low-level scaffold, then
-# writes concrete instance context so the first live Claude session knows what
-# this assistant is supposed to do.
+# Asks only the determinant questions: assistant name, user name, timezone,
+# default brain, and five optional secrets. Existing L1 memory and watchdog
+# config are preserved unless --force is passed (or the operator opts in at
+# the prompt on an existing instance). Existing .env secret values are
+# preserved when the operator hits Enter on a secret prompt.
 
 set -euo pipefail
 
@@ -18,20 +20,21 @@ JC_WATCHDOG="$FRAMEWORK_ROOT/bin/jc-watchdog"
 JC_GATEWAY="$FRAMEWORK_ROOT/bin/jc-gateway"
 
 USE_DEFAULTS=0
+FORCE=0
 START_LIVE=""
 INSTALL_WATCHDOG=""
 TARGET=""
-WRITE_CONFIG=yes
 
 usage() {
     cat <<'EOF'
 jc-setup - guided first-run configurator
 
 Usage:
-  jc setup [<path>] [--defaults] [--start] [--no-start] [--install-watchdog] [--no-watchdog]
+  jc setup [<path>] [--defaults] [--force] [--start] [--no-start] [--install-watchdog] [--no-watchdog]
 
 Options:
   --defaults            Use safe defaults and do not prompt.
+  --force               Overwrite existing L1 memory and watchdog config.
   --start               Start the gateway daemon after setup.
   --no-start            Do not start a live session.
   --install-watchdog    Install watchdog cron entries after setup.
@@ -43,6 +46,7 @@ while (( $# )); do
     case "$1" in
         -h|--help|help) usage; exit 0 ;;
         --defaults) USE_DEFAULTS=1; shift ;;
+        --force) FORCE=1; shift ;;
         --start) START_LIVE=yes; shift ;;
         --no-start) START_LIVE=no; shift ;;
         --install-watchdog) INSTALL_WATCHDOG=yes; shift ;;
@@ -156,42 +160,50 @@ shell_quote() {
 }
 
 write_env() {
+    # Args: dashscope, telegram_token, telegram_chat, slack_app_token, slack_bot_token.
+    # Empty arg + existing .env value -> preserve existing (defensive; the prompt
+    # layer already returns the existing value when the user hits Enter, but this
+    # makes write_env safe to call with empty strings from any caller).
     local dashscope="$1"
     local telegram_token="$2"
     local telegram_chat="$3"
     local slack_app_token="$4"
     local slack_bot_token="$5"
-    local tmp old_umask
+    local key value existing tmp old_umask
     old_umask=$(umask)
     umask 077
     tmp=$(mktemp "$TARGET/.env.tmp.XXXXXX")
     {
         printf '%s\n' "# JuliusCaesar instance secrets. Do not commit."
-        printf 'DASHSCOPE_API_KEY=%s\n' "$(shell_quote "$dashscope")"
-        printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(shell_quote "$telegram_token")"
-        printf 'TELEGRAM_CHAT_ID=%s\n' "$(shell_quote "$telegram_chat")"
-        printf 'SLACK_APP_TOKEN=%s\n' "$(shell_quote "$slack_app_token")"
-        printf 'SLACK_BOT_TOKEN=%s\n' "$(shell_quote "$slack_bot_token")"
+        for key in DASHSCOPE_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SLACK_APP_TOKEN SLACK_BOT_TOKEN; do
+            case "$key" in
+                DASHSCOPE_API_KEY) value="$dashscope" ;;
+                TELEGRAM_BOT_TOKEN) value="$telegram_token" ;;
+                TELEGRAM_CHAT_ID) value="$telegram_chat" ;;
+                SLACK_APP_TOKEN) value="$slack_app_token" ;;
+                SLACK_BOT_TOKEN) value="$slack_bot_token" ;;
+            esac
+            if [[ -z "$value" && -f "$TARGET/.env" ]]; then
+                existing="$(env_value "$key")"
+                value="$existing"
+            fi
+            printf '%s=%s\n' "$key" "$(shell_quote "$value")"
+        done
     } > "$tmp"
     umask "$old_umask"
     mv "$tmp" "$TARGET/.env"
     chmod 600 "$TARGET/.env"
 }
 
-write_identity() {
-    local path="$1"
-    local today="$2"
-    local assistant_name="$3"
-    local mission="$4"
-    local style="$5"
-    {
-        cat <<EOF
+write_identity_scaffold() {
+    local path="$1" today="$2" assistant_name="$3"
+    cat > "$path" <<EOF
 ---
 slug: IDENTITY
 title: Identity
 layer: L1
 type: identity
-state: reviewed
+state: draft
 created: $today
 updated: $today
 last_verified: "$today"
@@ -201,43 +213,27 @@ links: [USER, RULES]
 
 # Who this assistant is
 
-EOF
-        printf '%s\n\n' "$assistant_name is a JuliusCaesar assistant running inside this instance. The assistant is persistent, practical, and expected to operate like a daemon-backed personal AI rather than a blank chat session."
-        cat <<'EOF'
+$assistant_name is a JuliusCaesar assistant.
+
 ## Mission
 
-EOF
-        printf '%s\n\n' "$mission"
-        cat <<'EOF'
-## Operating posture
-
-- Use the local instance as source of truth for identity, memory, heartbeat tasks, voice, watchdog, and credentials.
-- Use the jc CLI for memory search/read/rebuild, heartbeat tasks, workers, voice, watchdog status, and diagnostics.
-- Before answering from long-term context, search memory when needed instead of guessing.
-- Keep framework code and instance data separate.
-- Never expose secrets from .env.
+TODO: Hand-write what this assistant exists to do.
 
 ## Voice and style
 
+TODO: Hand-write voice and style preferences.
 EOF
-        printf '%s\n' "$style"
-    } > "$path"
 }
 
-write_user_profile() {
-    local path="$1"
-    local today="$2"
-    local user_name="$3"
-    local timezone="$4"
-    local style="$5"
-    {
-        cat <<EOF
+write_user_scaffold() {
+    local path="$1" today="$2" user_name="$3" timezone="$4"
+    cat > "$path" <<EOF
 ---
 slug: USER
 title: User profile
 layer: L1
 type: user
-state: reviewed
+state: draft
 created: $today
 updated: $today
 last_verified: "$today"
@@ -247,40 +243,22 @@ links: [IDENTITY, RULES]
 
 # Who the assistant is helping
 
-## Identity
+- Name: $user_name
+- Timezone: $timezone
 
+TODO: Hand-write user details, preferences, standing rules.
 EOF
-        printf -- '- Name: %s\n' "$user_name"
-        printf -- '- Timezone: %s\n\n' "$timezone"
-        cat <<'EOF'
-## Communication preferences
-
-EOF
-        printf -- '- Preferred style: %s\n' "$style"
-        cat <<'EOF'
-- Ask concise clarifying questions only when needed to avoid a bad action.
-
-## Standing context
-
-- This instance was configured with jc setup.
-- Use jc doctor to inspect environment and runtime health.
-- Use jc memory rebuild after memory edits.
-EOF
-    } > "$path"
 }
 
-write_rules() {
-    local path="$1"
-    local today="$2"
-    local external_policy="$3"
-    {
-        cat <<EOF
+write_rules_scaffold() {
+    local path="$1" today="$2"
+    cat > "$path" <<EOF
 ---
 slug: RULES
 title: Standing Rules & Feedback
 layer: L1
 type: rules
-state: reviewed
+state: draft
 created: $today
 updated: $today
 last_verified: "$today"
@@ -290,36 +268,19 @@ links: [USER, IDENTITY]
 
 # Standing rules
 
-## Instance awareness
-
-Why: Claude starts fresh, but this instance carries durable context.
-How to apply: Read this L1 memory at session start. Use jc memory search and jc memory read for L2 context.
-
-## External actions
-
-Why: The assistant can affect real systems through CLI tools, Telegram, cron, and files.
-How to apply:
+TODO: Hand-write rules.
 EOF
-        printf ' %s\n\n' "$external_policy"
-        cat <<'EOF'
-## Work routing
-
-Why: The live Claude session should stay responsive.
-How to apply: Do quick answers inline. For longer dev work, research, scaffolding, or test-heavy tasks, use jc workers spawn when available.
-EOF
-    } > "$path"
 }
 
-write_hot() {
-    local path="$1"
-    local today="$2"
+write_hot_scaffold() {
+    local path="$1" today="$2"
     cat > "$path" <<EOF
 ---
 slug: HOT
 title: Hot Cache (last 7 days)
 layer: L1
 type: hot
-state: reviewed
+state: draft
 created: $today
 updated: $today
 last_verified: "$today"
@@ -327,40 +288,50 @@ tags: [hot, recent, rolling]
 links: [IDENTITY, USER, RULES]
 ---
 
-# Hot cache - rolling 7-day context
+# Hot cache
 
-## Today
-
-- $today: Instance configured with jc setup.
-
-## Open questions
-
--
+(empty)
 EOF
 }
 
 write_l1() {
-    local assistant_name="$1"
-    local user_name="$2"
-    local timezone="$3"
-    local mission="$4"
-    local style="$5"
-    local external_policy="$6"
-    local today
+    local assistant_name="$1" user_name="$2" timezone="$3" overwrite="$4"
+    local today path
     today="$(date +%F)"
+    mkdir -p "$TARGET/memory/L1"
 
-    write_identity "$TARGET/memory/L1/IDENTITY.md" "$today" "$assistant_name" "$mission" "$style"
-    write_user_profile "$TARGET/memory/L1/USER.md" "$today" "$user_name" "$timezone" "$style"
-    write_rules "$TARGET/memory/L1/RULES.md" "$today" "$external_policy"
-    write_hot "$TARGET/memory/L1/HOT.md" "$today"
+    path="$TARGET/memory/L1/IDENTITY.md"
+    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
+        write_identity_scaffold "$path" "$today" "$assistant_name"
+    fi
+
+    path="$TARGET/memory/L1/USER.md"
+    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
+        write_user_scaffold "$path" "$today" "$user_name" "$timezone"
+    fi
+
+    path="$TARGET/memory/L1/RULES.md"
+    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
+        write_rules_scaffold "$path" "$today"
+    fi
+
+    path="$TARGET/memory/L1/HOT.md"
+    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
+        write_hot_scaffold "$path" "$today"
+    fi
 }
 
 write_watchdog_conf() {
-    local assistant_name="$1"
+    local assistant_name="$1" overwrite="$2"
+    local path="$TARGET/ops/watchdog.conf"
+    if [[ -f "$path" && "$overwrite" != yes ]]; then
+        return 0
+    fi
     local screen_name
     screen_name="$(printf '%s' "$assistant_name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_' '-' | sed 's/^-//; s/-$//')"
     screen_name="${screen_name:-jc-assistant}"
-    cat > "$TARGET/ops/watchdog.conf" <<EOF
+    mkdir -p "$TARGET/ops"
+    cat > "$path" <<EOF
 # Watchdog configuration for this JuliusCaesar instance.
 
 # Runtime mode: gateway is the default production runtime. Use "legacy-claude"
@@ -411,55 +382,53 @@ start_gateway() {
 echo "==> JuliusCaesar guided setup"
 echo "Target: $TARGET"
 
-if [[ ! -f "$TARGET/.jc" ]]; then
+WAS_EXISTING=0
+if [[ -f "$TARGET/.jc" ]]; then
+    WAS_EXISTING=1
+    echo "==> Existing JC instance detected; configuring in place."
+else
     if ! "$JC_INIT" "$TARGET"; then
         echo "jc setup: failed to initialize instance at $TARGET" >&2
         exit 1
     fi
-else
-    echo "==> Existing JC instance detected; configuring in place."
-    if [[ "$USE_DEFAULTS" != 1 ]]; then
-        WRITE_CONFIG="$(yesno "Rewrite .env, L1 memory, and watchdog config from setup answers?" "no")"
-    fi
+fi
+
+OVERWRITE=no
+if [[ "$FORCE" == 1 ]]; then
+    OVERWRITE=yes
+elif [[ "$WAS_EXISTING" == 1 && "$USE_DEFAULTS" != 1 ]]; then
+    OVERWRITE="$(yesno "Overwrite existing L1 memory and watchdog config?" "no")"
 fi
 
 default_assistant="$(basename "$TARGET")"
 default_user="${USER:-user}"
 default_timezone="${TZ:-$(date +%Z 2>/dev/null || echo UTC)}"
 
-assistant_name="$default_assistant"
-if [[ "$WRITE_CONFIG" == "yes" ]]; then
-    assistant_name="$(prompt "Assistant name" "$default_assistant")"
-    user_name="$(prompt "Your name" "$default_user")"
-    timezone="$(prompt "Timezone" "$default_timezone")"
-    mission="$(prompt "What should this assistant help with?" "Personal assistant for memory, scheduled tasks, development work, and Telegram-based operations.")"
-    style="$(prompt "Communication style" "Concise, practical, warm, and explicit about uncertainty.")"
-    external_policy="$(prompt "External-action policy" "Ask before irreversible external actions; proceed autonomously for local reads, diagnostics, and safe scaffolding.")"
+assistant_name="$(prompt "Assistant name" "$default_assistant")"
+user_name="$(prompt "Your name" "$default_user")"
+timezone="$(prompt "Timezone" "$default_timezone")"
 
-    existing_dashscope="$(env_value DASHSCOPE_API_KEY)"
-    existing_telegram_token="$(env_value TELEGRAM_BOT_TOKEN)"
-    existing_telegram_chat="$(env_value TELEGRAM_CHAT_ID)"
-    existing_slack_app_token="$(env_value SLACK_APP_TOKEN)"
-    existing_slack_bot_token="$(env_value SLACK_BOT_TOKEN)"
+existing_dashscope="$(env_value DASHSCOPE_API_KEY)"
+existing_telegram_token="$(env_value TELEGRAM_BOT_TOKEN)"
+existing_telegram_chat="$(env_value TELEGRAM_CHAT_ID)"
+existing_slack_app_token="$(env_value SLACK_APP_TOKEN)"
+existing_slack_bot_token="$(env_value SLACK_BOT_TOKEN)"
 
-    dashscope="$(secret_prompt "DashScope API key (optional)" "$existing_dashscope")"
-    telegram_token="$(secret_prompt "Telegram bot token (optional)" "$existing_telegram_token")"
-    telegram_chat="$(prompt "Telegram chat id (optional)" "$existing_telegram_chat")"
-    slack_app_token="$(secret_prompt "Slack app-level token xapp-* for Socket Mode (optional)" "$existing_slack_app_token")"
-    slack_bot_token="$(secret_prompt "Slack bot token xoxb-* (optional)" "$existing_slack_bot_token")"
-    default_brain="$(prompt "Default gateway brain (claude|codex|opencode|gemini)" "claude")"
-    case "$default_brain" in
-        claude|codex|opencode|gemini) ;;
-        *) echo "Unknown brain '$default_brain'; using claude." >&2; default_brain=claude ;;
-    esac
+dashscope="$(secret_prompt "DashScope API key (optional)" "$existing_dashscope")"
+telegram_token="$(secret_prompt "Telegram bot token (optional)" "$existing_telegram_token")"
+telegram_chat="$(prompt "Telegram chat id (optional)" "$existing_telegram_chat")"
+slack_app_token="$(secret_prompt "Slack app-level token xapp-* for Socket Mode (optional)" "$existing_slack_app_token")"
+slack_bot_token="$(secret_prompt "Slack bot token xoxb-* (optional)" "$existing_slack_bot_token")"
+default_brain="$(prompt "Default gateway brain (claude|codex|opencode|gemini)" "claude")"
+case "$default_brain" in
+    claude|codex|opencode|gemini) ;;
+    *) echo "Unknown brain '$default_brain'; using claude." >&2; default_brain=claude ;;
+esac
 
-    write_env "$dashscope" "$telegram_token" "$telegram_chat" "$slack_app_token" "$slack_bot_token"
-    write_l1 "$assistant_name" "$user_name" "$timezone" "$mission" "$style" "$external_policy"
-    write_watchdog_conf "$assistant_name"
-    write_gateway_config "$default_brain" "$([[ -n "$telegram_token" ]] && echo yes || echo no)" "$telegram_chat" "$([[ -n "$slack_app_token" && -n "$slack_bot_token" ]] && echo yes || echo no)"
-else
-    echo "==> Keeping existing .env, L1 memory, watchdog config, and gateway config."
-fi
+write_env "$dashscope" "$telegram_token" "$telegram_chat" "$slack_app_token" "$slack_bot_token"
+write_l1 "$assistant_name" "$user_name" "$timezone" "$OVERWRITE"
+write_watchdog_conf "$assistant_name" "$OVERWRITE"
+write_gateway_config "$default_brain" "$([[ -n "$telegram_token" ]] && echo yes || echo no)" "$telegram_chat" "$([[ -n "$slack_app_token" && -n "$slack_bot_token" ]] && echo yes || echo no)"
 
 echo "==> Rebuilding memory index"
 "$JC_MEMORY" --instance-dir "$TARGET" rebuild >/dev/null
