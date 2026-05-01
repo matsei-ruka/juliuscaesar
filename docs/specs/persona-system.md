@@ -303,7 +303,7 @@ The reference instance's `lib/self_model/` directory is removed as part of the s
 | 3 | `templates/persona-interview/questions.yaml` (full slot bank) + composition templates + `lib/persona_interview/questions.py` typed loader | medium-large | sync output | partial — schema, loader, 15 exemplar slots polished, 38 draft skeletons across all 5 file types; full polish deferred to follow-up authoring |
 | 4 | `lib/self_model/` promoted to framework + tests + heartbeat builtins + CLI router entry | medium | (independent of phase 3) | done |
 | 5 | `lib/persona_interview/` + `bin/jc-persona` + macro binding + brownfield overwrite | medium-large | phases 2.5, 3 | done (MVP — `jc setup` autocall deferred to 5.x) |
-| 6 | `docs/research/persona-system.md` — academic-grade research artifact citing the design | small | phases 1–5 | |
+| 6 | `docs/research/persona-system.md` — academic-grade research artifact citing the design | small | phases 1–5 | done (draft — pending citations and doctrine review) |
 
 Phases 3 and 4 are parallelizable. Phase 5 closes the user-facing loop and binds macros at scaffold time using `lib/persona_macros.bind_macros`. Phase 6 is the research deliverable.
 
