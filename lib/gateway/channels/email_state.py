@@ -18,6 +18,7 @@ from typing import Any, Iterable
 PENDING_REL = Path("state/channels/email/pending")
 DRAFTS_REL = Path("state/channels/email/drafts")
 LAST_UID_REL = Path("state/channels/email/last_uid")
+EVENTS_REL = Path("state/channels/email/events.jsonl")
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,10 @@ def drafts_dir(instance_dir: Path) -> Path:
 
 def last_uid_file(instance_dir: Path) -> Path:
     return Path(instance_dir) / LAST_UID_REL
+
+
+def events_file(instance_dir: Path) -> Path:
+    return Path(instance_dir) / EVENTS_REL
 
 
 def read_last_uid(instance_dir: Path) -> int:
@@ -94,6 +99,31 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def record_event(instance_dir: Path, event: str, **fields: Any) -> None:
+    data = {"ts": now_ts(), "event": event, **fields}
+    path = events_file(instance_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, default=str, sort_keys=True) + "\n")
+
+
+def recent_events(instance_dir: Path, *, limit: int = 20) -> list[dict[str, Any]]:
+    path = events_file(instance_dir)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            events.append(data)
+    return events
+
+
 def update_draft(record: StateRecord, **fields: Any) -> dict[str, Any]:
     data = dict(record.data)
     data.update(fields)
@@ -139,15 +169,22 @@ def _oldest_age_seconds(values: Iterable[Any]) -> int | None:
 def metrics(instance_dir: Path) -> dict[str, Any]:
     pending = pending_records(instance_dir)
     drafts = draft_records(instance_dir)
+    recent = recent_events(instance_dir, limit=200)
     draft_states: dict[str, int] = {}
     for record in drafts:
         state = str(record.data.get("state") or "unknown")
         draft_states[state] = draft_states.get(state, 0) + 1
+    event_counts: dict[str, int] = {}
+    for event in recent:
+        name = str(event.get("event") or "unknown")
+        event_counts[name] = event_counts.get(name, 0) + 1
     return {
         "last_uid": read_last_uid(instance_dir),
         "pending": len(pending),
         "drafts": len(drafts),
         "draft_states": draft_states,
+        "event_counts_recent": event_counts,
+        "last_event": recent[-1] if recent else None,
         "oldest_pending_age_seconds": _oldest_age_seconds(
             (r.data.get("metadata") or {}).get("date") for r in pending
         ),

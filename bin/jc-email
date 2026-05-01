@@ -70,6 +70,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     env = _env(instance)
     m = email_state.metrics(instance)
     enabled = cfg.get("enabled", False)
+    healthy = bool(enabled and env.get("IMAP_HOST") and env.get("IMAP_USER") and env.get("IMAP_PASSWORD"))
+    if args.json:
+        print(json.dumps({
+            "instance": str(instance),
+            "enabled": bool(enabled),
+            "credentials": {
+                key: bool(env.get(key))
+                for key in ("IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD")
+            },
+            **m,
+        }, indent=2, default=str))
+        return 0 if healthy else 1
     print(f"instance: {instance}")
     print(f"enabled:  {enabled}")
     print(f"config:   {instance / 'ops' / 'gateway.yaml'}")
@@ -79,7 +91,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"pending:  {m['pending']} oldest={_age(m['oldest_pending_age_seconds'])}")
     states = ", ".join(f"{k}={v}" for k, v in sorted(m["draft_states"].items())) or "none"
     print(f"drafts:   {m['drafts']} ({states}) oldest_pending={_age(m['oldest_draft_age_seconds'])}")
-    return 0 if enabled and env.get("IMAP_HOST") and env.get("IMAP_USER") and env.get("IMAP_PASSWORD") else 1
+    if m.get("last_event"):
+        event = m["last_event"]
+        print(f"last_event: {event.get('event')} at {event.get('ts')}")
+    return 0 if healthy else 1
 
 
 def cmd_test_imap(args: argparse.Namespace) -> int:
@@ -212,6 +227,7 @@ def cmd_drafts_edit(args: argparse.Namespace) -> int:
         edit_count=edit_count,
         edited_timestamp=email_state.now_ts(),
     )
+    email_state.record_event(instance, "draft_edited", draft_id=args.draft_id, edit_count=edit_count)
     print(f"draft edited: {args.draft_id} edit_count={edit_count}")
     return 0
 
@@ -220,6 +236,7 @@ def cmd_drafts_reject(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
     record = _find_draft_or_die(instance, args.draft_id)
     email_state.update_draft(record, state="rejected", rejected_timestamp=email_state.now_ts())
+    email_state.record_event(instance, "draft_rejected", draft_id=args.draft_id)
     print(f"draft rejected: {args.draft_id}")
     return 0
 
@@ -251,6 +268,13 @@ def cmd_drafts_approve(args: argparse.Namespace) -> int:
         sent_timestamp=email_state.now_ts(),
         sent_message_id=message_id,
     )
+    email_state.record_event(
+        instance,
+        "draft_sent",
+        draft_id=args.draft_id,
+        sender=str(data.get("sender")),
+        message_id=message_id,
+    )
     print(f"draft sent: {args.draft_id} message_id={message_id}")
     return 0
 
@@ -261,6 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     doctor = sub.add_parser("doctor", help="summarize email config and state")
+    doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=cmd_doctor)
     sub.add_parser("test-imap", help="connect/login/select the configured IMAP mailbox").set_defaults(func=cmd_test_imap)
     sub.add_parser("test-smtp", help="connect/login to the configured SMTP server").set_defaults(func=cmd_test_smtp)

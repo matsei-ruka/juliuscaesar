@@ -259,6 +259,13 @@ def enqueue_draft(
     }
     path = drafts_dir(instance_dir) / draft["sender_key"] / f"{draft_id}.json"
     email_state.write_json_atomic(path, draft)
+    email_state.record_event(
+        instance_dir,
+        "draft_queued",
+        draft_id=draft_id,
+        sender=sender,
+        path=str(path),
+    )
     log(f"email draft queued draft_id={draft_id} sender={sender} path={path}")
 
     _notify_on_unknown, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
@@ -300,20 +307,50 @@ def dispatch_messages(
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=enqueue)
                 result.dispatched += 1
                 result.handled_uids.append(uid)
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_dispatched",
+                    uid=uid,
+                    sender=sender,
+                    status=status,
+                )
                 log(f"email dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_dispatch_failed",
+                    uid=uid,
+                    sender=sender,
+                    status=status,
+                    error=str(exc),
+                )
                 log(f"email enqueue failed sender={sender}: {exc}")
         elif status == "blocked":
             result.blocked += 1
             result.handled_uids.append(uid)
+            email_state.record_event(instance_dir, "inbound_blocked", uid=uid, sender=sender)
             log(f"email dropped (blocked) sender={sender}")
         else:  # unknown
             try:
                 path = _write_pending(instance_dir, msg)
                 result.pending += 1
                 result.handled_uids.append(uid)
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_pending",
+                    uid=uid,
+                    sender=sender,
+                    path=str(path),
+                )
                 log(f"email pending sender={sender} path={path}")
             except OSError as exc:
+                email_state.record_event(
+                    instance_dir,
+                    "inbound_pending_failed",
+                    uid=uid,
+                    sender=sender,
+                    error=str(exc),
+                )
                 log(f"email pending write failed sender={sender}: {exc}")
                 continue
             if notify_on_unknown:
@@ -356,11 +393,23 @@ def drain_pending(
             try:
                 msg["status"] = "trusted"
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=None)
+                email_state.record_event(
+                    instance_dir,
+                    "pending_approved",
+                    uid=_message_uid(msg),
+                    sender=sender,
+                )
                 log(f"pending dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001
                 log(f"pending enqueue failed {path}: {exc}")
                 continue
         else:
+            email_state.record_event(
+                instance_dir,
+                "pending_denied",
+                uid=_message_uid(msg),
+                sender=sender,
+            )
             log(f"pending dropped uid={msg.get('channel_id')} sender={sender}")
         path.unlink(missing_ok=True)
         count += 1
@@ -429,8 +478,10 @@ def _cli_poll(args: argparse.Namespace) -> int:
     try:
         messages = adapter.fetch_new_messages()
     except Exception as exc:  # noqa: BLE001
+        email_state.record_event(instance, "poll_fetch_failed", error=str(exc))
         log(f"poll error: fetch_new_messages: {exc}")
         return 1
+    email_state.record_event(instance, "poll_fetched", count=len(messages))
     log(f"poll: fetched={len(messages)}")
     result = dispatch_messages(
         instance_dir=instance,

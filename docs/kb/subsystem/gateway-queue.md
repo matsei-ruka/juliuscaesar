@@ -28,7 +28,8 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `lib/gateway/runtime.py`: dispatcher loop that claims events and runs/delivers work.
 - `lib/gateway/channels/`: per-channel clients — `telegram.py` (split: `telegram_chats.py`, `telegram_commands.py`, `telegram_media.py`, `telegram_outbound.py`, `telegram_routing.py`), `slack.py`, `discord.py`, `voice.py`, `cron.py`, `jc_events.py`, plus `registry.py`/`base.py`/`channel_lifecycle.py`.
 - `lib/gateway/channels/email_state.py`: shared file-backed state helpers for
-  email pending messages, drafts, UID watermarks, and local lifecycle metrics.
+  email pending messages, drafts, UID watermarks, local lifecycle metrics, and
+  JSONL lifecycle events.
 - `lib/gateway/brain.py` + `lib/gateway/brains/<name>.py`: per-brain Python wrappers; legacy `brain.py` is the fallback path for brains without a wrapper.
 - `lib/gateway/router.py`: per-event brain selection (default → cron-pinned → triage → sticky → override).
 - `lib/gateway/triage/`: pluggable triage backends — `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and `metrics`.

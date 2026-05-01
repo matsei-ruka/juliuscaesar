@@ -13,6 +13,7 @@ and roll back without deleting state.
 
 ```bash
 jc email doctor
+jc email doctor --json
 ```
 
 Healthy output should show:
@@ -84,6 +85,9 @@ forensics.
   mail timestamp.
 - `drafts`: total draft records by state.
 - `oldest_pending` under drafts: age of the oldest pending outbound draft.
+- `event_counts_recent`: lifecycle event counts from
+  `state/channels/email/events.jsonl`.
+- `last_event`: newest lifecycle event name and timestamp.
 
 These are intentionally local and file-backed so a broken gateway daemon does
 not hide operator state.

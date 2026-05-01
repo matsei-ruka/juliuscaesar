@@ -166,6 +166,7 @@ Before calling a feature corporate-ready, answer:
 
 - Email state has shared helpers for pending inbound messages, outbound drafts,
   UID watermarks, and lifecycle metrics.
+- Email state records lifecycle events in local JSONL for operator forensics.
 - `jc email doctor` reports credential presence, UID watermark, pending count,
   draft states, and oldest pending/draft ages.
 - Operators can list/show/drain pending inbound messages without touching

@@ -47,7 +47,7 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - `jc gateway` owns the unified gateway surface: durable SQLite queue initialization, daemon lifecycle, Telegram/Slack polling, brain dispatch, enqueue, claim, complete/fail, retry, config, logs, and status/list inspection.
 - `jc email` owns email-channel operations: doctor, IMAP/SMTP credential
   checks, pending inbound inspection/drain, and outbound draft review.
-- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`.
+- `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`. It also reports email-channel credential presence and local pending/draft metrics.
 
 ## Failure modes
 

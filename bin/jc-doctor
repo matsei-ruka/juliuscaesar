@@ -157,7 +157,7 @@ fi
 
 section "JuliusCaesar binaries"
 
-for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor; do
+for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor jc-email; do
     if command -v "$b" >/dev/null 2>&1; then
         ok "$b"
     else
@@ -605,6 +605,60 @@ if [[ -f "$GATEWAY_PIDFILE" ]]; then
         warn "gateway pidfile is stale: $GATEWAY_PIDFILE"
     fi
 fi
+
+# --- Email channel ---
+
+section "Email channel"
+
+EMAIL_CHECK=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+from gateway.config import env_values
+from gateway.channels import email_state
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+instance = Path(sys.argv[1])
+cfg = {}
+path = instance / "ops" / "gateway.yaml"
+if yaml and path.exists():
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    channels = data.get("channels") if isinstance(data, dict) else {}
+    cfg = (channels or {}).get("email") or {}
+enabled = bool(cfg.get("enabled", False)) if isinstance(cfg, dict) else False
+env = env_values(instance)
+metrics = email_state.metrics(instance)
+print(f"ENABLED:{enabled}")
+for key in ("IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD"):
+    print(f"CRED:{key}:{'ok' if env.get(key) else 'missing'}")
+print(f"METRIC:last_uid:{metrics['last_uid']}")
+print(f"METRIC:pending:{metrics['pending']}")
+print(f"METRIC:drafts:{metrics['drafts']}")
+states = ",".join(f"{k}={v}" for k, v in sorted(metrics['draft_states'].items())) or "none"
+print(f"METRIC:draft_states:{states}")
+last = metrics.get("last_event") or {}
+if last:
+    print(f"LAST_EVENT:{last.get('event')}:{last.get('ts')}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        ENABLED:True) ok "email enabled" ;;
+        ENABLED:False) info "email disabled" ;;
+        CRED:*:ok) key="${line#CRED:}"; key="${key%:ok}"; ok "email $key set" ;;
+        CRED:*:missing) key="${line#CRED:}"; key="${key%:missing}"; warn "email $key missing" ;;
+        METRIC:last_uid:*) info "email last_uid: ${line#METRIC:last_uid:}" ;;
+        METRIC:pending:0) ok "email pending inbound: 0" ;;
+        METRIC:pending:*) warn "email pending inbound: ${line#METRIC:pending:}" ;;
+        METRIC:drafts:0) ok "email drafts: 0" ;;
+        METRIC:drafts:*) warn "email drafts: ${line#METRIC:drafts:}" ;;
+        METRIC:draft_states:*) info "email draft states: ${line#METRIC:draft_states:}" ;;
+        LAST_EVENT:*) info "email last event: ${line#LAST_EVENT:}" ;;
+        Traceback*|ERROR:*) warn "email check failed: $line" ;;
+    esac
+done <<<"$EMAIL_CHECK"
 
 # --- Workers ---
 

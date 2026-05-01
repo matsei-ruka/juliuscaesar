@@ -170,6 +170,23 @@ class EmailCliDoctorTests(unittest.TestCase):
             self.assertIn("pending:  1", proc.stdout)
             self.assertIn("drafts:   1", proc.stdout)
             self.assertIn("IMAP_HOST: missing", proc.stdout)
+            self.assertIn("last_event: draft_queued", proc.stdout)
+
+    def test_doctor_json_reports_metrics_and_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "ops").mkdir()
+            (instance / "ops" / "gateway.yaml").write_text(
+                "channels:\n  email:\n    enabled: true\n",
+                encoding="utf-8",
+            )
+            _seed_pending(instance, "new@example.com", uid="100")
+            proc = _run(["doctor", "--json"], instance)
+            self.assertEqual(proc.returncode, 1)
+            data = json.loads(proc.stdout)
+            self.assertEqual(data["pending"], 1)
+            self.assertEqual(data["event_counts_recent"]["inbound_pending"], 1)
+            self.assertEqual(data["last_event"]["event"], "inbound_pending")
 
 
 if __name__ == "__main__":
