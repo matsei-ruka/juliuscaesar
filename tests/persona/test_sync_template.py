@@ -275,6 +275,100 @@ def test_boilerplate_extraction_idempotent(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Phase 7 — nested H3 IMMUTABILE detection
+# ---------------------------------------------------------------------------
+
+def test_find_nested_immutable_h3_finds_marker():
+    body = """\
+Some preamble.
+
+### Principio
+<!-- IMMUTABILE -->
+
+Loyalty hierarchy text.
+
+### Other Sub-Section
+
+Not immutable.
+"""
+    found = sync.find_nested_immutable_h3s(body)
+    assert len(found) == 1
+    h3, h3_body = found[0]
+    assert h3 == "### Principio"
+    assert "Loyalty hierarchy text" in h3_body
+
+
+def test_find_nested_immutable_h3_no_marker_returns_empty():
+    body = """\
+Some preamble.
+
+### Sub
+Just a sub-section, no marker.
+
+### Another Sub
+
+Also no marker.
+"""
+    assert sync.find_nested_immutable_h3s(body) == []
+
+
+def test_find_nested_immutable_h3_marker_too_far_after_heading_ignored():
+    """The marker must be within the first 3 non-empty lines of the H3 body."""
+    body = """\
+### Sub
+
+Line one.
+
+Line two.
+
+Line three.
+
+<!-- IMMUTABILE -->
+"""
+    assert sync.find_nested_immutable_h3s(body) == []
+
+
+def test_section_number_re_handles_dotted_subnames():
+    """§15.Principle should parse as the sub-doctrine key '15.Principle'."""
+    assert sync.section_number("## §15.Principle — Insider loyalty hierarchy") == "15.Principle"
+    # Existing forms still work.
+    assert sync.section_number("## §0 — DOTTRINA TRASPARENZA AI") == "0"
+    assert sync.section_number("## §0.1 — PROTOCOLLI") == "0.1"
+    assert sync.section_number("## §21 — ANTI-SUBMISSION LOOP") == "21"
+
+
+def test_load_english_doctrine_includes_subsection_entries():
+    """doctrine-en.md ships §15.Principle as a sub-doctrine entry."""
+    framework_root = Path(__file__).resolve().parent.parent.parent
+    doctrine = sync.load_english_doctrine(framework_root)
+    assert "15.Principle" in doctrine
+    heading, body = doctrine["15.Principle"]
+    assert "INSIDER" in heading.upper() or "LOYALTY" in heading.upper() or "PRINCIPLE" in heading.upper()
+    assert "{{principal.name}}" in body  # English principle uses macros
+
+
+def test_h3_doctrine_suffix_map_covers_principio():
+    """The Italian-to-English H3 mapping must catch '### Principio' (Mario's form)."""
+    assert sync.slugify_h3("### Principio") == "Principle"
+    assert sync.slugify_h3("### Principle") == "Principle"
+    assert sync.slugify_h3("### Some Other Heading") is None
+
+
+def test_synced_rules_md_carries_nested_principle_for_section_15():
+    """End-to-end: the framework template's §15 should now include the nested
+    `### Principle` doctrine block before the slot placeholder."""
+    framework_root = Path(__file__).resolve().parent.parent.parent
+    template_rules = framework_root / "templates" / "init-instance" / "memory" / "L1" / "RULES.md"
+    text = template_rules.read_text(encoding="utf-8")
+    # The §15 heading exists.
+    assert "## §15 — INSIDER ROLE BOUNDARIES" in text
+    # An H3 Principle block now appears within the framework template's §15.
+    assert "### Principle" in text
+    # The principle text uses the macro, not literal proper nouns.
+    assert "{{principal.name}}" in text
+
+
+# ---------------------------------------------------------------------------
 # Doctrine decoupling — framework's English doctrine is the source of truth,
 # not the reference instance's content.
 # ---------------------------------------------------------------------------

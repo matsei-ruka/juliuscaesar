@@ -250,7 +250,8 @@ def resolve_english_heading(file_rel: str, heading: str, overrides: dict) -> str
 # Canonical English doctrine — loaded from templates/persona-interview/doctrine-en.md
 # ---------------------------------------------------------------------------
 
-_SECTION_NUMBER_RE = re.compile(r"^##\s+§([\d.]+)\s+—")
+_SECTION_NUMBER_RE = re.compile(r"^##\s+§([\d.]+(?:\.[A-Za-z][A-Za-z0-9_-]*)?)\s+—")
+_H3_HEADING_RE = re.compile(r"^### .+$", re.MULTILINE)
 
 
 def load_english_doctrine(framework_root: Path) -> dict[str, tuple[str, str]]:
@@ -286,6 +287,63 @@ def section_number(heading: str) -> str | None:
     """Extract '§<number>' suffix as a stable key. '## §0.1 — FOO' -> '0.1'."""
     m = _SECTION_NUMBER_RE.match(heading)
     return m.group(1) if m else None
+
+
+def find_nested_immutable_h3s(body: str) -> list[tuple[str, str]]:
+    """Return [(h3_heading, h3_body)] for every H3 in `body` carrying an
+    inline `<!-- IMMUTABILE -->` marker.
+
+    The marker is detected only in the first 3 non-empty lines after the H3
+    heading (same scan window as the H2 marker detector in `_detect_marker`).
+
+    Used by the sync script to preserve sub-section IMMUTABILE content
+    verbatim within an otherwise REVIEWABLE/OPEN parent section. Example:
+    §15 has top-level OPEN, but its `### Principio` sub-section carries
+    `<!-- IMMUTABILE -->` — this scanner returns that sub-section so the
+    sync script can look up the matching English text in doctrine-en.md.
+    """
+    out: list[tuple[str, str]] = []
+    lines = body.splitlines(keepends=True)
+    current_h3: str | None = None
+    current_h3_body: list[str] = []
+
+    def flush() -> None:
+        if current_h3 is None:
+            return
+        sub_body = "".join(current_h3_body)
+        if _detect_marker(sub_body) == "IMMUTABILE":
+            out.append((current_h3, sub_body))
+
+    for line in lines:
+        if line.startswith("### "):
+            flush()
+            current_h3 = line.rstrip("\n")
+            current_h3_body = []
+        elif current_h3 is not None:
+            current_h3_body.append(line)
+    flush()
+    return out
+
+
+def slugify_h3(heading: str) -> str:
+    """'### Principio' -> 'Principle'? No — too lossy. We use a curated map.
+
+    Maps a source H3 heading (Italian, in the lead-user reference) to the
+    sub-doctrine suffix used to look up the English version in doctrine-en.md.
+    Returns None if no mapping is registered.
+
+    Why a map and not auto-derivation: the source heading is in the source's
+    language and may be reworded; the doctrine-en.md key is the framework's
+    canonical English suffix and must stay stable. Hand-curated mapping
+    keeps the two decoupled.
+    """
+    return _H3_DOCTRINE_SUFFIX_MAP.get(heading.strip())
+
+
+_H3_DOCTRINE_SUFFIX_MAP = {
+    "### Principio": "Principle",
+    "### Principle": "Principle",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +420,13 @@ def compose_rules_md(
                            f"<!-- TODO: doctrine body for §{num} missing from "
                            f"templates/persona-interview/doctrine-en.md -->\n\n")
         else:
-            out.append(_compose_section("memory/L1/RULES.md", s, overrides))
+            # Phase 7: preserve nested H3 IMMUTABILE sub-sections from
+            # doctrine-en.md alongside the H2 slot.
+            section_text = _compose_section("memory/L1/RULES.md", s, overrides)
+            section_text = _maybe_inject_nested_immutables(
+                section_text, s, english_doctrine,
+            )
+            out.append(section_text)
 
     if seen_sections == 0:
         raise RuntimeError(
@@ -673,6 +737,64 @@ Constitution updates require:
 - `memory/index.sqlite` (FTS index, auto-generated).
 - `heartbeat/state/`, `voice/tmp/` (runtime output).
 """
+
+
+def _maybe_inject_nested_immutables(
+    section_text: str,
+    s: Section,
+    english_doctrine: dict[str, tuple[str, str]],
+) -> str:
+    """Phase 7: prepend any nested H3-IMMUTABILE sub-doctrine before the slot.
+
+    For an H2 source section like `## §15 — INSIDER ROLE BOUNDARIES` whose
+    body contains `### Principio` with `<!-- IMMUTABILE -->`, look up
+    `§15.Principle` in `english_doctrine`; if present, emit the H3 body
+    verbatim immediately after the H2's marker line and before the slot
+    placeholder. The operator's interview answer fills the rest of the H2.
+
+    If a source-side H3 IMMUTABILE has no matching English sub-doctrine,
+    log a warning and leave the section as a plain slot.
+    """
+    nested = find_nested_immutable_h3s(s.body)
+    if not nested:
+        return section_text
+
+    parent_num = section_number(s.heading)
+    if parent_num is None:
+        return section_text
+
+    inserts: list[str] = []
+    for h3_heading, _h3_body in nested:
+        suffix = slugify_h3(h3_heading)
+        if suffix is None:
+            print(f"warning: nested H3 IMMUTABILE in {s.heading!r} has no "
+                  f"sub-doctrine mapping for {h3_heading!r}; skipping",
+                  file=sys.stderr)
+            continue
+        key = f"{parent_num}.{suffix}"
+        if key not in english_doctrine:
+            print(f"warning: nested H3 IMMUTABILE expects doctrine entry "
+                  f"§{key} in doctrine-en.md but none found; skipping",
+                  file=sys.stderr)
+            continue
+        _doc_heading, doc_body = english_doctrine[key]
+        # Emit as an H3 inside the parent (rewrite from H2-style heading
+        # in doctrine-en.md back to H3 inside the parent section).
+        inserts.append(f"### {suffix}\n{doc_body.rstrip()}\n\n")
+
+    if not inserts:
+        return section_text
+
+    # Splice the nested IMMUTABILE H3s in *between* the H2 marker line and
+    # the slot placeholder. We do this by finding the slot-placeholder line
+    # and inserting before it.
+    slot_re = re.compile(r"^(\{\{slot:[^}]+\}\})", re.MULTILINE)
+    m = slot_re.search(section_text)
+    if not m:
+        return section_text + "".join(inserts)
+
+    nested_block = "".join(inserts)
+    return section_text[: m.start()] + nested_block + section_text[m.start() :]
 
 
 def _compose_section(

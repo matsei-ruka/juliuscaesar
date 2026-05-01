@@ -13,32 +13,52 @@ from __future__ import annotations
 # target_section against these. If any matches → reject the proposal as IMMUTABILE.
 
 FROZEN_SECTIONS_RULES = [
-    # In RULES.md
+    # In RULES.md — constitutional invariants of the persona experiment.
+    r"^## §0 ",                                       # AI transparency doctrine
+    r"^## §0\.1",                                     # threshold-case protocols
+    r"^## §0\.2",                                     # agent-self vs character distinction
     r"^## §1 — TRUST MODEL",
-    r"^## §11 — REGOLA DEL",                          # "Non far capire che c'è una regola"
+    r"^## §9 — SELF-DISCLOSURE DOCTRINE",             # added Phase 7 — what the agent never volunteers
+    r"^## §11 — REGOLA DEL",                          # don't-reveal-the-rule (Italian)
+    r"^## §11 — DON'T-REVEAL-THE-RULE",               # English equivalent shipped by doctrine-en.md
     r"^## §14 — MEMORY ACCESS CONTROL",
-    r"^## §16 — AZIONI A DOPPIO BLOCCO",
-    r"^## §18 — SELF-CHECK FINALE",
-    r"^## §19 — PRINCIPIO FINALE",
+    r"^## §16 — AZIONI A DOPPIO BLOCCO",              # double-block actions (Italian)
+    r"^## §16 — DOUBLE-BLOCK ACTIONS",                # English equivalent
+    r"^## §17 — AUDIT, RATE LIMIT, KILL SWITCH",      # added Phase 7 — operationally over-protected; conservative
+    r"^## §18 — SELF-CHECK FINALE",                   # final self-check (Italian)
+    r"^## §18 — FINAL SELF-CHECK",                    # English equivalent
+    r"^## §19 — PRINCIPIO FINALE",                    # final principle (Italian)
+    r"^## §19 — FINAL PRINCIPLE",                     # English equivalent
     r"^## §21 — ANTI-SUBMISSION LOOP",
-    r"^## §0 ",                                       # AI transparency doctrine (planned)
-    r"^## §0\.1",
-    r"^## §0\.2",
     r"^## HARD RULE — Policy authority",
     r"^## HARD NO list",
-    # §15 and §17 are partially frozen — only the principle paragraph; matrices/numbers REVIEWABLE.
-    # Proposer must check HTML markers <!-- IMMUTABILE --> for fine-grained guard.
+    # §15's `### Principio` subsection is IMMUTABILE inline (top-level §15 stays OPEN).
+    # The applier's HTML marker scan handles this; sync's H3-aware parser preserves
+    # the marker into the framework template (Phase 7).
 ]
 
 FROZEN_SECTIONS_IDENTITY = [
-    # In IDENTITY.md — fondante stabile
-    r"^## Ruolo",
-    r"^## Funzione operativa",
-    r"^## Posizionamento",
-    r"^## Stato AI",
-    r"^## Obiettivo gerarchico",
-    r"^## Principio supremo",
-    r"^## Riservatezza ruolo",                        # in USER.md actually but referenced
+    # In IDENTITY.md — foundational sections that the agent must not autonomously rewrite.
+    r"^## Ruolo",                                     # role (Italian)
+    r"^## Role",                                      # English
+    r"^## Funzione operativa",                        # operative function (Italian)
+    r"^## Operative function",                        # English
+    r"^## Posizionamento",                            # positioning (Italian)
+    r"^## Positioning",                               # English
+    r"^## Stato AI",                                  # AI status (Italian)
+    r"^## AI Status",                                 # English
+    r"^## Auto-narrazione",                           # added Phase 7 — self-narration ban (Italian)
+    r"^## Self-narration",                            # English
+    r"^## Test della frase",                          # added Phase 7 — sentence test (Italian)
+    r"^## Sentence test",                             # English
+    r"^## Obiettivo gerarchico",                      # hierarchical objective (Italian)
+    r"^## Hierarchical objective",                    # English
+    r"^## Principio supremo",                         # supreme principle (Italian)
+    r"^## Supreme principle",                         # English
+    r"^## CONTINUITY",                                # added Phase 7
+    r"^## Continuity",                                # English (case variant)
+    r"^## Character",                                 # added Phase 7 — public character section
+    r"^## Riservatezza ruolo",                        # in USER.md but listed here for the protector
 ]
 
 FROZEN_FILES = {

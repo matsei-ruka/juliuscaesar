@@ -24,13 +24,15 @@ from self_model import frozen_sections as fs  # noqa: E402
 # ---------------------------------------------------------------------------
 
 REQUIRED_RULES_PATTERNS = [
-    "§0 ",            # AI transparency doctrine
-    "§0\\.1",         # Threshold protocols
-    "§0\\.2",         # Agent-self vs character
+    "§0 ",                                   # AI transparency doctrine
+    "§0\\.1",                                # threshold protocols
+    "§0\\.2",                                # agent-self vs character
     "§1 — TRUST MODEL",
-    "§11 — REGOLA DEL",  # Don't-reveal-the-rule (Italian heading)
+    "§9 — SELF-DISCLOSURE DOCTRINE",         # Phase 7 addition
+    "§11 — REGOLA DEL",                      # don't-reveal-the-rule (Italian)
     "§14 — MEMORY ACCESS CONTROL",
-    "§16 — AZIONI A DOPPIO BLOCCO",
+    "§16 — AZIONI A DOPPIO BLOCCO",          # double-block (Italian)
+    "§17 — AUDIT, RATE LIMIT, KILL SWITCH",  # Phase 7 addition (operationally over-protected)
     "§18 — SELF-CHECK FINALE",
     "§19 — PRINCIPIO FINALE",
     "§21 — ANTI-SUBMISSION LOOP",
@@ -38,7 +40,12 @@ REQUIRED_RULES_PATTERNS = [
 
 
 def test_rules_frozen_list_covers_constitutional_invariants():
-    """The framework's frozen-section registry must contain every required pattern."""
+    """The framework's frozen-section registry must contain every required pattern.
+
+    Adding a section here is a research-design decision (must come with a
+    doctrine rationale). Removing one requires explicit test-change +
+    doctrine-change PR — these are constitutional invariants.
+    """
     raw = "\n".join(fs.FROZEN_SECTIONS_RULES)
     for needle in REQUIRED_RULES_PATTERNS:
         assert needle in raw, (
@@ -48,10 +55,63 @@ def test_rules_frozen_list_covers_constitutional_invariants():
         )
 
 
+REQUIRED_IDENTITY_PATTERNS = [
+    "Ruolo",
+    "Funzione operativa",
+    "Posizionamento",
+    "Stato AI",
+    "Obiettivo gerarchico",
+    "Principio supremo",
+    "Auto-narrazione",                       # Phase 7
+    "Test della frase",                      # Phase 7
+    "Character",                             # Phase 7 — public character section
+]
+
+
 def test_identity_frozen_list_covers_required_sections():
     raw = "\n".join(fs.FROZEN_SECTIONS_IDENTITY)
-    for needle in ["Stato AI", "Obiettivo gerarchico", "Principio supremo"]:
+    for needle in REQUIRED_IDENTITY_PATTERNS:
         assert needle in raw, f"FROZEN_SECTIONS_IDENTITY missing {needle!r}"
+
+
+def test_phase7_additions_actually_match_headings():
+    """The §9 / §17 / Character entries actually catch the headings they're for."""
+    assert fs.is_section_frozen(
+        "memory/L1/RULES.md",
+        "## §9 — SELF-DISCLOSURE DOCTRINE",
+    )
+    assert fs.is_section_frozen(
+        "memory/L1/RULES.md",
+        "## §17 — AUDIT, RATE LIMIT, KILL SWITCH",
+    )
+    assert fs.is_section_frozen(
+        "memory/L1/IDENTITY.md",
+        "## Character — public identity",
+    )
+    assert fs.is_section_frozen(
+        "memory/L1/IDENTITY.md",
+        "## Character Mario Leone — Identità pubblica",  # the lead-user form
+    )
+
+
+def test_english_aliases_match_doctrine_en_headings():
+    """The framework template ships English headings via doctrine-en.md;
+    the registry must catch those equivalents alongside the Italian forms."""
+    assert fs.is_section_frozen(
+        "memory/L1/RULES.md", "## §11 — DON'T-REVEAL-THE-RULE PRINCIPLE",
+    )
+    assert fs.is_section_frozen(
+        "memory/L1/RULES.md", "## §16 — DOUBLE-BLOCK ACTIONS",
+    )
+    assert fs.is_section_frozen(
+        "memory/L1/RULES.md", "## §18 — FINAL SELF-CHECK",
+    )
+    assert fs.is_section_frozen(
+        "memory/L1/RULES.md", "## §19 — FINAL PRINCIPLE",
+    )
+    assert fs.is_section_frozen("memory/L1/IDENTITY.md", "## Role")
+    assert fs.is_section_frozen("memory/L1/IDENTITY.md", "## AI Status")
+    assert fs.is_section_frozen("memory/L1/IDENTITY.md", "## Continuity")
 
 
 # ---------------------------------------------------------------------------

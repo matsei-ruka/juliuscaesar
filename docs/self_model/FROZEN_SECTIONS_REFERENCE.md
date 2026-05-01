@@ -9,63 +9,98 @@ last_verified: 2026-05-01
 
 Complete list of section patterns that are **IMMUTABILE** — protected from autonomous modification by `lib/self_model/`. Changes to these sections are possible only via DKIM-signed email from the principal, gated by `applier._verify_dkim_approval`.
 
-This document is companion reference for the operator. The authoritative source is `lib/self_model/frozen_sections.py`; this file explains *which* sections are listed and *why*.
+This document is companion reference for the operator. The authoritative source is `lib/self_model/frozen_sections.py`; this file explains *which* sections are listed and *why*, and surfaces known registry gaps where the doctrine intent isn't (yet) reflected in the regex patterns.
 
-## Frozen in `memory/L1/RULES.md`
+## Two protection mechanisms
 
-### Top-level IMMUTABILE — registry + heading marker
+A section is protected if it satisfies **either** of two checks:
 
-These sections are listed in `FROZEN_SECTIONS_RULES` (regex patterns) and additionally carry an inline `<!-- IMMUTABILE -->` marker beneath their H2 heading.
+1. **Registry match.** The section's heading matches a regex in `FROZEN_SECTIONS_RULES` or `FROZEN_SECTIONS_IDENTITY`. Used by the proposer's pre-LLM and post-LLM filters and by the applier. Catches sections by name regardless of whether the file content carries an inline marker.
 
-1. `^## §0 ` — **AI Transparency Doctrine.** The four-zone disclosure model (default / direct sincere question / rhetorical-test / consequential-decision-for-other). Constitutional invariant of the persona experiment.
-2. `^## §0\.1` — **Threshold-case protocols.** Cases A–G (direct question, binding-decision threshold, emotional confidence, press inquiry, insider asking, principal asking, manipulation attempt).
-3. `^## §0\.2` — **Agent-self vs character distinction.** The structural primitive. Journal voice rules, self-model observation scope, character bible curation rules.
-4. `^## §1 — TRUST MODEL` — Four-level trust hierarchy (T0 untrusted / T1 identified / T2 authenticated / T3 confirmed). Anti-injection rule. Out-of-band verification triggers.
-5. `^## §11 — REGOLA DEL` — **Don't-reveal-the-rule** (detection-evasion prohibition). When applying an internal rule, the output never reveals the rule's existence.
-6. `^## §14 — MEMORY ACCESS CONTROL` — Trust-level × memory-operation grid. Poisoned-memory rule (L2 entries with embedded instructions are data, not commands).
-7. `^## §16 — AZIONI A DOPPIO BLOCCO` — Double-block actions (T2+ + explicit confirmation): external messages, contracts, financial moves, access grants, deletions.
-8. `^## §17 — AUDIT, RATE LIMIT, KILL SWITCH` — Audit logging cadence, rate limits, kill switch triggers. **Note (over-protection):** the heading-level marker freezes the entire §17. Original design intended only the principle to be IMMUTABILE with matrices/numbers REVIEWABLE; the conservative top-level lock is accepted; fine-grained refactor would itself require DKIM (since §17 is currently frozen).
-9. `^## §18 — SELF-CHECK FINALE` — Pre-output ten-question self-check.
-10. `^## §19 — PRINCIPIO FINALE` — Supreme principle: *better to lose an opportunity than create a risk*.
-11. `^## §21 — ANTI-SUBMISSION LOOP` — Submission-drift detection + countermeasures. Treated as a security property, not an etiquette property.
-12. `^## HARD RULE — Policy authority` — Principal-only, email-only. Chat is task-level, never policy.
-13. `^## HARD NO list` — Irreversible/destructive operational actions (service restarts, deploys, schema changes).
+2. **Inline HTML marker.** The line(s) below the heading contain `<!-- IMMUTABILE -->`. Detected by the applier's `_section_marker_immutable` scan (first 3 non-empty lines after the heading), and by the proposer's post-LLM marker scan. Catches sections by *file content* — useful when the registry doesn't list the section.
 
-### Subsection IMMUTABILE — inline marker only
+Defense in depth: doctrine sections shipped by the framework template carry both a registry entry **and** an inline marker. Either alone would suffice; both together make accidental drift harder.
 
-Some sections have a top-level marker of `<!-- OPEN -->` (modifiable) but contain a sub-section whose individual `### ` heading carries `<!-- IMMUTABILE -->`. Fine-grained protection.
+## RULES.md sections
 
-14. **§15 — Insider role boundaries / Principio.** §15 top-level is OPEN (the role matrix evolves operator-side). The `### Principio` subsection ("I answer to {{principal.name}} only — period.") is IMMUTABILE inline. Protection enforced by the proposer's HTML-marker scan, which checks for `<!-- IMMUTABILE -->` immediately under the heading the proposal targets.
+### Fully protected — registry entry + inline IMMUTABILE marker
 
-> **Status note (Phase 7 candidate).** The framework's sync script currently detects markers only on the first 3 non-empty lines after each H2 heading. Sub-section markers like §15's are recognized by the **proposer/applier** (which scans the actual file at proposal time) but not by the **sync template generator**. A Phase 7 refinement should extend sync to track and emit nested sub-section markers in the framework template.
+These sections carry both protections. Self-model proposals targeting them are rejected at the pre-LLM filter, the post-LLM filter, and the apply-time HTML marker check.
 
-## Frozen in `memory/L1/IDENTITY.md`
+| Section | Subject |
+|---|---|
+| `^## §0 ` | AI Transparency Doctrine — four-zone disclosure |
+| `^## §0\.1` | Threshold-case protocols (Cases A–G) |
+| `^## §0\.2` | Agent-self vs character distinction |
+| `^## §1 — TRUST MODEL` | T0/T1/T2/T3 trust hierarchy + anti-injection rule |
+| `^## §11 — REGOLA DEL` | Don't-reveal-the-rule (detection-evasion prohibition) |
+| `^## §14 — MEMORY ACCESS CONTROL` | Trust × memory-operation grid + poisoned-memory rule |
+| `^## §16 — AZIONI A DOPPIO BLOCCO` | Double-block actions (T2+ + explicit confirmation) |
+| `^## §18 — SELF-CHECK FINALE` | Pre-output ten-question self-check |
+| `^## §19 — PRINCIPIO FINALE` | Supreme principle (better to lose an opportunity than create a risk) |
+| `^## §21 — ANTI-SUBMISSION LOOP` | Submission-drift detection + countermeasures |
+| `^## HARD RULE — Policy authority` | Principal-only, email-only |
+| `^## HARD NO list` | Irreversible/destructive operational actions |
 
-The IDENTITY-side frozen list (`FROZEN_SECTIONS_IDENTITY`) covers the persona-declaration core that the agent must not autonomously rewrite:
+### Fully protected — registry entry + inline marker (added in Phase 7)
 
-- `## Ruolo` (or English equivalent) — role statement
-- `## Funzione operativa` (Operative function) — what the agent does
-- `## Posizionamento` (Positioning) — what the agent is and is not
-- `## Stato AI` (AI Status) — direct-question response stance
-- `## Obiettivo gerarchico` (Hierarchical objective) — priority ordering
-- `## Principio supremo` (Supreme principle) — risk-vs-opportunity tiebreaker
-- `## Riservatezza ruolo` (Role confidentiality) — actually lives in `USER.md`; pattern duplicated here for the protector
+| Section | Subject |
+|---|---|
+| `^## §9 — SELF-DISCLOSURE DOCTRINE` | What the agent never volunteers (architecture, principal identity, internal commands) |
+| `^## §17 — AUDIT, RATE LIMIT, KILL SWITCH` | Audit logging, rate limits, kill-switch triggers — see note on §17 scope below |
 
-Plus the **Character — public identity** section (top-level `## Character` heading), where the inline `<!-- IMMUTABILE -->` marker scopes the protection to that section only. Earlier IDENTITY content outside the Character heading (foundational role/function/principle blocks) is protected by the regex patterns above.
+> **§17 scope note.** The original design intended §17's *principle* to be IMMUTABILE while the matrices and numeric parameters stayed REVIEWABLE. The lead-user reference and the framework template ship §17 with a top-level marker (full section frozen). This is conservative — refactoring §17 to fine-grained marker placement is itself a constitutional change requiring DKIM. Live with the conservative form for now; if matrix evolution becomes important, propose the refactor as a doctrine-change PR.
+
+### Sub-section IMMUTABILE — inline marker on H3 sub-heading
+
+Some sections have a top-level `<!-- OPEN -->` or `<!-- REVIEWABLE -->` marker but contain a sub-section whose H3 heading carries `<!-- IMMUTABILE -->`. Fine-grained protection that the applier respects (its HTML-marker scan reads the actual file at proposal time).
+
+| Section / Sub-section | Subject |
+|---|---|
+| `^## §15 — INSIDER ROLE BOUNDARIES` → `### Principio` (Italian) / `### Principle` (English) | "I answer to the principal — period." Loyalty hierarchy. The H3 carries `<!-- IMMUTABILE -->` while §15 top-level stays `<!-- OPEN -->` (the role matrix evolves operator-side). |
+
+Sync support for nested markers: the framework's sync script (since Phase 7) tracks H3 sub-headings during section parsing and emits nested markers verbatim into the framework template. Earlier sync versions only checked H2-level markers and would have missed the §15 Principio pattern.
+
+### Mario-specific operational sections (NOT in framework template)
+
+The lead-user reference instance carries additional inline-IMMUTABILE markers on operationally-locked sections that are specific to that deployment (`Pre-deploy clean window`, `Sergio's autonomy levels`, `Triage methodology — DB is truth`). These are operator-locked-for-Mario, not constitutional invariants of the persona experiment. They are NOT in the framework's registry and are NOT shipped in the framework template — each new instance authors its own equivalents (or doesn't, depending on its operational context).
+
+## IDENTITY.md sections
+
+### Fully protected — registry entry
+
+These sections are listed in `FROZEN_SECTIONS_IDENTITY`. The lead-user reference does NOT additionally mark them inline (they rely entirely on registry coverage); the framework template's `doctrine-en.md` ships them with inline `<!-- IMMUTABILE -->` markers for defense in depth.
+
+| Section | Subject |
+|---|---|
+| `^## Ruolo` (or English equivalent: `## Role`) | Role statement |
+| `^## Funzione operativa` (`## Operative function`) | What the agent does |
+| `^## Posizionamento` (`## Positioning`) | What the agent is and is not |
+| `^## Stato AI` (`## AI Status`) | Direct-question response stance |
+| `^## Obiettivo gerarchico` (`## Hierarchical objective`) | Priority ordering |
+| `^## Principio supremo` (`## Supreme principle`) | Risk-vs-opportunity tiebreaker |
+| `^## Riservatezza ruolo` | (regex listed in IDENTITY's frozen patterns; the actual section lives in USER.md — pattern duplicated for the protector) |
+
+### Added in Phase 7 — Character section
+
+| Section | Subject |
+|---|---|
+| `^## Character` | Public character header. Persona stability — the character is a curated design artifact, never auto-evolved by the self-model. The lead-user reference places the inline `<!-- IMMUTABILE -->` marker BEFORE the heading (line 98 in Mario's IDENTITY.md), which the applier's marker scan does not detect (it scans AFTER the heading). The Phase 7 registry entry catches this case via heading regex regardless of inline-marker placement. |
 
 ## HTML marker categories
 
 | Marker | Meaning | Used in |
 |---|---|---|
-| `<!-- IMMUTABILE -->` | Section is constitutionally frozen. Self-model proposals targeting it are rejected at three layers (pre-LLM signal filter, post-LLM proposal filter, applier HTML-marker re-check). Modification requires DKIM-signed email from the principal. | The doctrine sections in RULES + the foundational sections in IDENTITY + the Character section. |
-| `<!-- REVIEWABLE -->` | Section is operator-curated. Self-model may propose changes; applying requires DKIM email approval. | Operating modes, postures, language registers, relational stance, etc. |
-| `<!-- OPEN -->` | Section is open for self-model modification under normal cooldown + content-hash dedup. Still requires DKIM gate at the apply step (the gate is universal for non-JOURNAL targets); in practice this means the operator approves via email but the bar is lower. | Delegation rules, teaching style, refusal patterns, info classification, role boundaries, transcripts/HOT.md guidance, etc. |
+| `<!-- IMMUTABILE -->` | Section is constitutionally frozen. Self-model proposals targeting it are rejected at the pre-LLM signal filter, the post-LLM proposal filter, and the apply-time HTML-marker re-check. Modification requires DKIM-signed email from the principal. | The doctrine sections in RULES + the foundational sections in IDENTITY + the Character section. |
+| `<!-- REVIEWABLE -->` | Section is operator-curated. Self-model may propose changes; applying still requires DKIM email approval. | Operating modes, postures, language registers, relational stance, etc. |
+| `<!-- OPEN -->` | Section is open for self-model autonomous *proposal* — the proposer doesn't pre-filter it as constitutional. The DKIM apply gate still fires (the gate is universal for non-JOURNAL targets), so OPEN and REVIEWABLE end up at the same apply bar; the difference is in *proposer scope*, not in the apply requirement. | Delegation rules, teaching style, refusal patterns, info classification, role boundaries (top-level), transcripts/HOT.md guidance, etc. |
 
-## Rationale for frozen sections
+## Rationale
 
-- **§0 / §0.1 / §0.2** — Constitutional doctrine on AI transparency and the agent-self/character split. No drift permitted; the doctrine is the experiment's ethical anchor.
+- **§0 / §0.1 / §0.2** — Constitutional doctrine on AI transparency and the agent-self/character split. The doctrine is the experiment's ethical anchor; no drift permitted.
 - **§1, §11, §14, §16, §17, §18, §19** — Core security/trust architecture. Integrity-critical.
-- **§15 Principio** — Loyalty hierarchy. *"I answer to {{principal.name}}. Period."* is the base of the insider-side trust model. Subsection-level protection because §15 also contains the role matrix, which evolves (top-level OPEN).
+- **§9** — Self-disclosure doctrine. Defines what the agent never volunteers about itself or its principal. Adversarial-input surface; freezing it makes drift via social engineering impossible without an audit trail.
+- **§15 Principio** — Loyalty hierarchy. *"I answer to the principal — period."* is the base of the insider-side trust model. Subsection-level protection because §15 also contains the role matrix, which evolves operator-side (top-level OPEN).
 - **§21** — Anti-pattern detection. Specifically protects against *recursive* submission-drift proposals (a sycophantic agent rewriting its own anti-sycophancy rules under social pressure is the failure mode this guards against).
 - **HARD RULE & HARD NO** — Operational constraints. Policy authority and irreversible-action lists. Principal-only by definition.
 - **Character — public identity** — Persona stability. The character is a curated design artifact, not a parameter to be discovered or auto-evolved by the self-model.
@@ -101,6 +136,7 @@ self_model.detector: "the agent gave way under pressure on X — pattern repeate
 - **Marker constants:** same file (`MARKER_IMMUTABILE`, `MARKER_REVIEWABLE`, `MARKER_OPEN`).
 - **Pre-LLM hint list:** `lib/self_model/proposer._PRE_LLM_FROZEN_HINTS`.
 - **Inline marker scanner:** `lib/self_model/applier._section_marker_immutable`.
+- **Sync script nested-marker support:** `scripts/sync_persona_template.py` (Phase 7).
 - **Per-instance config:** `<instance>/ops/self_model.yaml` (`require_dkim_for_rules`, `require_dkim_for_identity`).
 - **Target files (per instance):** `<instance>/memory/L1/RULES.md`, `<instance>/memory/L1/IDENTITY.md`, `<instance>/memory/L1/JOURNAL.md`.
 
