@@ -18,6 +18,7 @@
 #   init         Scaffold a new instance from templates.
 #   setup        Guided first-run configurator.
 #   update       Check and apply framework updates.
+#   completion   Print shell completion scripts.
 #
 # All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
 
@@ -47,6 +48,7 @@ Subcommands:
   update       Check and apply framework updates (jc-update).
   upgrade      Reconfigure an existing instance (channels, brain, triage).
   doctor       Diagnose the instance + environment.
+  completion   Print shell completion scripts (bash/zsh).
   codex-auth   Inspect / refresh the local Codex CLI's OAuth state (jc-codex-auth).
   migrate-to-0.3  Bootstrap an existing 0.2.x instance for the unified gateway.
 
@@ -101,7 +103,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3)
+    memory|heartbeat|voice|watchdog|workers|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3|completion)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

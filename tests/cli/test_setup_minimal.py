@@ -24,6 +24,14 @@ SETUP_BIN = REPO_ROOT / "bin" / "jc-setup"
 
 def _run_setup(target: Path, *args: str, stdin: str | None = None, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    env.update(
+        {
+            "JC_SETUP_ASSUME_BRAINS": "claude",
+            "JC_SETUP_SKIP_AI_PROMPT": "1",
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "TELEGRAM_CHAT_ID": "12345",
+        }
+    )
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -53,7 +61,7 @@ def _read_env(target: Path) -> dict[str, str]:
 def fresh_instance(tmp_path: Path) -> Path:
     """Fresh instance after a successful initial setup."""
     target = tmp_path / "instance"
-    result = _run_setup(target, "--defaults", "--no-start", "--no-watchdog")
+    result = _run_setup(target, "--defaults", "--no-start", "--no-watchdog", "--no-wait")
     assert result.returncode == 0, result.stderr
     return target
 
@@ -63,7 +71,7 @@ def test_setup_skips_existing_l1(fresh_instance: Path) -> None:
     identity = fresh_instance / "memory" / "L1" / "IDENTITY.md"
     identity.write_text(custom, encoding="utf-8")
 
-    result = _run_setup(fresh_instance, "--defaults", "--no-start", "--no-watchdog")
+    result = _run_setup(fresh_instance, "--defaults", "--no-start", "--no-watchdog", "--no-wait")
     assert result.returncode == 0, result.stderr
     assert identity.read_text(encoding="utf-8") == custom
 
@@ -73,13 +81,13 @@ def test_setup_force_overwrites_l1(fresh_instance: Path) -> None:
     identity = fresh_instance / "memory" / "L1" / "IDENTITY.md"
     identity.write_text(custom, encoding="utf-8")
 
-    result = _run_setup(fresh_instance, "--defaults", "--force", "--no-start", "--no-watchdog")
+    result = _run_setup(fresh_instance, "--defaults", "--force", "--no-start", "--no-watchdog", "--no-wait")
     assert result.returncode == 0, result.stderr
 
     after = identity.read_text(encoding="utf-8")
     assert after != custom
     assert "slug: IDENTITY" in after
-    assert "is a JuliusCaesar assistant." in after
+    assert "Bootstrap in progress" in after
 
 
 def test_setup_preserves_env_secrets(fresh_instance: Path) -> None:
@@ -93,7 +101,7 @@ def test_setup_preserves_env_secrets(fresh_instance: Path) -> None:
         encoding="utf-8",
     )
 
-    result = _run_setup(fresh_instance, "--defaults", "--no-start", "--no-watchdog")
+    result = _run_setup(fresh_instance, "--defaults", "--no-start", "--no-watchdog", "--no-wait")
     assert result.returncode == 0, result.stderr
 
     env = _read_env(fresh_instance)
@@ -107,7 +115,7 @@ def test_setup_no_mission_prompt(tmp_path: Path) -> None:
     # Plenty of empty newlines to satisfy any remaining prompts; --no-start /
     # --no-watchdog skip the trailing yes/no questions.
     stdin = "\n" * 30
-    result = _run_setup(target, "--no-start", "--no-watchdog", stdin=stdin)
+    result = _run_setup(target, "--no-start", "--no-watchdog", "--no-wait", stdin=stdin)
     assert result.returncode == 0, result.stderr
 
     combined = (result.stderr + result.stdout).lower()
@@ -130,7 +138,7 @@ def test_setup_idempotent(fresh_instance: Path) -> None:
         "gateway": gateway.read_text(encoding="utf-8"),
     }
 
-    result = _run_setup(fresh_instance, "--defaults", "--no-start", "--no-watchdog")
+    result = _run_setup(fresh_instance, "--defaults", "--no-start", "--no-watchdog", "--no-wait")
     assert result.returncode == 0, result.stderr
 
     assert (l1 / "IDENTITY.md").read_text(encoding="utf-8") == snapshot["identity"]

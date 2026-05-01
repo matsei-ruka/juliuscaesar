@@ -1,464 +1,512 @@
-#!/usr/bin/env bash
-# jc-setup - guided first-run configurator for a JuliusCaesar instance.
-#
-# Usage:
-#   jc-setup [<path>] [--defaults] [--force] [--start] [--install-watchdog]
-#
-# Asks only the determinant questions: assistant name, user name, timezone,
-# default brain, and five optional secrets. Existing L1 memory and watchdog
-# config are preserved unless --force is passed (or the operator opts in at
-# the prompt on an existing instance). Existing .env secret values are
-# preserved when the operator hits Enter on a secret prompt.
+#!/usr/bin/env python3
+"""Guided first-run setup for a JuliusCaesar instance."""
 
-set -euo pipefail
+from __future__ import annotations
 
-FRAMEWORK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
-JC_INIT="$FRAMEWORK_ROOT/bin/jc-init"
-JC_MEMORY="$FRAMEWORK_ROOT/bin/jc-memory"
-JC_DOCTOR="$FRAMEWORK_ROOT/bin/jc-doctor"
-JC_WATCHDOG="$FRAMEWORK_ROOT/bin/jc-watchdog"
-JC_GATEWAY="$FRAMEWORK_ROOT/bin/jc-gateway"
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-USE_DEFAULTS=0
-FORCE=0
-START_LIVE=""
-INSTALL_WATCHDOG=""
-TARGET=""
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+LIB = ROOT / "lib"
+if str(LIB) not in sys.path:
+    sys.path.insert(0, str(LIB))
 
-usage() {
-    cat <<'EOF'
-jc-setup - guided first-run configurator
+from gateway.config import render_default_config  # type: ignore  # noqa: E402
+from gateway.config_writer import atomic_write_text  # type: ignore  # noqa: E402
 
-Usage:
-  jc setup [<path>] [--defaults] [--force] [--start] [--no-start] [--install-watchdog] [--no-watchdog]
 
-Options:
-  --defaults            Use safe defaults and do not prompt.
-  --force               Overwrite existing L1 memory and watchdog config.
-  --start               Start the gateway daemon after setup.
-  --no-start            Do not start a live session.
-  --install-watchdog    Install watchdog cron entries after setup.
-  --no-watchdog         Do not install watchdog cron entries.
-EOF
-}
+SUPPORTED_BRAINS = ("claude", "codex", "gemini", "opencode", "aider")
+ENV_KEYS = (
+    "DASHSCOPE_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "SLACK_APP_TOKEN",
+    "SLACK_BOT_TOKEN",
+)
 
-while (( $# )); do
-    case "$1" in
-        -h|--help|help) usage; exit 0 ;;
-        --defaults) USE_DEFAULTS=1; shift ;;
-        --force) FORCE=1; shift ;;
-        --start) START_LIVE=yes; shift ;;
-        --no-start) START_LIVE=no; shift ;;
-        --install-watchdog) INSTALL_WATCHDOG=yes; shift ;;
-        --no-watchdog) INSTALL_WATCHDOG=no; shift ;;
-        --*) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
-        *)
-            if [[ -n "$TARGET" ]]; then
-                echo "Unexpected extra argument: $1" >&2
-                usage >&2
-                exit 2
-            fi
-            TARGET="$1"
-            shift
-            ;;
-    esac
-done
 
-TARGET="${TARGET:-$(pwd)}"
-mkdir -p "$TARGET"
-TARGET="$(cd "$TARGET" && pwd)"
+@dataclass(frozen=True)
+class BrainCandidate:
+    name: str
+    command: str
+    installed: bool
+    logged_in: bool
+    detail: str
 
-prompt() {
-    local label="$1"
-    local default="${2:-}"
-    local value
-    if [[ "$USE_DEFAULTS" == 1 ]]; then
-        printf '%s\n' "$default"
-        return 0
-    fi
-    if [[ -n "$default" ]]; then
-        printf '%s [%s]: ' "$label" "$default" >&2
-    else
-        printf '%s: ' "$label" >&2
-    fi
-    IFS= read -r value || value=""
-    if [[ -z "$value" ]]; then
-        printf '%s\n' "$default"
-    else
-        printf '%s\n' "$value"
-    fi
-}
+    @property
+    def ready(self) -> bool:
+        return self.installed and self.logged_in
 
-secret_prompt() {
-    local label="$1"
-    local default="${2:-}"
-    local value
-    if [[ "$USE_DEFAULTS" == 1 ]]; then
-        printf '%s\n' "$default"
-        return 0
-    fi
-    if [[ -n "$default" ]]; then
-        printf '%s [keep existing]: ' "$label" >&2
-    else
-        printf '%s: ' "$label" >&2
-    fi
-    IFS= read -rs value || value=""
-    printf '\n' >&2
-    if [[ -z "$value" ]]; then
-        printf '%s\n' "$default"
-    else
-        printf '%s\n' "$value"
-    fi
-}
 
-yesno() {
-    local label="$1"
-    local default="${2:-no}"
-    local value
-    if [[ "$USE_DEFAULTS" == 1 ]]; then
-        printf '%s\n' "$default"
-        return 0
-    fi
-    while :; do
-        printf '%s [%s]: ' "$label" "$default" >&2
-        IFS= read -r value || value=""
-        value="${value:-$default}"
-        case "$value" in
-            y|Y|yes|YES|Yes) printf 'yes\n'; return 0 ;;
-            n|N|no|NO|No) printf 'no\n'; return 0 ;;
-            *) echo "Please answer yes or no." >&2 ;;
-        esac
-    done
-}
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="jc-setup",
+        description="Configure a JC instance: brain, first channel, first verified chat.",
+    )
+    parser.add_argument("path", nargs="?", default=".", help="instance directory")
+    parser.add_argument("--defaults", action="store_true", help="non-interactive defaults")
+    parser.add_argument("--force", action="store_true", help="overwrite generated bootstrap files")
+    parser.add_argument("--start", action="store_true", help="start gateway daemon after setup")
+    parser.add_argument("--no-start", action="store_true", help="do not start gateway daemon")
+    parser.add_argument("--install-watchdog", action="store_true", help="install watchdog cron entries")
+    parser.add_argument("--no-watchdog", action="store_true", help="do not install watchdog cron entries")
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="configure without waiting for the first Telegram message",
+    )
+    parser.add_argument(
+        "--channel",
+        default="telegram",
+        choices=["telegram"],
+        help="first communication channel; currently telegram",
+    )
+    return parser.parse_args(argv)
 
-trim_value() {
-    local value="$1"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    if [[ "$value" == \'* && "$value" == *\' ]]; then
-        value="${value:1:${#value}-2}"
-    elif [[ "$value" == \"* && "$value" == *\" ]]; then
-        value="${value:1:${#value}-2}"
-    fi
-    printf '%s\n' "$value"
-}
 
-env_value() {
-    local key="$1"
-    local file="$TARGET/.env"
-    [[ -f "$file" ]] || return 0
-    local raw
-    raw=$(awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file")
-    trim_value "$raw"
-}
+def run(cmd: list[str], *, input_text: str | None = None, timeout: int = 15) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
 
-shell_quote() {
-    local value="$1"
-    printf "'"
-    printf '%s' "$value" | sed "s/'/'\\\\''/g"
-    printf "'"
-}
 
-write_env() {
-    # Args: dashscope, telegram_token, telegram_chat, slack_app_token, slack_bot_token.
-    # Empty arg + existing .env value -> preserve existing (defensive; the prompt
-    # layer already returns the existing value when the user hits Enter, but this
-    # makes write_env safe to call with empty strings from any caller).
-    local dashscope="$1"
-    local telegram_token="$2"
-    local telegram_chat="$3"
-    local slack_app_token="$4"
-    local slack_bot_token="$5"
-    local key value existing tmp old_umask
-    old_umask=$(umask)
-    umask 077
-    tmp=$(mktemp "$TARGET/.env.tmp.XXXXXX")
-    {
-        printf '%s\n' "# JuliusCaesar instance secrets. Do not commit."
-        for key in DASHSCOPE_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SLACK_APP_TOKEN SLACK_BOT_TOKEN; do
-            case "$key" in
-                DASHSCOPE_API_KEY) value="$dashscope" ;;
-                TELEGRAM_BOT_TOKEN) value="$telegram_token" ;;
-                TELEGRAM_CHAT_ID) value="$telegram_chat" ;;
-                SLACK_APP_TOKEN) value="$slack_app_token" ;;
-                SLACK_BOT_TOKEN) value="$slack_bot_token" ;;
-            esac
-            if [[ -z "$value" && -f "$TARGET/.env" ]]; then
-                existing="$(env_value "$key")"
-                value="$existing"
-            fi
-            printf '%s=%s\n' "$key" "$(shell_quote "$value")"
-        done
-    } > "$tmp"
-    umask "$old_umask"
-    mv "$tmp" "$TARGET/.env"
-    chmod 600 "$TARGET/.env"
-}
+def prompt(label: str, default: str = "", *, secret: bool = False, defaults: bool = False) -> str:
+    if defaults:
+        return default
+    suffix = " [keep existing]" if secret and default else (f" [{default}]" if default else "")
+    if secret:
+        import getpass
 
-write_identity_scaffold() {
-    local path="$1" today="$2" assistant_name="$3"
-    cat > "$path" <<EOF
----
+        if sys.stdin.isatty():
+            value = getpass.getpass(f"{label}{suffix}: ")
+        else:
+            print(f"{label}{suffix}: ", end="", file=sys.stderr)
+            value = sys.stdin.readline()
+    else:
+        value = input(f"{label}{suffix}: ")
+    return value.strip() or default
+
+
+def yesno(label: str, default: str = "no", *, defaults: bool = False) -> bool:
+    if defaults:
+        return default.lower() in {"y", "yes", "true", "1"}
+    while True:
+        value = input(f"{label} [{default}]: ").strip().lower() or default.lower()
+        if value in {"y", "yes", "true", "1"}:
+            return True
+        if value in {"n", "no", "false", "0"}:
+            return False
+        print("Please answer yes or no.", file=sys.stderr)
+
+
+def init_instance(target: Path) -> bool:
+    target.mkdir(parents=True, exist_ok=True)
+    if (target / ".jc").exists():
+        print("==> Existing JC instance detected; configuring in place.")
+        return True
+    proc = run([str(ROOT / "bin" / "jc-init"), str(target)], timeout=60)
+    if proc.returncode != 0:
+        print(proc.stdout, end="")
+        print(proc.stderr, end="", file=sys.stderr)
+        raise SystemExit(proc.returncode)
+    print(proc.stdout, end="")
+    return False
+
+
+def read_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw = stripped.split("=", 1)
+        raw = raw.strip()
+        if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
+            raw = raw[1:-1]
+        values[key] = raw
+    for key in ENV_KEYS:
+        if not values.get(key) and os.environ.get(key):
+            values[key] = os.environ[key]
+    return values
+
+
+def shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def write_env(target: Path, updates: dict[str, str]) -> None:
+    current = read_env(target / ".env")
+    current.update({k: v for k, v in updates.items() if v is not None})
+    lines = ["# JuliusCaesar instance secrets. Do not commit."]
+    for key in ENV_KEYS:
+        lines.append(f"{key}={shell_quote(current.get(key, ''))}")
+    tmp = target / ".env.tmp"
+    old_umask = os.umask(0o077)
+    try:
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    finally:
+        os.umask(old_umask)
+    os.replace(tmp, target / ".env")
+    os.chmod(target / ".env", 0o600)
+
+
+def _probe(command: list[str]) -> tuple[bool, str]:
+    try:
+        proc = run(command, timeout=6)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    text = (proc.stdout or proc.stderr or "").strip().splitlines()
+    detail = text[0][:120] if text else f"exit {proc.returncode}"
+    return proc.returncode == 0, detail
+
+
+def detect_brain(name: str) -> BrainCandidate:
+    command = name
+    installed = shutil.which(command) is not None
+    if not installed:
+        return BrainCandidate(name, command, False, False, "not on PATH")
+    if name == "codex":
+        auth_file = Path.home() / ".codex" / "auth.json"
+        if auth_file.exists():
+            return BrainCandidate(name, command, True, True, "auth.json present")
+    probes = {
+        "claude": [["claude", "auth", "status"], ["claude", "whoami"], ["claude", "--version"]],
+        "codex": [["codex", "auth", "status"], ["codex", "--version"]],
+        "gemini": [["gemini", "auth", "status"], ["gemini", "--version"]],
+        "opencode": [["opencode", "auth", "status"], ["opencode", "--version"]],
+        "aider": [["aider", "--version"]],
+    }[name]
+    last = ""
+    for probe in probes:
+        ok, detail = _probe(probe)
+        last = detail
+        if ok:
+            return BrainCandidate(name, command, True, True, detail)
+    return BrainCandidate(name, command, True, False, last or "login probe failed")
+
+
+def detect_brains() -> list[BrainCandidate]:
+    override = os.environ.get("JC_SETUP_ASSUME_BRAINS", "").strip()
+    if override:
+        names = [n.strip() for n in override.split(",") if n.strip()]
+        return [
+            BrainCandidate(name, name, True, True, "assumed ready by JC_SETUP_ASSUME_BRAINS")
+            for name in names
+            if name in SUPPORTED_BRAINS
+        ]
+    return [detect_brain(name) for name in SUPPORTED_BRAINS]
+
+
+def choose_brain(candidates: list[BrainCandidate], *, defaults: bool) -> str:
+    ready = [c for c in candidates if c.ready]
+    print("\n==> Coding tools")
+    for candidate in candidates:
+        state = "ready" if candidate.ready else ("installed, not logged in" if candidate.installed else "missing")
+        print(f"  {candidate.name:<9} {state:<24} {candidate.detail}")
+    if not ready:
+        print("\nNo logged-in coding tool is available. Log in to Claude, Codex, Gemini, OpenCode, or Aider and rerun setup.", file=sys.stderr)
+        raise SystemExit(1)
+    if defaults or len(ready) == 1:
+        chosen = ready[0].name
+        print(f"Selected brain: {chosen}")
+        return chosen
+    while True:
+        value = input(f"Select brain [{ready[0].name}]: ").strip() or ready[0].name
+        if value in {c.name for c in ready}:
+            return value
+        print("Choose one of: " + ", ".join(c.name for c in ready), file=sys.stderr)
+
+
+def write_gateway_config(target: Path, brain: str, telegram_token: str, chat_id: str) -> None:
+    text = render_default_config(
+        default_brain=brain,
+        telegram_enabled=bool(telegram_token),
+        telegram_chat_id=chat_id,
+        slack_enabled=False,
+    )
+    path = target / "ops" / "gateway.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, text)
+
+
+def ensure_memory_bootstrap(target: Path, brain: str, *, force: bool) -> None:
+    l1 = target / "memory" / "L1"
+    l1.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    files = {
+        "IDENTITY.md": f"""---
 slug: IDENTITY
 title: Identity
 layer: L1
 type: identity
 state: draft
-created: $today
-updated: $today
-last_verified: "$today"
-tags: [identity]
+created: {today}
+updated: {today}
+last_verified: "{today}"
+tags: [identity, bootstrap]
 links: [USER, RULES]
 ---
 
-# Who this assistant is
+# Identity
 
-$assistant_name is a JuliusCaesar assistant.
+Bootstrap in progress. The selected brain is `{brain}`.
 
-## Mission
-
-TODO: Hand-write what this assistant exists to do.
-
-## Voice and style
-
-TODO: Hand-write voice and style preferences.
-EOF
-}
-
-write_user_scaffold() {
-    local path="$1" today="$2" user_name="$3" timezone="$4"
-    cat > "$path" <<EOF
----
+The assistant should interview the operator one question at a time, then help
+turn the answers into durable memory updates for IDENTITY, USER, RULES, and HOT.
+""",
+        "USER.md": f"""---
 slug: USER
 title: User profile
 layer: L1
 type: user
 state: draft
-created: $today
-updated: $today
-last_verified: "$today"
-tags: [user, profile]
+created: {today}
+updated: {today}
+last_verified: "{today}"
+tags: [user, bootstrap]
 links: [IDENTITY, RULES]
 ---
 
-# Who the assistant is helping
+# User profile
 
-- Name: $user_name
-- Timezone: $timezone
-
-TODO: Hand-write user details, preferences, standing rules.
-EOF
-}
-
-write_rules_scaffold() {
-    local path="$1" today="$2"
-    cat > "$path" <<EOF
----
+Bootstrap in progress. Ask the operator for their name, timezone, preferences,
+current work, and standing expectations.
+""",
+        "RULES.md": f"""---
 slug: RULES
 title: Standing Rules & Feedback
 layer: L1
 type: rules
 state: draft
-created: $today
-updated: $today
-last_verified: "$today"
-tags: [rules, feedback]
-links: [USER, IDENTITY]
+created: {today}
+updated: {today}
+last_verified: "{today}"
+tags: [rules, bootstrap]
+links: [IDENTITY, USER]
 ---
 
 # Standing rules
 
-TODO: Hand-write rules.
-EOF
-}
-
-write_hot_scaffold() {
-    local path="$1" today="$2"
-    cat > "$path" <<EOF
----
+Bootstrap in progress. Capture operator rules only after explicit confirmation.
+""",
+        "HOT.md": f"""---
 slug: HOT
-title: Hot Cache (last 7 days)
+title: Hot Cache
 layer: L1
 type: hot
 state: draft
-created: $today
-updated: $today
-last_verified: "$today"
-tags: [hot, recent, rolling]
+created: {today}
+updated: {today}
+last_verified: "{today}"
+tags: [hot, bootstrap]
 links: [IDENTITY, USER, RULES]
 ---
 
 # Hot cache
 
-(empty)
-EOF
-}
+Bootstrap just completed setup. First channel is Telegram.
+""",
+    }
+    for name, content in files.items():
+        path = l1 / name
+        if force or not path.exists():
+            path.write_text(content, encoding="utf-8")
 
-write_l1() {
-    local assistant_name="$1" user_name="$2" timezone="$3" overwrite="$4"
-    local today path
-    today="$(date +%F)"
-    mkdir -p "$TARGET/memory/L1"
 
-    path="$TARGET/memory/L1/IDENTITY.md"
-    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
-        write_identity_scaffold "$path" "$today" "$assistant_name"
-    fi
+def telegram_api(token: str, method: str, payload: dict[str, Any], *, timeout: int = 20) -> dict[str, Any]:
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    with urllib.request.urlopen(url, data=data, timeout=timeout) as response:  # noqa: S310
+        raw = response.read().decode("utf-8")
+    parsed = json.loads(raw)
+    if not parsed.get("ok"):
+        raise RuntimeError(parsed.get("description") or raw)
+    return parsed
 
-    path="$TARGET/memory/L1/USER.md"
-    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
-        write_user_scaffold "$path" "$today" "$user_name" "$timezone"
-    fi
 
-    path="$TARGET/memory/L1/RULES.md"
-    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
-        write_rules_scaffold "$path" "$today"
-    fi
-
-    path="$TARGET/memory/L1/HOT.md"
-    if [[ ! -f "$path" || "$overwrite" == yes ]]; then
-        write_hot_scaffold "$path" "$today"
-    fi
-}
-
-write_watchdog_conf() {
-    local assistant_name="$1" overwrite="$2"
-    local path="$TARGET/ops/watchdog.conf"
-    if [[ -f "$path" && "$overwrite" != yes ]]; then
+def latest_update_id(token: str) -> int:
+    try:
+        parsed = telegram_api(token, "getUpdates", {"timeout": 0, "limit": 1}, timeout=10)
+    except Exception:
         return 0
-    fi
-    local screen_name
-    screen_name="$(printf '%s' "$assistant_name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_' '-' | sed 's/^-//; s/-$//')"
-    screen_name="${screen_name:-jc-assistant}"
-    mkdir -p "$TARGET/ops"
-    cat > "$path" <<EOF
-# Watchdog configuration for this JuliusCaesar instance.
+    updates = parsed.get("result") or []
+    if not updates:
+        return 0
+    return int(updates[-1].get("update_id", 0))
 
-# Runtime mode: gateway is the default production runtime. Use "legacy-claude"
-# only when intentionally supervising a live Claude Telegram plugin session.
+
+def wait_for_first_telegram_message(token: str, *, timeout_seconds: int = 300) -> tuple[str, str]:
+    bot = telegram_api(token, "getMe", {}, timeout=10)["result"]
+    username = bot.get("username") or bot.get("first_name") or "your bot"
+    print(f"\nSend the first message to @{username}. Waiting for it now.")
+    offset = latest_update_id(token) + 1
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        parsed = telegram_api(
+            token,
+            "getUpdates",
+            {"timeout": 10, "limit": 10, "offset": offset, "allowed_updates": json.dumps(["message"])},
+            timeout=15,
+        )
+        for update in parsed.get("result") or []:
+            offset = int(update.get("update_id", offset)) + 1
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            if chat_id is not None:
+                text = str(message.get("text") or "").strip()
+                return str(chat_id), text
+    raise TimeoutError("timed out waiting for first Telegram message")
+
+
+def generate_first_question(brain: str) -> str:
+    prompt_text = (
+        "You are starting a guided onboarding conversation for a new "
+        "JuliusCaesar assistant. Ask exactly one friendly, high-value first "
+        "question that will help define the assistant identity. Keep it under "
+        "45 words."
+    )
+    if os.environ.get("JC_SETUP_SKIP_AI_PROMPT"):
+        return fallback_first_question()
+    commands = {
+        "claude": ["claude", "-p", prompt_text],
+        "gemini": ["gemini", prompt_text],
+        "opencode": ["opencode", "run", prompt_text],
+    }
+    cmd = commands.get(brain)
+    if cmd:
+        try:
+            proc = run(cmd, timeout=30)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip().splitlines()[0]
+        except Exception:
+            pass
+    return fallback_first_question()
+
+
+def fallback_first_question() -> str:
+    return (
+        "I’m ready to build this agent with you. First question: what should "
+        "this assistant be responsible for, and what would make it genuinely useful?"
+    )
+
+
+def send_telegram_message(token: str, chat_id: str, text: str) -> None:
+    telegram_api(token, "sendMessage", {"chat_id": chat_id, "text": text}, timeout=15)
+
+
+def write_watchdog_conf(target: Path, *, force: bool) -> None:
+    path = target / "ops" / "watchdog.conf"
+    if path.exists() and not force:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """# Watchdog configuration for this JuliusCaesar instance.
 RUNTIME_MODE=gateway
-
-# Legacy Claude fallback settings. Fill SESSION_ID only if using legacy-claude.
 SESSION_ID=
-
-# GNU screen session name.
-SCREEN_NAME=$screen_name
-
-# Extra args passed when watchdog starts Claude.
+SCREEN_NAME=jc-assistant
 CLAUDE_ARGS_EXTRA="--dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official"
-EOF
-}
+""",
+        encoding="utf-8",
+    )
 
-write_gateway_config() {
-    local default_brain="$1"
-    local telegram_enabled="$2"
-    local telegram_chat="$3"
-    local slack_enabled="$4"
-    PYTHONPATH="$FRAMEWORK_ROOT/lib" python3 - "$TARGET" "$default_brain" "$telegram_enabled" "$telegram_chat" "$slack_enabled" <<'PY'
-from pathlib import Path
-import sys
-from gateway.config import render_default_config
 
-target = Path(sys.argv[1])
-target.joinpath("ops").mkdir(parents=True, exist_ok=True)
-target.joinpath("ops", "gateway.yaml").write_text(
-    render_default_config(
-        default_brain=sys.argv[2],
-        telegram_enabled=sys.argv[3] == "yes",
-        telegram_chat_id=sys.argv[4],
-        slack_enabled=sys.argv[5] == "yes",
-    ),
-    encoding="utf-8",
-)
-PY
-}
+def rebuild_memory(target: Path) -> None:
+    proc = run([str(ROOT / "bin" / "jc-memory"), "--instance-dir", str(target), "rebuild"], timeout=60)
+    if proc.returncode != 0:
+        print(proc.stderr, file=sys.stderr)
+        raise SystemExit(proc.returncode)
 
-start_gateway() {
-    local assistant_name="$1"
-    "$JC_GATEWAY" --instance-dir "$TARGET" start
-    echo "Started gateway runtime for $assistant_name."
-}
 
-echo "==> JuliusCaesar guided setup"
-echo "Target: $TARGET"
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    target = Path(args.path).expanduser().resolve()
 
-WAS_EXISTING=0
-if [[ -f "$TARGET/.jc" ]]; then
-    WAS_EXISTING=1
-    echo "==> Existing JC instance detected; configuring in place."
-else
-    if ! "$JC_INIT" "$TARGET"; then
-        echo "jc setup: failed to initialize instance at $TARGET" >&2
-        exit 1
-    fi
-fi
+    if args.start and args.no_start:
+        raise SystemExit("--start conflicts with --no-start")
+    if args.install_watchdog and args.no_watchdog:
+        raise SystemExit("--install-watchdog conflicts with --no-watchdog")
 
-OVERWRITE=no
-if [[ "$FORCE" == 1 ]]; then
-    OVERWRITE=yes
-elif [[ "$WAS_EXISTING" == 1 && "$USE_DEFAULTS" != 1 ]]; then
-    OVERWRITE="$(yesno "Overwrite existing L1 memory and watchdog config?" "no")"
-fi
+    print("==> JuliusCaesar guided setup")
+    print(f"Target: {target}")
+    existing = init_instance(target)
 
-default_assistant="$(basename "$TARGET")"
-default_user="${USER:-user}"
-default_timezone="${TZ:-$(date +%Z 2>/dev/null || echo UTC)}"
+    candidates = detect_brains()
+    brain = choose_brain(candidates, defaults=args.defaults)
 
-assistant_name="$(prompt "Assistant name" "$default_assistant")"
-user_name="$(prompt "Your name" "$default_user")"
-timezone="$(prompt "Timezone" "$default_timezone")"
+    env = read_env(target / ".env")
+    telegram_token = prompt(
+        "Telegram bot token for the first channel",
+        env.get("TELEGRAM_BOT_TOKEN", ""),
+        secret=True,
+        defaults=args.defaults,
+    )
+    if not telegram_token:
+        raise SystemExit("A Telegram bot token is required for the first communication channel.")
 
-existing_dashscope="$(env_value DASHSCOPE_API_KEY)"
-existing_telegram_token="$(env_value TELEGRAM_BOT_TOKEN)"
-existing_telegram_chat="$(env_value TELEGRAM_CHAT_ID)"
-existing_slack_app_token="$(env_value SLACK_APP_TOKEN)"
-existing_slack_bot_token="$(env_value SLACK_BOT_TOKEN)"
+    chat_id = env.get("TELEGRAM_CHAT_ID", "")
+    first_text = ""
+    if not args.no_wait:
+        try:
+            chat_id, first_text = wait_for_first_telegram_message(telegram_token)
+            print(f"Authorized first chat: {chat_id}")
+        except Exception as exc:
+            raise SystemExit(f"Could not verify first Telegram message: {exc}") from exc
+    elif not chat_id:
+        chat_id = prompt("Telegram chat id", "", defaults=args.defaults)
 
-dashscope="$(secret_prompt "DashScope API key (optional)" "$existing_dashscope")"
-telegram_token="$(secret_prompt "Telegram bot token (optional)" "$existing_telegram_token")"
-telegram_chat="$(prompt "Telegram chat id (optional)" "$existing_telegram_chat")"
-slack_app_token="$(secret_prompt "Slack app-level token xapp-* for Socket Mode (optional)" "$existing_slack_app_token")"
-slack_bot_token="$(secret_prompt "Slack bot token xoxb-* (optional)" "$existing_slack_bot_token")"
-default_brain="$(prompt "Default gateway brain (claude|codex|opencode|gemini)" "claude")"
-case "$default_brain" in
-    claude|codex|opencode|gemini) ;;
-    *) echo "Unknown brain '$default_brain'; using claude." >&2; default_brain=claude ;;
-esac
+    updates = {"TELEGRAM_BOT_TOKEN": telegram_token, "TELEGRAM_CHAT_ID": chat_id}
+    write_env(target, updates)
+    write_gateway_config(target, brain, telegram_token, chat_id)
+    ensure_memory_bootstrap(target, brain, force=args.force or not existing)
+    write_watchdog_conf(target, force=args.force)
+    (target / "state" / "setup").mkdir(parents=True, exist_ok=True)
+    (target / "state" / "setup" / "first-message.json").write_text(
+        json.dumps(
+            {"chat_id": chat_id, "message": first_text, "brain": brain, "channel": "telegram"},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
-write_env "$dashscope" "$telegram_token" "$telegram_chat" "$slack_app_token" "$slack_bot_token"
-write_l1 "$assistant_name" "$user_name" "$timezone" "$OVERWRITE"
-write_watchdog_conf "$assistant_name" "$OVERWRITE"
-write_gateway_config "$default_brain" "$([[ -n "$telegram_token" ]] && echo yes || echo no)" "$telegram_chat" "$([[ -n "$slack_app_token" && -n "$slack_bot_token" ]] && echo yes || echo no)"
+    rebuild_memory(target)
 
-echo "==> Rebuilding memory index"
-"$JC_MEMORY" --instance-dir "$TARGET" rebuild >/dev/null
+    question = generate_first_question(brain)
+    if chat_id and not args.no_wait:
+        send_telegram_message(telegram_token, chat_id, question)
+        print("Sent the first onboarding question to Telegram.")
+    else:
+        print("\nFirst onboarding question:")
+        print(question)
 
-if [[ -z "$START_LIVE" ]]; then
-    START_LIVE="$(yesno "Start gateway daemon now?" "no")"
-fi
-if [[ "$START_LIVE" == "yes" ]]; then
-    start_gateway "$assistant_name" || true
-fi
+    if args.start:
+        run([str(ROOT / "bin" / "jc-gateway"), "--instance-dir", str(target), "start"], timeout=30)
+    if args.install_watchdog:
+        run([str(ROOT / "bin" / "jc-watchdog"), "--instance-dir", str(target), "install"], timeout=30)
 
-if [[ -z "$INSTALL_WATCHDOG" ]]; then
-    INSTALL_WATCHDOG="$(yesno "Install watchdog cron entries?" "no")"
-fi
-if [[ "$INSTALL_WATCHDOG" == "yes" ]]; then
-    "$JC_WATCHDOG" --instance-dir "$TARGET" install
-fi
+    print("\nSetup complete.")
+    print(f"Instance: {target}")
+    print("Next: answer the Telegram question. The selected brain will drive agent creation from there.")
+    return 0
 
-echo "==> Running doctor"
-"$JC_DOCTOR" --instance-dir="$TARGET" || true
 
-cat <<EOF
-
-Setup complete.
-
-Instance: $TARGET
-
-Next useful commands:
-  cd "$TARGET"
-  jc doctor --fix
-  jc gateway status
-  jc heartbeat run hello --dry-run
-EOF
+if __name__ == "__main__":
+    raise SystemExit(main())

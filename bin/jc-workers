@@ -1093,7 +1093,11 @@ def cmd_tail(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="jc-workers")
     p.add_argument("--instance-dir", help="override instance dir")
-    subs = p.add_subparsers(dest="cmd", required=True)
+    subs = p.add_subparsers(
+        dest="cmd",
+        required=True,
+        metavar="{spawn,list,show,tail,cancel,gc,reconcile,history}",
+    )
 
     sp = subs.add_parser("spawn", help="spawn a background worker")
     sp.add_argument("--topic", required=True, help="short human label")
@@ -1119,6 +1123,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = subs.add_parser("_run", help=argparse.SUPPRESS)
     rp.add_argument("worker_id")
+    subs._choices_actions = [  # type: ignore[attr-defined]
+        action for action in subs._choices_actions  # type: ignore[attr-defined]
+        if getattr(action, "dest", "") != "_run"
+    ]
 
     lp = subs.add_parser("list", help="list workers")
     lp.add_argument("--status", default=None,

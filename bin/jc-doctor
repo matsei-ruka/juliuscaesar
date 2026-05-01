@@ -29,6 +29,20 @@ fi
 FAIL=0
 FIX=0
 
+usage() {
+    cat <<'EOF'
+jc-doctor — diagnose a JuliusCaesar instance + environment.
+
+Usage:
+  jc doctor [--instance-dir <path>] [--fix]
+
+Options:
+  --instance-dir <path>  Override instance dir.
+  --fix                  Apply conservative local repairs.
+  -h, --help             Show this help.
+EOF
+}
+
 ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*"; }
 fail() { printf '%s✗%s %s\n' "$RED" "$RST" "$*"; FAIL=$((FAIL+1)); }
@@ -113,6 +127,7 @@ load_env_file() {
 INSTANCE_DIR=""
 while (( $# )); do
     case "$1" in
+        -h|--help|help) usage; exit 0 ;;
         --fix) FIX=1; shift ;;
         --instance-dir) INSTANCE_DIR="${2:-}"; shift 2 ;;
         --instance-dir=*) INSTANCE_DIR="${1#*=}"; shift ;;

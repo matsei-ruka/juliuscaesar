@@ -44,7 +44,18 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '1,/^set -/{ /^# /p }' "$0" | sed 's/^# \{0,1\}//'
+            cat <<'EOF'
+jc-upgrade — interactive reconfigurator for an existing JuliusCaesar instance.
+
+Usage:
+  jc upgrade [--instance-dir <path>] [--defaults] [--restart]
+
+Options:
+  --instance-dir <path>  Instance directory.
+  --defaults            Non-interactive: keep existing values as-is.
+  --restart             Stop + start gateway daemon at the end.
+  -h, --help            Show this help.
+EOF
             exit 0
             ;;
         *)
