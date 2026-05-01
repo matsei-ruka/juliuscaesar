@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""jc-persona — gap-driven persona interview engine.
+
+Subcommands (delegated to lib/persona_interview/cli.py):
+  interview [--include-populated] [--redo <slot_id>]
+      Walk unfilled slots in this instance, prompt the operator,
+      validate, splice answers into the target memory files. Macro
+      binding (persona/principal/employer values) runs first.
+
+  gaps [--json]
+      List which slots are missing / unfilled / populated. No prompts.
+
+  doctor
+      Schema-alignment check between this instance and the framework's
+      current questions.yaml — surfaces new sections to scaffold,
+      stale sections, etc.
+
+Instance dir resolution: --instance-dir → $JC_INSTANCE_DIR → walk up for
+`.jc` marker → cwd.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Allow running from a clone without install.
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from persona_interview.cli import main  # type: ignore  # noqa: E402
+
+
+if __name__ == "__main__":
+    sys.exit(main())
