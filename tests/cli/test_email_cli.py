@@ -153,6 +153,57 @@ class EmailCliDraftTests(unittest.TestCase):
             self.assertEqual(record.data["state"], "sent")
             self.assertEqual(record.data["sent_message_id"], "<sent@example.com>")
 
+    def test_draft_approve_failure_marks_failed(self) -> None:
+        module = _load_cli_module()
+
+        class FailingAdapter:
+            def send_reply(self, **_kwargs):
+                raise RuntimeError("smtp down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            draft_id = _seed_draft(instance)
+            with patch.object(module, "_adapter", return_value=FailingAdapter()):
+                with self.assertRaises(SystemExit):
+                    module.main(["--instance-dir", str(instance), "drafts", "approve", draft_id])
+            record = email_state.find_draft(instance, draft_id)
+            self.assertEqual(record.data["state"], "failed")
+            self.assertIn("smtp down", record.data["failure_error"])
+            events = email_state.recent_events(instance, limit=5)
+            self.assertEqual(events[-1]["event"], "draft_send_failed")
+
+
+class EmailCliSenderTests(unittest.TestCase):
+    def test_senders_trust_external_block_and_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _seed_pending(instance, "client@example.com", uid="50")
+
+            proc = _run(["senders", "external", "client@example.com"], instance)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("channels.email.senders.external", proc.stdout)
+            self.assertIn("drained 1", proc.stdout)
+
+            conn = queue_module.connect(instance)
+            try:
+                row = conn.execute("SELECT meta FROM events").fetchone()
+            finally:
+                conn.close()
+            meta = json.loads(row[0])
+            self.assertEqual(meta["sender_tier"], "external")
+
+            proc = _run(["senders", "trust", "client@example.com"], instance)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            proc = _run(["senders", "block", "bad@example.com"], instance)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+            proc = _run(["senders", "list", "--json"], instance)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+            self.assertIn("client@example.com", data["trusted"])
+            self.assertNotIn("client@example.com", data["external"])
+            self.assertIn("bad@example.com", data["blocklist"])
+
 
 class EmailCliDoctorTests(unittest.TestCase):
     def test_doctor_reports_state_counts(self) -> None:

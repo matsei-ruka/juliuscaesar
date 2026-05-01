@@ -31,6 +31,8 @@ For a small team validating operational communication workflows.
 - Sender approval
 - External outbound draft approval
 - `jc email doctor`, pending inspection, draft inspection
+- First-class `jc email senders` policy operations
+- Sample corporate email gateway config
 - Setup doctor and focused runbooks
 
 Value: lets a second operator run and recover the system without reading source
@@ -45,6 +47,7 @@ For teams that need supportable operations and evidence after actions.
 - Queue and draft age metrics
 - Approval queues
 - Company dashboard integration
+- Email channel health in `gateway.snapshot`
 - Runbooks and supportable upgrades
 
 Value: shifts the product from "automation that works for us" to "operations

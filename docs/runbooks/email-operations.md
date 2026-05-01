@@ -46,17 +46,27 @@ jc email pending list
 jc email pending show <uid>
 ```
 
-Approve or deny a sender's local pending messages:
+Approve or deny a sender's local pending messages without changing policy:
 
 ```bash
 jc email pending approve sender@example.com
 jc email pending deny sender@example.com
 ```
 
-`jc chats approve --email sender@example.com` remains the sender-policy command:
-it promotes the sender to `channels.email.senders.trusted` and drains pending
-messages. `jc email pending approve` is an operational drain command for an
-already-decided sender.
+Use the first-class email policy commands for new operations:
+
+```bash
+jc email senders list
+jc email senders trust sender@example.com
+jc email senders external sender@example.com
+jc email senders block sender@example.com
+```
+
+`trust` drains pending mail as trusted. `external` drains pending mail into the
+gateway but holds outbound replies as drafts. `block` drops pending mail.
+`jc chats approve --email sender@example.com` and `jc chats deny --email
+sender@example.com` remain compatibility aliases. `jc email pending approve` is
+an operational drain command for an already-decided sender.
 
 ## Outbound Drafts
 
@@ -72,8 +82,9 @@ jc email drafts reject draft_777
 
 Approving a draft sends through SMTP and marks the draft `sent` with
 `sent_message_id` and `sent_timestamp`. Rejecting marks it `rejected` without
-sending. `jc email drafts list --all` includes sent and rejected drafts for
-forensics.
+sending. If SMTP send fails, the draft is marked `failed` with
+`failure_error` and `failed_timestamp`, and can be inspected with
+`jc email drafts list --all` plus `jc email drafts show <draft_id>`.
 
 ## Metrics
 
@@ -117,8 +128,7 @@ drafts, and `last_uid` remain under `state/channels/email/`.
 ### Pending Messages Growing
 
 1. Run `jc email pending list`.
-2. Decide sender policy with `jc chats approve --email` or
-   `jc chats deny --email`.
+2. Decide sender policy with `jc email senders trust`, `external`, or `block`.
 3. Re-run `jc email doctor`.
 
 ### Drafts Aging
@@ -131,4 +141,12 @@ drafts, and `last_uid` remain under `state/channels/email/`.
 
 1. Run `jc email test-smtp`.
 2. Check `IMAP_USER`, `IMAP_PASSWORD`, and `SMTP_PORT`.
-3. Retry `jc email drafts approve <draft_id>`.
+3. Inspect the failed draft with `jc email drafts show <draft_id>`.
+4. Fix credentials or body, then retry `jc email drafts approve <draft_id>`.
+
+## Fleet Reporting
+
+When Company reporting is enabled, `gateway.snapshot` includes
+`channel_metrics.email`: pending count, draft states, oldest pending/draft ages,
+recent lifecycle event counts, and the last email event. This gives the
+Corporate Ops tier a dashboard-ready view without scraping local files.

@@ -15,8 +15,9 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from company import conf as company_conf  # noqa: E402
 from company.client import CompanyError  # noqa: E402
-from company.reporter import Outbox, Reporter, WorkersCursor, uuid7  # noqa: E402
+from company.reporter import Outbox, Reporter, WorkersCursor, build_snapshot, uuid7  # noqa: E402
 from gateway import config as gw_config  # noqa: E402
+from gateway.channels import email_dispatcher  # noqa: E402
 from workers import db as workers_db  # noqa: E402
 
 
@@ -288,6 +289,40 @@ class TickTests(unittest.TestCase):
                 if evt["event_type"].startswith("worker."):
                     self.assertEqual(evt["payload"]["instance_boot_id"], reporter.instance_boot_id)
                     self.assertEqual(evt["payload"]["remote_id"], wid)
+
+    def test_snapshot_includes_email_channel_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            (instance / "ops" / "gateway.yaml").write_text(
+                "default_brain: claude\nchannels:\n  email:\n    enabled: true\n",
+                encoding="utf-8",
+            )
+            email_dispatcher.dispatch_messages(
+                instance_dir=instance,
+                messages=[
+                    {
+                        "channel": "email",
+                        "channel_id": "uid_10",
+                        "conversation_id": "email_new@example.com",
+                        "user_id": "email_new@example.com",
+                        "sender": "new@example.com",
+                        "sender_name": "New",
+                        "subject": "Question",
+                        "message_id": "<10@example.com>",
+                        "in_reply_to": None,
+                        "references": [],
+                        "text": "hello",
+                        "status": "unknown",
+                        "metadata": {"uid": "10", "date": "2026-05-01T10:00:00Z"},
+                    }
+                ],
+                cfg={"notify_on_unknown": False},
+            )
+
+            snapshot = build_snapshot(instance)
+            email_metrics = snapshot["channel_metrics"]["email"]
+            self.assertEqual(email_metrics["pending"], 1)
+            self.assertEqual(email_metrics["event_counts_recent"]["inbound_pending"], 1)
 
     def test_tick_buffers_to_outbox_on_post_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

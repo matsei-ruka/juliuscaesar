@@ -9,8 +9,7 @@ Routes EmailChannelAdapter outputs:
   - status='blocked'  → silent drop
 
 Pending messages are drained when an operator runs
-`jc-chats approve --email <addr>` or `... deny --email <addr>` —
-that path is implemented in `bin/jc-chats`, which calls `drain_pending`.
+`jc email senders trust <addr>`, `external <addr>`, or `block <addr>`.
 
 Also exposes a `poll` CLI entrypoint:
     python3 -m gateway.channels.email_dispatcher poll --instance-dir <path>
@@ -192,8 +191,9 @@ def _format_unknown_notification(msg: dict[str, Any]) -> str:
         f"**From:** {name} `{sender}`\n"
         f"**Subject:** {subject}\n\n"
         f"_{preview}_\n\n"
-        f"Approve: `jc-chats approve --email {sender}`\n"
-        f"Deny: `jc-chats deny --email {sender}`"
+        f"Trust: `jc email senders trust {sender}`\n"
+        f"External: `jc email senders external {sender}`\n"
+        f"Block: `jc email senders block {sender}`"
     )
 
 
@@ -372,11 +372,14 @@ def drain_pending(
 ) -> int:
     """Process all pending messages for `sender`.
 
-    `action='approve'` → enqueue each; `action='deny'` → discard.
+    `action='approve'` → enqueue as trusted; `action='external'` → enqueue
+    as external; `action='deny'` → discard.
     Returns count of messages handled. Sender folder is removed afterwards.
     """
     if log is None:
         log = lambda _msg: None  # noqa: E731
+    if action not in {"approve", "external", "deny"}:
+        raise ValueError("action must be 'approve', 'external', or 'deny'")
     sender_norm = sender.lower().strip()
     sender_dir = pending_dir(instance_dir) / _sender_key(sender_norm)
     if not sender_dir.is_dir():
@@ -389,15 +392,16 @@ def drain_pending(
             log(f"pending parse failed {path}: {exc}")
             path.unlink(missing_ok=True)
             continue
-        if action == "approve":
+        if action in {"approve", "external"}:
             try:
-                msg["status"] = "trusted"
+                msg["status"] = "external" if action == "external" else "trusted"
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=None)
                 email_state.record_event(
                     instance_dir,
-                    "pending_approved",
+                    "pending_external" if action == "external" else "pending_approved",
                     uid=_message_uid(msg),
                     sender=sender,
+                    status=msg["status"],
                 )
                 log(f"pending dispatched uid={msg.get('channel_id')} sender={sender}")
             except Exception as exc:  # noqa: BLE001

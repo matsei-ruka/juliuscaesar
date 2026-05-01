@@ -30,6 +30,8 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `lib/gateway/channels/email_state.py`: shared file-backed state helpers for
   email pending messages, drafts, UID watermarks, local lifecycle metrics, and
   JSONL lifecycle events.
+- `lib/gateway/channels/email_policy.py`: canonical email sender policy reader
+  and writer for `channels.email.senders`.
 - `lib/gateway/brain.py` + `lib/gateway/brains/<name>.py`: per-brain Python wrappers; legacy `brain.py` is the fallback path for brains without a wrapper.
 - `lib/gateway/router.py`: per-event brain selection (default → cron-pinned → triage → sticky → override).
 - `lib/gateway/triage/`: pluggable triage backends — `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and `metrics`.
@@ -40,7 +42,8 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `lib/gateway/format/escaper.py`: Telegram MarkdownV2 rewriter.
 - `bin/jc-gateway`: CLI for queue inspection, daemon lifecycle, logs, config, events, and retry.
 - `bin/jc-email`: CLI for email channel doctor, credential tests, pending
-  inbound inspection/drain, and outbound draft approval.
+  inbound inspection/drain, sender-policy tier changes, and outbound draft
+  approval.
 - `<instance>/state/gateway/queue.db`: durable queue database.
 - `<instance>/ops/gateway.yaml`: non-secret runtime config.
 - `<instance>/state/gateway/jc-gateway.pid`: daemon PID file.
@@ -86,6 +89,11 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `test-smtp`
 - `pending list/show/approve/deny`
 - `drafts list/show/edit/approve/reject`
+- `senders list/trust/external/block`
+
+When Company reporting is configured, the `gateway.snapshot` payload includes
+`channel_metrics.email` with pending count, draft states, oldest pending/draft
+ages, lifecycle event counts, and the last email event.
 
 ## Invariants
 

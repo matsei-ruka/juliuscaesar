@@ -21,6 +21,7 @@ if _LIB.exists() and str(_LIB) not in sys.path:
 
 from gateway.config import env_values  # type: ignore  # noqa: E402
 from gateway.channels import email_dispatcher, email_state  # type: ignore  # noqa: E402
+from gateway.channels import email_policy  # type: ignore  # noqa: E402
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
 
@@ -177,6 +178,65 @@ def cmd_pending_deny(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_senders_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    policy = email_policy.read_policy(instance)
+    data = {
+        "trusted": list(policy.trusted),
+        "external": list(policy.external),
+        "blocklist": list(policy.blocklist),
+    }
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    for tier in ("trusted", "external", "blocklist"):
+        values = data[tier]
+        print(f"{tier}:")
+        if values:
+            for value in values:
+                print(f"  {value}")
+        else:
+            print("  -")
+    return 0
+
+
+def _set_sender(args: argparse.Namespace, tier: str) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    sender = args.sender.lower().strip()
+    try:
+        changed = email_policy.set_sender_tier(instance, sender, tier)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if changed:
+        print(f"ops/gateway.yaml updated (+channels.email.senders.{tier}: {sender})")
+    else:
+        print(f"sender {sender} already in email {tier} policy (no-op)")
+    if tier == "trusted":
+        drained = email_dispatcher.drain_pending(instance, sender, action="approve")
+        verb = "drained"
+    elif tier == "external":
+        drained = email_dispatcher.drain_pending(instance, sender, action="external")
+        verb = "drained"
+    else:
+        drained = email_dispatcher.drain_pending(instance, sender, action="deny")
+        verb = "dropped"
+    if drained:
+        print(f"{verb} {drained} pending message(s) from {sender}")
+    return 0
+
+
+def cmd_senders_trust(args: argparse.Namespace) -> int:
+    return _set_sender(args, "trusted")
+
+
+def cmd_senders_external(args: argparse.Namespace) -> int:
+    return _set_sender(args, "external")
+
+
+def cmd_senders_block(args: argparse.Namespace) -> int:
+    return _set_sender(args, "blocklist")
+
+
 def _draft_summary(record: email_state.StateRecord) -> str:
     data = record.data
     return f"{data.get('draft_id')}\t{data.get('state', '-')}\t{data.get('sender', '-')}\t{data.get('subject', '-')}"
@@ -254,14 +314,30 @@ def cmd_drafts_approve(args: argparse.Namespace) -> int:
     references = data.get("references") or []
     if isinstance(references, str):
         references = [references]
-    message_id = adapter.send_reply(
-        conversation_id=str((data.get("meta") or {}).get("conversation_id") or ""),
-        recipient=str(data.get("sender")),
-        subject=subject,
-        body=str(data.get("draft_text") or ""),
-        in_reply_to=data.get("in_reply_to"),
-        references=list(references),
-    )
+    try:
+        message_id = adapter.send_reply(
+            conversation_id=str((data.get("meta") or {}).get("conversation_id") or ""),
+            recipient=str(data.get("sender")),
+            subject=subject,
+            body=str(data.get("draft_text") or ""),
+            in_reply_to=data.get("in_reply_to"),
+            references=list(references),
+        )
+    except Exception as exc:  # noqa: BLE001
+        email_state.update_draft(
+            record,
+            state="failed",
+            failed_timestamp=email_state.now_ts(),
+            failure_error=str(exc),
+        )
+        email_state.record_event(
+            instance,
+            "draft_send_failed",
+            draft_id=args.draft_id,
+            sender=str(data.get("sender")),
+            error=str(exc),
+        )
+        raise SystemExit(f"draft send failed: {exc}") from exc
     email_state.update_draft(
         record,
         state="sent",
@@ -305,6 +381,21 @@ def build_parser() -> argparse.ArgumentParser:
     pd = psub.add_parser("deny", help="drop pending messages for sender")
     pd.add_argument("sender")
     pd.set_defaults(func=cmd_pending_deny)
+
+    senders = sub.add_parser("senders", help="inspect and change sender policy")
+    ssub = senders.add_subparsers(dest="senders_cmd", required=True)
+    sl = ssub.add_parser("list", help="list trusted, external, and blocked senders")
+    sl.add_argument("--json", action="store_true")
+    sl.set_defaults(func=cmd_senders_list)
+    st = ssub.add_parser("trust", help="trust a sender and drain pending mail")
+    st.add_argument("sender")
+    st.set_defaults(func=cmd_senders_trust)
+    se = ssub.add_parser("external", help="mark a sender external and drain pending mail")
+    se.add_argument("sender")
+    se.set_defaults(func=cmd_senders_external)
+    sb = ssub.add_parser("block", help="block a sender and drop pending mail")
+    sb.add_argument("sender")
+    sb.set_defaults(func=cmd_senders_block)
 
     drafts = sub.add_parser("drafts", help="inspect and approve outbound drafts")
     dsub = drafts.add_subparsers(dest="draft_cmd", required=True)
