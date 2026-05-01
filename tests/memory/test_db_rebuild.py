@@ -41,17 +41,17 @@ class RebuildInvalidStateTests(unittest.TestCase):
     def test_invalid_state_raises_in_parser(self):
         with tempfile.TemporaryDirectory() as tmp:
             inst = Path(tmp)
-            bad = _write_entry(inst, layer="L2", slug="bad", state="active")
+            bad = _write_entry(inst, layer="L2", slug="bad", state="published")
             with self.assertRaises(ValueError) as cm:
                 memory_db.parse_markdown(bad, inst)
             self.assertIn("invalid state", str(cm.exception))
-            self.assertIn("active", str(cm.exception))
+            self.assertIn("published", str(cm.exception))
 
     def test_rebuild_skips_invalid_and_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
             inst = Path(tmp)
             _write_entry(inst, layer="L2", slug="good-1", state="verified")
-            _write_entry(inst, layer="L2", slug="bad", state="active")
+            _write_entry(inst, layer="L2", slug="bad", state="published")
             _write_entry(inst, layer="L2", slug="good-2", state="draft")
             conn = memory_db.connect(inst)
             try:
@@ -68,7 +68,7 @@ class RebuildInvalidStateTests(unittest.TestCase):
             self.assertEqual(skipped, 1)
             self.assertEqual(removed, 0)
             self.assertIn("[skip]", buf.getvalue())
-            self.assertIn("active", buf.getvalue())
+            self.assertIn("published", buf.getvalue())
 
     def test_rebuild_all_valid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,8 +77,9 @@ class RebuildInvalidStateTests(unittest.TestCase):
                 ("a", "draft"),
                 ("b", "reviewed"),
                 ("c", "verified"),
-                ("d", "stale"),
-                ("e", "archived"),
+                ("d", "active"),
+                ("e", "stale"),
+                ("f", "archived"),
             ]:
                 _write_entry(inst, layer="L2", slug=s, state=st)
             conn = memory_db.connect(inst)
@@ -86,8 +87,44 @@ class RebuildInvalidStateTests(unittest.TestCase):
                 upserted, removed, skipped = memory_db.rebuild(conn, inst)
             finally:
                 conn.close()
-            self.assertEqual(upserted, 5)
+            self.assertEqual(upserted, 6)
             self.assertEqual(skipped, 0)
+
+    def test_active_state_is_indexed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = Path(tmp)
+            target = _write_entry(inst, layer="L2", slug="active-note", state="active")
+            entry = memory_db.parse_markdown(target, inst)
+            self.assertEqual(entry.state, "active")
+
+    def test_connect_migrates_old_schema_without_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = Path(tmp)
+            db = inst / "memory" / "index.sqlite"
+            db.parent.mkdir(parents=True, exist_ok=True)
+            import sqlite3
+
+            conn = sqlite3.connect(db)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE entries (
+                        slug TEXT PRIMARY KEY,
+                        state TEXT DEFAULT 'draft' CHECK (state IN ('draft','reviewed','verified','stale','archived'))
+                    );
+                    """
+                )
+            finally:
+                conn.close()
+
+            conn = memory_db.connect(inst)
+            try:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='entries'"
+                ).fetchone()
+                self.assertIn("'active'", row["sql"])
+            finally:
+                conn.close()
 
     def test_default_state_is_draft(self):
         with tempfile.TemporaryDirectory() as tmp:

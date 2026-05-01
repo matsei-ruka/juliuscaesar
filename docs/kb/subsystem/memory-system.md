@@ -58,7 +58,11 @@ Markdown files are the source of truth. `memory/index.sqlite` and `memory/INDEX.
 - Markdown frontmatter is required for indexed files.
 - The DB can be deleted and rebuilt from markdown.
 - `noindex: true` in frontmatter skips the file from indexing entirely (PR #34). Counted as "skipped silently" in `rebuild`, not as an error.
-- `state` in frontmatter is parser-validated; `rebuild` uses skip-and-continue rather than aborting on a single bad file (PR #33).
+- `state` in frontmatter is parser-validated; accepted values are `draft`,
+  `reviewed`, `verified`, `active`, `stale`, and `archived`. `rebuild` uses
+  skip-and-continue rather than aborting on a single bad file (PR #33). The
+  SQLite index is derived and may be schema-reset by `connect()` when the CHECK
+  constraint needs to accept a newly supported state such as `active`.
 
 ## Migration helpers
 

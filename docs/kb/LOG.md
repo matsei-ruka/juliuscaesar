@@ -52,3 +52,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-01] update | subsystem/installation-and-cli-routing.md — clarify jc email owns sender policy operations
 ## [2026-05-01] update | subsystem/installation-and-cli-routing.md — add completion command and guided brain/Telegram setup flow
 ## [2026-05-01] update | contract/config-and-secret-boundaries.md — clarify setup secret prompt behavior
+## [2026-05-01] update | subsystem/memory-system.md — accept active memory state and note derived DB schema reset

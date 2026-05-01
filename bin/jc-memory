@@ -129,6 +129,7 @@ def _write_index(instance: Path) -> None:
             lines.append("")
         state_mark = {
             "verified": "✓",
+            "active": "·",
             "reviewed": "·",
             "draft": "?",
             "stale": "!",
@@ -405,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     pn.add_argument("--title")
     pn.add_argument("--layer", choices=["L1", "L2"])
     pn.add_argument("--type")
-    pn.add_argument("--state", default="draft", choices=["draft", "reviewed", "verified", "stale", "archived"])
+    pn.add_argument("--state", default="draft", choices=["draft", "reviewed", "verified", "active", "stale", "archived"])
     pn.add_argument("--tag", action="append")
     pn.add_argument("--link", action="append")
     pn.add_argument("--body")

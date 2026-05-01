@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - tiny fallback
 # CHECK constraint on `entries.state` in SCHEMA below — drift between the two
 # would be silently swallowed by SQLite at upsert time and surface only as
 # IntegrityError mid-rebuild.
-VALID_STATES = frozenset({"draft", "reviewed", "verified", "stale", "archived"})
+VALID_STATES = frozenset({"draft", "reviewed", "verified", "active", "stale", "archived"})
 
 
 SCHEMA = """
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS entries (
     title          TEXT NOT NULL,
     layer          TEXT NOT NULL CHECK (layer IN ('L1','L2')),
     type           TEXT,
-    state          TEXT DEFAULT 'draft' CHECK (state IN ('draft','reviewed','verified','stale','archived')),
+    state          TEXT DEFAULT 'draft' CHECK (state IN ('draft','reviewed','verified','active','stale','archived')),
     path           TEXT NOT NULL UNIQUE,
     created        TEXT,
     updated        TEXT,
@@ -120,8 +120,36 @@ def connect(instance_dir: Path) -> sqlite3.Connection:
     db_path(instance_dir).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path(instance_dir))
     conn.row_factory = sqlite3.Row
+    _migrate_schema(conn)
     conn.executescript(SCHEMA)
     return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Migrate the derived memory index schema when CHECK values change.
+
+    The memory DB is rebuilt from markdown, so dropping old derived tables is
+    safer than carrying a stale CHECK constraint that rejects newly supported
+    frontmatter states.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='entries'"
+    ).fetchone()
+    if row is None:
+        return
+    sql = str(row["sql"] or "")
+    if "'active'" in sql or '"active"' in sql:
+        return
+    conn.executescript(
+        """
+        DROP TRIGGER IF EXISTS entries_ai;
+        DROP TRIGGER IF EXISTS entries_ad;
+        DROP TRIGGER IF EXISTS entries_au;
+        DROP TABLE IF EXISTS entries_fts;
+        DROP TABLE IF EXISTS backlinks;
+        DROP TABLE IF EXISTS entries;
+        """
+    )
 
 
 # --- Frontmatter parsing -----------------------------------------------------
