@@ -159,6 +159,60 @@ class TelegramSenderApprovalPromptTest(unittest.TestCase):
         finally:
             channel.close()
 
+    def test_main_chat_falls_back_to_yaml_chat_ids(self) -> None:
+        instance = _make_instance(yaml_chat_ids=["28547271"])
+        (instance / ".env").write_text("TELEGRAM_BOT_TOKEN=test-token-123\n")
+        gateway_config.clear_env_cache()
+        channel = _make_channel(instance)
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="1234",
+                    chat={"id": 1234, "type": "private", "username": "alice"},
+                    message={"text": "hello"},
+                )
+                payload = mock_http.call_args.kwargs["data"]
+                self.assertEqual(payload["chat_id"], "28547271")
+        finally:
+            channel.close()
+
+    def test_rejected_prompt_is_retryable(self) -> None:
+        instance = _make_instance()
+        channel = _make_channel(instance)
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                mock_http.side_effect = [
+                    {"ok": False, "description": "bad request"},
+                    {"ok": True, "result": {"message_id": 999}},
+                ]
+                for text in ("first", "second"):
+                    channel._maybe_send_sender_approval_prompt(
+                        chat_id="1234",
+                        chat={"id": 1234, "type": "private", "username": "alice"},
+                        message={"text": text},
+                    )
+                self.assertEqual(mock_http.call_count, 2)
+        finally:
+            channel.close()
+
+    def test_auth_prompt_uses_plain_text_payload(self) -> None:
+        instance = _make_instance()
+        channel = _make_channel(instance)
+        try:
+            with patch("gateway.channels.telegram.http_json") as mock_http:
+                mock_http.return_value = {"ok": True, "result": {"message_id": 999}}
+                channel._maybe_send_sender_approval_prompt(
+                    chat_id="1234",
+                    chat={"id": 1234, "type": "private", "username": "alice"},
+                    message={"text": "hello_world"},
+                )
+                payload = mock_http.call_args.kwargs["data"]
+                self.assertNotIn("parse_mode", payload)
+                self.assertIn('Preview: "hello_world"', payload["text"])
+        finally:
+            channel.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,10 +42,12 @@ def _silent_log(_message: str) -> None:
     pass
 
 
-def _drive(instance: Path, updates, *, exclude_from_allowlist=None):
+def _drive(instance: Path, updates, *, exclude_from_allowlist=None, http_calls=None):
     served = {"done": False}
 
     def fake_http_json(url, *, data=None, timeout=15, **_):
+        if http_calls is not None:
+            http_calls.append({"url": url, "data": data})
         if "getUpdates" in url:
             if served["done"]:
                 return {"ok": True, "result": []}
@@ -74,12 +76,13 @@ def _drive(instance: Path, updates, *, exclude_from_allowlist=None):
         for u in updates
         if isinstance(u, dict)
     } - {""} - exclude_from_allowlist)
+    yaml_chat_ids = sorted({"28547271", *chat_ids})
     cfg = ChannelConfig(
         enabled=True,
         token_env="TELEGRAM_BOT_TOKEN",
         chat_ids=chat_ids,
     )
-    _write_minimal_yaml(instance, chat_ids)
+    _write_minimal_yaml(instance, yaml_chat_ids)
     channel = TelegramChannel(instance, cfg, _silent_log)
     channel.token = "test-token"
 
@@ -510,8 +513,18 @@ class TelegramGroupAuthTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            captured = _drive(instance, [update], exclude_from_allowlist={"-2001"})
+            calls: list[dict] = []
+            captured = _drive(
+                instance,
+                [update],
+                exclude_from_allowlist={"-2001"},
+                http_calls=calls,
+            )
             self.assertEqual(len(captured), 0)
+            send_calls = [c for c in calls if "sendMessage" in c["url"]]
+            self.assertEqual(len(send_calls), 1)
+            self.assertEqual(send_calls[0]["data"]["chat_id"], "28547271")
+            self.assertIn("chat_auth:allow:-2001", send_calls[0]["data"]["reply_markup"])
 
     def test_allowed_chat_message_processed(self):
         update = {

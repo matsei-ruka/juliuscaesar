@@ -141,11 +141,23 @@ class TelegramChannel:
     def _main_chat_id(self) -> str | None:
         """Resolve the configured main DM chat_id.
 
-        Auth prompts and replies fan out from the env'd `TELEGRAM_CHAT_ID`,
+        Auth prompts and replies prefer the env'd `TELEGRAM_CHAT_ID`,
         which doubles as the operator's user id (DM `chat_id == user_id`).
+        Newer config-only instances may only carry the operator chat in
+        `ops/gateway.yaml`, so fall back to the first configured allowed
+        Telegram chat instead of silently skipping approval prompts.
         """
         env = env_value(self.instance_dir, "TELEGRAM_CHAT_ID")
-        return str(env) if env else None
+        if env:
+            return str(env)
+        try:
+            cfg = load_config_cached(self.instance_dir).channel("telegram")
+            for chat_id in tuple(cfg.chat_ids) + _env_chat_ids(self.instance_dir):
+                if str(chat_id):
+                    return str(chat_id)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram main chat fallback failed: {exc}")
+        return None
 
     def _authority_sets(self) -> tuple[frozenset[str], frozenset[str]]:
         """Return `(allowed, blocked)` chat-id sets from config files.
@@ -263,19 +275,20 @@ class TelegramChannel:
         # Suppress duplicate prompts within this process lifetime.
         if chat_id in self._auth_prompts_sent:
             return
-        self._send_auth_prompt(chat, added_by or {})
-        self._auth_prompts_sent.add(chat_id)
+        if self._send_auth_prompt(chat, added_by or {}):
+            self._auth_prompts_sent.add(chat_id)
 
     def _send_auth_prompt(
         self,
         chat: dict,
         added_by: dict | None = None,
         message_preview: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Send an inline-keyboard Allow/Deny prompt to the main DM.
 
-        Best-effort — failure is logged and the row stays `pending`. The
-        operator can still allow/deny via `jc chats approve <chat_id>`.
+        Best-effort — failure is logged and returns False so a later
+        inbound message can retry the prompt. The operator can still
+        allow/deny via `jc chats approve <chat_id>`.
 
         Args:
             chat: Telegram chat dict (id, type, title, username, etc.)
@@ -286,7 +299,7 @@ class TelegramChannel:
         main = self._main_chat_id()
         if not main or not self.token:
             self.log("telegram auth prompt skipped: no main chat or token")
-            return
+            return False
         chat_id = str(chat.get("id", ""))
         title = chat.get("title") or "(untitled)"
         chat_type = chat.get("type") or "?"
@@ -305,9 +318,9 @@ class TelegramChannel:
                 added_by.get("first_name") or "(unknown)"
             )
             body = (
-                "🤝 Bot added to a new chat — approve?\n\n"
-                f"*{title}* ({chat_type}, {member_blurb})\n"
-                f"chat_id: `{chat_id}`\n"
+                "Bot added to a new chat - approve?\n\n"
+                f"{title} ({chat_type}, {member_blurb})\n"
+                f"chat_id: {chat_id}\n"
                 f"added by: {adder}\n\n"
                 "Tap Allow to start processing messages from this chat."
             )
@@ -321,11 +334,11 @@ class TelegramChannel:
                 escaped = message_preview[:100].replace("\n", " ").strip()
                 if len(message_preview) > 100:
                     escaped += "…"
-                preview_blurb = f'Preview: "__{escaped}__"\n\n'
+                preview_blurb = f'Preview: "{escaped}"\n\n'
             body = (
-                f"🔐 New contact\n\n"
-                f"*{sender_handle}* ({chat_type})\n"
-                f"chat_id: `{chat_id}`\n"
+                "New contact\n\n"
+                f"{sender_handle} ({chat_type})\n"
+                f"chat_id: {chat_id}\n"
                 f"{preview_blurb}"
                 "Tap Allow to process messages from this sender."
             )
@@ -343,8 +356,7 @@ class TelegramChannel:
         }
         payload: dict[str, Any] = {
             "chat_id": main,
-            "text": to_markdown_v2(body),
-            "parse_mode": "MarkdownV2",
+            "text": body,
             "disable_web_page_preview": True,
             "reply_markup": json.dumps(keyboard),
         }
@@ -356,12 +368,14 @@ class TelegramChannel:
             )
             if not data.get("ok"):
                 self.log(f"telegram auth prompt rejected: {data}")
-                return
+                return False
             self.log(
                 f"telegram auth prompt sent chat_id={chat_id} title={title!r}"
             )
+            return True
         except Exception as exc:  # noqa: BLE001
             self.log(f"telegram auth prompt failed chat_id={chat_id}: {exc}")
+            return False
 
     def _maybe_send_sender_approval_prompt(
         self,
@@ -390,9 +404,10 @@ class TelegramChannel:
         text = message.get("text") or message.get("caption") or ""
         preview = text[:100].replace("\n", " ").strip() if text else "(no text)"
 
-        # Send the prompt
-        self._send_auth_prompt(chat, added_by=None, message_preview=preview)
-        self._auth_prompts_sent.add(chat_id)
+        # Send the prompt. Only suppress future prompts after Telegram
+        # confirms delivery; a rejected/skipped prompt must stay retryable.
+        if self._send_auth_prompt(chat, added_by=None, message_preview=preview):
+            self._auth_prompts_sent.add(chat_id)
 
     def _handle_callback_query(self, update: dict) -> None:
         """Process an inline-keyboard tap. Only chat_auth: prefix is wired.
