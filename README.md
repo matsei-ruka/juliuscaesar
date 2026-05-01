@@ -5,6 +5,8 @@
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-8A2BE2)](https://www.anthropic.com/claude-code)
 
+![JuliusCaesar project hero](assets/juliuscaesar-readme-hero.png)
+
 **A self-hosted personal AI assistant framework built for engineers who care about production.**
 
 JuliusCaesar invokes the **native Claude Code CLI** as a subprocess — not API simulation, not session spoofing. It's the only assistant framework that runs on your actual subscription. Pair that with a production watchdog, a token-efficient cron pipeline, and a layered memory system, and you have something that stays online and stays useful — without a monthly SaaS bill or 430,000 lines of someone else's code to debug.
