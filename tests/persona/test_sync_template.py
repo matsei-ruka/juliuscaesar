@@ -237,3 +237,38 @@ def test_find_unresolved_placeholders_clean_source_returns_empty(tmp_path: Path)
     f = tmp_path / "memory/L1/RULES.md"
     f.write_text("All filled in.\n")
     assert sync.find_unresolved_placeholders(tmp_path, ["memory/L1/RULES.md"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Boilerplate extraction — guards against the self-feedback bug where the
+# sync output was read as 'framework boilerplate' on the next run, causing
+# the §-spine to be appended each cycle and ballooning RULES.md.
+# ---------------------------------------------------------------------------
+
+def test_boilerplate_source_is_not_the_synced_template():
+    """The framework operational tail must NOT be read from templates/init-instance/.
+
+    Reading from there would let a previous sync run pollute the next run's
+    boilerplate. The function must read from a stable, never-rewritten file.
+    """
+    framework_root = Path(__file__).resolve().parent.parent.parent
+    boilerplate = sync._extract_framework_boilerplate(framework_root)
+    # If the function were reading from the synced output, the boilerplate
+    # would contain §-numbered headings (the persona spine).
+    assert "## §0" not in boilerplate
+    assert "## §1" not in boilerplate
+    assert "## §2" not in boilerplate
+    # Sanity: it should still contain the framework operational guidance.
+    assert (
+        "Instance awareness" in boilerplate
+        or "Conversation transcripts" in boilerplate
+        or "Work routing" in boilerplate
+    ), "boilerplate is missing the expected framework operational rules"
+
+
+def test_boilerplate_extraction_idempotent(tmp_path: Path):
+    """Calling _extract_framework_boilerplate twice returns identical content."""
+    framework_root = Path(__file__).resolve().parent.parent.parent
+    a = sync._extract_framework_boilerplate(framework_root)
+    b = sync._extract_framework_boilerplate(framework_root)
+    assert a == b

@@ -294,16 +294,17 @@ The reference instance's `lib/self_model/` directory is removed as part of the s
 
 ## Phasing
 
-| Phase | Deliverable | Size | Depends on |
-|---|---|---|---|
-| 1 | This spec, accepted | ~500 lines | — |
-| 2 | `scripts/sync_persona_template.py` + first run from Mario v2.3 → `templates/init-instance/` | medium | spec |
-| 3 | `templates/persona-interview/questions.yaml` (full slot bank) + composition templates | medium-large | sync output |
-| 4 | `lib/self_model/` promoted to framework + tests + heartbeat builtins + CLI router entry | medium | (independent of phase 3) |
-| 5 | `lib/persona_interview/` + `bin/jc-persona` + `jc setup` integration + brownfield overwrite | medium-large | phases 2, 3 |
-| 6 | `docs/research/persona-system.md` — academic-grade research artifact citing the design | small | phases 1–5 |
+| Phase | Deliverable | Size | Depends on | Status |
+|---|---|---|---|---|
+| 1 | This spec, accepted | ~500 lines | — | done |
+| 2 | `scripts/sync_persona_template.py` + first run from Mario v2.3 → `templates/init-instance/` | medium | spec | done |
+| 2.5 | `lib/persona_macros.py` + `templates/persona-interview/macros-from-reference.yaml` — doctrine parameterization with canonical macro vocabulary; bidirectional translator (apply / bind); macros applied to doctrine sections during sync | small-medium | phase 2 | done |
+| 3 | `templates/persona-interview/questions.yaml` (full slot bank) + composition templates | medium-large | sync output | next |
+| 4 | `lib/self_model/` promoted to framework + tests + heartbeat builtins + CLI router entry | medium | (independent of phase 3) | |
+| 5 | `lib/persona_interview/` + `bin/jc-persona` + `jc setup` integration + macro binding + brownfield overwrite | medium-large | phases 2.5, 3 | |
+| 6 | `docs/research/persona-system.md` — academic-grade research artifact citing the design | small | phases 1–5 | |
 
-Phases 2–4 are parallelizable. Phase 5 closes the user-facing loop. Phase 6 is the research deliverable.
+Phases 3 and 4 are parallelizable. Phase 5 closes the user-facing loop and binds macros at scaffold time using `lib/persona_macros.bind_macros`. Phase 6 is the research deliverable.
 
 ## Update semantics
 

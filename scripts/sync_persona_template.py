@@ -45,6 +45,10 @@ except ImportError:
     print("PyYAML required: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+# Make `lib/` importable so we can use persona_macros without a full install.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import persona_macros  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Constitutional doctrine — sections that ship verbatim into the framework
@@ -243,6 +247,7 @@ def compose_rules_md(
     source_text: str,
     framework_boilerplate_rules_md: str,
     overrides: dict,
+    macro_subs: list[persona_macros.Substitution] | None = None,
 ) -> str:
     """Synthesize the framework template's RULES.md from Mario's source.
 
@@ -272,7 +277,9 @@ def compose_rules_md(
         if not section_re.match(s.heading):
             continue
         seen_sections += 1
-        out.append(_compose_section("memory/L1/RULES.md", s, overrides))
+        out.append(_compose_section(
+            "memory/L1/RULES.md", s, overrides, macro_subs=macro_subs,
+        ))
 
     if seen_sections == 0:
         raise RuntimeError(
@@ -292,7 +299,11 @@ def compose_rules_md(
     return "".join(out)
 
 
-def compose_identity_md(source_text: str, overrides: dict) -> str:
+def compose_identity_md(
+    source_text: str,
+    overrides: dict,
+    macro_subs: list[persona_macros.Substitution] | None = None,
+) -> str:
     """Synthesize IDENTITY.md template — preserve doctrine sections, slotify the rest."""
     preamble, sections = split_into_sections(source_text)
     annotate_doctrine("memory/L1/IDENTITY.md", sections)
@@ -309,7 +320,9 @@ def compose_identity_md(source_text: str, overrides: dict) -> str:
         # Skip ARCHIVIO sections — those are source-instance audit history.
         if "ARCHIVIO" in s.heading:
             continue
-        out.append(_compose_section("memory/L1/IDENTITY.md", s, overrides))
+        out.append(_compose_section(
+            "memory/L1/IDENTITY.md", s, overrides, macro_subs=macro_subs,
+        ))
 
     return "".join(out)
 
@@ -335,16 +348,22 @@ def compose_user_md(source_text: str, overrides: dict) -> str:
     return "".join(out)
 
 
-def compose_journal_md(source_text: str) -> str:
-    """JOURNAL.md template = source preamble (the journal contract) + empty entries."""
-    # The journal contract (preamble + schema) is itself doctrine — verbatim.
-    # Entries section becomes empty.
-    # Find the "## Entries" heading; everything before it is the contract.
+def compose_journal_md(
+    source_text: str,
+    macro_subs: list[persona_macros.Substitution] | None = None,
+) -> str:
+    """JOURNAL.md template = source preamble (the journal contract) + empty entries.
+
+    The contract is itself doctrine — apply macro substitution so principal /
+    persona references become {{macro}} placeholders.
+    """
     entries_match = re.search(r"^## Entries\s*$", source_text, re.MULTILINE)
     if entries_match:
         contract = source_text[: entries_match.end()]
     else:
         contract = source_text
+    if macro_subs:
+        contract = persona_macros.apply_substitutions(contract, macro_subs)
     return contract.rstrip() + "\n\n_(no entries yet)_\n"
 
 
@@ -541,15 +560,21 @@ def _compose_section(
     overrides: dict,
     *,
     force_slot: bool = False,
+    macro_subs: list[persona_macros.Substitution] | None = None,
 ) -> str:
     """Render one section into the composite output.
 
-    - is_doctrine + IMMUTABILE marker: copy verbatim.
+    - is_doctrine + IMMUTABILE marker: copy verbatim, with macro substitution
+      applied to the body so proper nouns become {{persona.*}} / {{principal.*}}
+      / {{employer.*}} placeholders portable across instances.
     - everything else (REVIEWABLE / OPEN / IMMUTABILE-but-not-doctrine /
       no-marker, OR force_slot=True): heading + marker + slot placeholder.
     """
     if s.is_doctrine and s.marker == "IMMUTABILE" and not force_slot:
-        return s.heading + "\n" + s.body
+        body = s.body
+        if macro_subs:
+            body = persona_macros.apply_substitutions(body, macro_subs)
+        return s.heading + "\n" + body
 
     slot_id = resolve_slot_id(file_rel, s.heading, overrides)
     ask_hint = resolve_ask_hint(file_rel, s.heading, overrides)
@@ -620,7 +645,12 @@ OPTIONAL_SOURCE_FILES = [
 ]
 
 
-def sync(source_dir: Path, framework_root: Path, write: bool) -> int:
+def sync(
+    source_dir: Path,
+    framework_root: Path,
+    write: bool,
+    source_macros_path: Path | None = None,
+) -> int:
     """Run the sync. Returns 0 on success, non-zero on validation failure."""
     if not source_dir.is_dir():
         print(f"error: source dir does not exist: {source_dir}", file=sys.stderr)
@@ -641,6 +671,21 @@ def sync(source_dir: Path, framework_root: Path, write: bool) -> int:
         print("note: no slot-overrides.yaml found — using auto-derived slot ids only",
               file=sys.stderr)
 
+    # 2.5. Load doctrine macro substitutions (proper noun → placeholder mapping).
+    if source_macros_path is None:
+        source_macros_path = (
+            framework_root / "templates" / "persona-interview"
+            / "macros-from-reference.yaml"
+        )
+    macro_subs: list[persona_macros.Substitution] = []
+    if source_macros_path.exists():
+        macro_subs = persona_macros.load_substitutions(source_macros_path)
+        print(f"loaded {len(macro_subs)} macro substitutions from "
+              f"{source_macros_path}", file=sys.stderr)
+    else:
+        print(f"note: no macros file at {source_macros_path} — doctrine sections "
+              f"will ship verbatim with source proper nouns", file=sys.stderr)
+
     # 3. Read framework's current RULES.md to extract the boilerplate operational
     # rules tail (Instance awareness / Runtime checks / Work routing / etc.).
     boilerplate_rules = _extract_framework_boilerplate(framework_root)
@@ -651,13 +696,13 @@ def sync(source_dir: Path, framework_root: Path, write: bool) -> int:
     rules_src = (source_dir / "memory/L1/RULES.md").read_text(encoding="utf-8")
     outputs.append(CompositeFile(
         "memory/L1/RULES.md",
-        compose_rules_md(rules_src, boilerplate_rules, overrides),
+        compose_rules_md(rules_src, boilerplate_rules, overrides, macro_subs),
     ))
 
     identity_src = (source_dir / "memory/L1/IDENTITY.md").read_text(encoding="utf-8")
     outputs.append(CompositeFile(
         "memory/L1/IDENTITY.md",
-        compose_identity_md(identity_src, overrides),
+        compose_identity_md(identity_src, overrides, macro_subs),
     ))
 
     user_src = (source_dir / "memory/L1/USER.md").read_text(encoding="utf-8")
@@ -670,7 +715,10 @@ def sync(source_dir: Path, framework_root: Path, write: bool) -> int:
     if journal_path.exists():
         outputs.append(CompositeFile(
             "memory/L1/JOURNAL.md",
-            compose_journal_md(journal_path.read_text(encoding="utf-8")),
+            compose_journal_md(
+                journal_path.read_text(encoding="utf-8"),
+                macro_subs=macro_subs,
+            ),
         ))
 
     outputs.append(CompositeFile("memory/L1/HOT.md", compose_hot_md()))
@@ -721,23 +769,24 @@ def sync(source_dir: Path, framework_root: Path, write: bool) -> int:
 
 
 def _extract_framework_boilerplate(framework_root: Path) -> str:
-    """Pull the operational-rules section from the current framework RULES.md.
+    """Read the framework-baseline operational rules tail.
 
-    The current template ships with sections like 'Instance awareness',
-    'Runtime checks', 'Work routing', 'Conversation transcripts', 'HOT.md
-    structure' — the JC-runtime guidance shared by every instance. We preserve
-    these in the synced output so persona-aware instances retain them.
+    Sourced from `templates/persona-interview/framework-rules-tail.md` — a
+    file the sync script never writes, so it stays stable across runs. The
+    tail contains JC-runtime guidance shared by every instance (Instance
+    awareness, Runtime checks, Work routing, Conversation transcripts, HOT.md
+    structure). It is appended after the persona §-spine in synced RULES.md.
+
+    Reading this from a separate file (instead of the previous
+    `templates/init-instance/memory/L1/RULES.md`) prevents the sync output
+    from feeding back into its own input on subsequent runs — earlier prototype
+    of this script bloated RULES.md from ~30KB to 51KB on the second pass
+    because each run re-appended the previous run's spine as 'boilerplate'.
     """
-    current = framework_root / "templates" / "init-instance" / "memory/L1/RULES.md"
-    if not current.exists():
+    tail = framework_root / "templates" / "persona-interview" / "framework-rules-tail.md"
+    if not tail.exists():
         return ""
-    text = current.read_text(encoding="utf-8")
-    # Drop the YAML frontmatter and the top-level # heading.
-    parts = text.split("\n---\n", 2)
-    body = parts[-1] if len(parts) >= 2 else text
-    # Drop the first '# Standing rules' top-level heading line.
-    body = re.sub(r"^# Standing rules\s*\n", "", body, count=1, flags=re.MULTILINE)
-    return body.lstrip()
+    return tail.read_text(encoding="utf-8")
 
 
 def main() -> int:
@@ -750,8 +799,17 @@ def main() -> int:
     parser.add_argument("--framework-root", type=Path,
                         default=Path(__file__).resolve().parent.parent,
                         help="Framework repo root (default: this script's parent).")
+    parser.add_argument("--source-macros", type=Path, default=None,
+                        help="Path to macros-from-reference.yaml. Default: "
+                             "templates/persona-interview/macros-from-reference.yaml "
+                             "in the framework root.")
     args = parser.parse_args()
-    return sync(args.source_dir.resolve(), args.framework_root.resolve(), args.write)
+    return sync(
+        args.source_dir.resolve(),
+        args.framework_root.resolve(),
+        args.write,
+        source_macros_path=args.source_macros.resolve() if args.source_macros else None,
+    )
 
 
 if __name__ == "__main__":

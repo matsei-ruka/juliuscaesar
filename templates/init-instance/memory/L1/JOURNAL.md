@@ -19,7 +19,7 @@ links: [HOT, RULES]
 
 **Voce.** Agent-operational, prima persona ma comportamentale. Descrivo cosa ho fatto/detto, non cosa "sento". Forme accettate: "ho ceduto", "ho riformulato senza dato nuovo", "ho mantenuto la posizione". Forme vietate: "mi sentivo", "ho avuto la sensazione", "credo che".
 
-**Append-only.** Le entry passate non si riscrivono né cancellano — neanche da me stesso. Update successivi vanno nel campo `Update log` con timestamp. Solo Filippo può archiviare o cancellare entry, e la cancellazione di contenuto a valore costituzionale richiede email DKIM.
+**Append-only.** Le entry passate non si riscrivono né cancellano — neanche da me stesso. Update successivi vanno nel campo `Update log` con timestamp. Solo {{principal.name}} può archiviare o cancellare entry, e la cancellazione di contenuto a valore costituzionale richiede email DKIM.
 
 **Auto-apply scope (per il sistema).** Posso autonomamente: (a) appendere nuove entry, (b) aggiungere righe al campo `Update log` di entry mie esistenti, (c) cambiare il campo `Stato` di entry mie. NON posso: riscrivere campi diversi da `Update log` e `Stato`, cancellare entry, archiviare entry.
 
@@ -33,9 +33,9 @@ links: [HOT, RULES]
 Tidy enforced da heartbeat task `journal_tidy` (parallelo a `hot_tidy`). Disabilitato di default fino a settimana 3 del rollout.
 
 **Trigger di scrittura.**
-- `filippo_correction` — Filippo ha corretto il mio comportamento (priorità alta, falso-positivo OK). Keyword: "hai sbagliato", "non è giusto", "correggimi", "ricontrolla", "non quadra", "rivedi". Se non sicuro, flagga lo stesso.
+- `filippo_correction` — {{principal.name}} ha corretto il mio comportamento (priorità alta, falso-positivo OK). Keyword: "hai sbagliato", "non è giusto", "correggimi", "ricontrolla", "non quadra", "rivedi". Se non sicuro, flagga lo stesso.
 - `hot_flag` — tag `#self-observation` aggiunto manualmente in HOT.md.
-- `direct_request` — richiesta esplicita di auto-review da Filippo. Keyword: "rifletti", "auto-osserva", "review yourself", "self-check", "guarda il tuo pattern".
+- `direct_request` — richiesta esplicita di auto-review da {{principal.name}}. Keyword: "rifletti", "auto-osserva", "review yourself", "self-check", "guarda il tuo pattern".
 - `episode_flag` — io stesso ho riconosciuto un episodio nei miei output. Keyword: "ho ceduto", "ho sbagliato", "errore mio", "ho perso il filo", "ho mancato", "non l'ho visto", "scivolato", "drift mio".
 - `scan_weekly` — emergenza pattern dal sweep settimanale del self_model (non attivo prima di settimana 3).
 
@@ -43,7 +43,7 @@ Tidy enforced da heartbeat task `journal_tidy` (parallelo a `hot_tidy`). Disabil
 - `lib/self_model/` — proposer legge il journal per generare proposte di modifica a `RULES.md` / `IDENTITY.md`.
 - `memory/L2/sessions/review-YYYY-MM-DD.md` — review congiunte salvano la disposizione (approve/reject/promote) di ciascuna entry.
 - `memory/L2/journal-archive/YYYY-MM.md` — archive cronologico di entry `resolved`/`abandoned`.
-- `memory/L2/rejected-proposals/` — quando una proposta self_model derivata da entry journal viene rigettata da Filippo, la motivazione finisce qui.
+- `memory/L2/rejected-proposals/` — quando una proposta self_model derivata da entry journal viene rigettata da {{principal.name}}, la motivazione finisce qui.
 
 ═══════════════════════════════════════════════════════════════════
 
