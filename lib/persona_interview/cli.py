@@ -230,13 +230,65 @@ def _cmd_interview(
 def _cmd_gaps(instance_dir: Path, bank: QuestionsBank, as_json: bool) -> int:
     gaps = find_gaps(instance_dir, bank)
     if as_json:
+        def _prompt_dict(p: Prompt) -> dict:
+            d = {
+                "id": p.id,
+                "text": p.text,
+                "kind": p.kind,
+            }
+            if p.choices:
+                d["choices"] = p.choices
+            if p.examples:
+                d["examples"] = p.examples
+            if p.help:
+                d["help"] = p.help
+            if p.validation.required or p.validation.min_chars or p.validation.max_chars or p.validation.pattern:
+                d["validation"] = {
+                    "required": p.validation.required,
+                }
+                if p.validation.min_chars is not None:
+                    d["validation"]["min_chars"] = p.validation.min_chars
+                if p.validation.max_chars is not None:
+                    d["validation"]["max_chars"] = p.validation.max_chars
+                if p.validation.pattern is not None:
+                    d["validation"]["pattern"] = p.validation.pattern
+            if p.depends_on:
+                d["depends_on"] = {
+                    "prompt_id": p.depends_on.prompt_id,
+                    "op": p.depends_on.op,
+                    "value": p.depends_on.value,
+                }
+            return d
+
+        def _slot_dict(s: Slot) -> dict:
+            d = {
+                "slot_id": s.slot_id,
+                "target_file": s.target_file,
+                "target_section": s.target_section,
+                "kind": s.kind,
+                "status": s.status,
+                "prompts": [_prompt_dict(p) for p in s.prompts],
+            }
+            if s.composition:
+                d["composition"] = {
+                    "template": s.composition.template,
+                }
+                if s.composition.when:
+                    d["composition"]["when"] = {
+                        "prompt_id": s.composition.when.prompt_id,
+                        "op": s.composition.when.op,
+                        "value": s.composition.when.value,
+                    }
+                if s.composition.fallback:
+                    d["composition"]["fallback"] = s.composition.fallback
+            return d
+
         print(json.dumps({
             "gaps": [
                 {
                     "slot_id": g.slot.slot_id,
                     "state": g.state.value,
-                    "target_file": g.slot.target_file,
-                    "target_section": g.slot.target_section,
+                    "slot": _slot_dict(g.slot),
                 }
                 for g in gaps
             ],
