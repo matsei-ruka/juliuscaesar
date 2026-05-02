@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from . import overrides, process_sessions, queue, router, sessions, transcripts
+from . import capabilities, overrides, process_sessions, queue, router, sessions, transcripts
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
@@ -523,7 +523,7 @@ class GatewayRuntime:
             fallback_brain=self.config.triage.fallback_brain,
         )
         brain, model = selection.brain, selection.model
-        if meta.get("image_path") and brain not in ("claude", "gemini"):
+        if meta.get("image_path") and not capabilities.supports_images(brain):
             vision_brain = self._select_vision_brain()
             if vision_brain and vision_brain != brain:
                 self.log(
