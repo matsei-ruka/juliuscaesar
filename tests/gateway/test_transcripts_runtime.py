@@ -204,5 +204,117 @@ class TranscriptPrimingTest(unittest.TestCase):
         self.assertEqual(brain._build_transcript_priming(event), "")
 
 
+class CodexApiPrimingTest(unittest.TestCase):
+    """codex_api is stateless — Phase 5 of the codex-main-brain spec.
+
+    Continuity is rebuilt per call by prepending the transcript-priming block.
+    These tests verify that contract end-to-end through the brain wrapper.
+    """
+
+    def _make_event(self, *, conversation_id: str | None, content: str) -> queue.Event:
+        return queue.Event(
+            id=42,
+            source="telegram",
+            source_message_id="m42",
+            user_id="u1",
+            conversation_id=conversation_id,
+            content=content,
+            meta=None,
+            status="queued",
+            received_at="2026-05-01T10:00:00Z",
+            available_at="2026-05-01T10:00:00Z",
+            locked_by=None,
+            locked_until=None,
+            started_at=None,
+            finished_at=None,
+            retry_count=0,
+            response=None,
+            error=None,
+        )
+
+    def _build_brain_with_capture(self, instance: Path):
+        from gateway.adapters.codex_api import AdapterCallResult
+        from gateway.brains.codex_api import CodexApiBrain
+
+        captured: dict[str, object] = {}
+
+        class _FakeAdapter:
+            def run(self, prompt, *, model=None, instructions=None):
+                captured["prompt"] = prompt
+                captured["model"] = model
+                captured["instructions"] = instructions
+                return AdapterCallResult(text="ok", model=model or "gpt-5.4-mini", usage=None)
+
+        return CodexApiBrain(instance, adapter=_FakeAdapter()), captured
+
+    def test_second_turn_includes_prior_transcript_lines(self) -> None:
+        instance = _make_instance()
+        for role, text in [
+            ("user", "what is 2+2"),
+            ("assistant", "4"),
+        ]:
+            transcripts.append(instance, conversation_id="c1", role=role, text=text)
+
+        brain, captured = self._build_brain_with_capture(instance)
+        event = self._make_event(conversation_id="c1", content="and 3+3")
+        brain.invoke(
+            event=event,
+            model=None,
+            resume_session=None,
+            timeout_seconds=10,
+            log_path=instance / "log",
+        )
+        prompt = captured["prompt"]
+        self.assertIn("Recent conversation history", prompt)
+        self.assertIn("what is 2+2", prompt)
+        self.assertIn("4", prompt)
+        # System instruction must be passed; not stuffed into the user prompt.
+        self.assertIsNotNone(captured["instructions"])
+        self.assertIn("Responses API", captured["instructions"])
+
+    def test_current_user_message_not_duplicated_in_priming(self) -> None:
+        instance = _make_instance()
+        # Simulate the gateway having appended the inbound user message before
+        # dispatch — that's the real-world ordering. Priming must trim it.
+        for role, text in [
+            ("user", "earlier question"),
+            ("assistant", "earlier answer"),
+            ("user", "current question"),
+        ]:
+            transcripts.append(instance, conversation_id="c1", role=role, text=text)
+
+        brain, captured = self._build_brain_with_capture(instance)
+        event = self._make_event(conversation_id="c1", content="current question")
+        brain.invoke(
+            event=event,
+            model=None,
+            resume_session=None,
+            timeout_seconds=10,
+            log_path=instance / "log",
+        )
+        prompt = captured["prompt"]
+        # The priming block should hold prior turns but not echo the inbound
+        # user message verbatim — it's already in the event body below.
+        priming_index = prompt.index("Recent conversation history")
+        event_index = prompt.index("# Incoming event")
+        priming_section = prompt[priming_index:event_index]
+        self.assertIn("earlier question", priming_section)
+        self.assertNotIn("current question", priming_section)
+
+    def test_empty_transcript_skips_priming_header(self) -> None:
+        instance = _make_instance()
+        # No transcript appended — fresh conversation.
+        brain, captured = self._build_brain_with_capture(instance)
+        event = self._make_event(conversation_id="fresh", content="hello")
+        brain.invoke(
+            event=event,
+            model=None,
+            resume_session=None,
+            timeout_seconds=10,
+            log_path=instance / "log",
+        )
+        self.assertNotIn("Recent conversation history", captured["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,18 @@ RC_API_ERROR = 12
 RC_AUTH_FILE = 2
 
 
+# Per docs/specs/codex-main-brain-hardening.md §Phase 5: short system
+# instruction for the direct-API chat path. The detailed L1 preamble lives
+# in the user-message body via `prompt_for_event`; this `instructions` slot
+# stays terse so the model knows the calling contract.
+CODEX_API_INSTRUCTIONS = (
+    "You are the JuliusCaesar instance assistant responding via the direct "
+    "Responses API. You are stateless: any 'Recent conversation history' "
+    "block in the prompt is your only continuity — use it for context, "
+    "do not echo it back. Answer the user; do not narrate gateway metadata."
+)
+
+
 class CodexApiBrain(Brain):
     name = "codex_api"
     needs_l1_preamble = True
@@ -82,9 +94,13 @@ class CodexApiBrain(Brain):
         log_event: Callable[[str], None] | None = None,
     ) -> BrainResult:
         # resume_session is intentionally ignored: each Responses API call is
-        # stateless. Conversation continuity is encoded in the prompt itself
-        # via the L1 preamble + recent-messages context.
+        # stateless. Conversation continuity is rebuilt by prepending the
+        # transcript-priming block (Phase 5 of the codex-main-brain spec).
         prompt = self.prompt_for_event(event)
+        if event.conversation_id:
+            priming = self._build_transcript_priming(event)
+            if priming:
+                prompt = priming + "\n\n" + prompt
         log = log_event or (lambda _msg: None)
         timeout = self.override.timeout_seconds or timeout_seconds
         start = now_iso()
@@ -105,7 +121,9 @@ class CodexApiBrain(Brain):
             )
             try:
                 adapter = self._build_adapter(model=model, timeout_seconds=timeout)
-                result = adapter.run(prompt, model=model)
+                result = adapter.run(
+                    prompt, model=model, instructions=CODEX_API_INSTRUCTIONS
+                )
             except RefreshExpired as exc:
                 duration = time.monotonic() - wall_start
                 msg = f"refresh expired: {exc} — operator must run `codex login`"
