@@ -621,6 +621,56 @@ if [[ -f "$GATEWAY_PIDFILE" ]]; then
     fi
 fi
 
+# --- Codex readiness ---
+# Per docs/specs/codex-main-brain-hardening.md §Phase 6.
+
+section "Codex"
+
+CODEX_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" "${CODEX_HOME:-}" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from gateway import codex_diagnostics
+from gateway.config import load_config
+
+instance = Path(sys.argv[1])
+codex_home_env = sys.argv[2] or None
+home = Path.home()
+
+# Aliases work without a config; print them first so operators can see what
+# `/brain gpt5` resolves to even on a fresh instance.
+for line in codex_diagnostics.format_alias_lines(codex_diagnostics.codex_aliases()):
+    print(f"ALIAS:{line}")
+
+try:
+    cfg = load_config(instance)
+except Exception as exc:  # noqa: BLE001
+    print(f"WARN:gateway config unreadable: {exc}")
+    cfg = None
+
+# Auth + instance .codex findings don't depend on cfg, so emit them either way.
+auth = codex_diagnostics.auth_finding(home)
+print(f"{auth.level.upper()}:{auth.message}")
+inst = codex_diagnostics.instance_codex_finding(instance, codex_home_env)
+if inst is not None:
+    print(f"{inst.level.upper()}:{inst.message}")
+if cfg is not None:
+    sb = codex_diagnostics.sandbox_finding(cfg)
+    if sb is not None:
+        print(f"{sb.level.upper()}:{sb.message}")
+PY
+)
+info "codex aliases:"
+while IFS= read -r line; do
+    case "$line" in
+        ALIAS:*) info "${line#ALIAS:}" ;;
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+    esac
+done <<<"$CODEX_REPORT"
+
 # --- Email channel ---
 
 section "Email channel"
