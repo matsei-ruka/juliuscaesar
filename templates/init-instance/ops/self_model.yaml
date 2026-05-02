@@ -1,0 +1,30 @@
+# Autonomous self-model loop config.
+# See `lib/self_model/` (framework) for the implementation.
+# Default: disabled. Enable + start in dry_run mode; promote to propose/apply
+# only after observing dry-run signals look sensible.
+
+enabled: false
+mode: dry_run            # dry_run | propose | apply
+
+look_back_days: 7        # event window the corpus reads from state/transcripts/
+min_evidence_count: 2    # min distinct evidence items required for a proposal
+confidence_threshold: 0.85
+proposal_cooldown_days: 30
+
+require_dkim_for_rules: true
+require_dkim_for_identity: true
+require_dkim_for_journal: false   # journal is auto-apply scope (append-only)
+
+scan_weekly_cron: "0 9 * * 0"     # weekly sweep cadence (when scan_weekly enabled)
+
+proposer_model: claude-sonnet-4-6
+
+# Telegram chat id for proposal notifications (optional).
+# notify_chat_id: "123456789"
+
+detectors:
+  filippo_correction: false   # principal corrections in user messages
+  hot_flag: false             # `#self-observation`-tagged HOT.md blocks
+  direct_request: false       # explicit "review yourself" requests
+  episode_flag: false         # agent's own self-recognition keywords
+  scan_weekly: false          # weekly pattern aggregation across journal entries

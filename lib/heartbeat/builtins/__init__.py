@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Callable
 
 from . import hot_tidy as _hot_tidy
+from . import journal_tidy as _journal_tidy
+from . import self_model_run as _self_model_run
 
 
 BuiltinFn = Callable[[Path, bool], dict]
@@ -19,6 +21,8 @@ BuiltinFn = Callable[[Path, bool], dict]
 
 _BUILTINS: dict[str, BuiltinFn] = {
     "hot_tidy": _hot_tidy.run,
+    "journal_tidy": _journal_tidy.run,
+    "self_model_run": _self_model_run.run,
 }
 
 

@@ -19,6 +19,8 @@
 #   setup        Guided first-run configurator.
 #   update       Check and apply framework updates.
 #   completion   Print shell completion scripts.
+#   self-model   Autonomous self-observation loop (proposes RULES/IDENTITY/JOURNAL edits).
+#   persona      Persona interview engine (gap-driven slot filling, macro binding).
 #
 # All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
 
@@ -50,6 +52,8 @@ Subcommands:
   doctor       Diagnose the instance + environment.
   completion   Print shell completion scripts (bash/zsh).
   codex-auth   Inspect / refresh the local Codex CLI's OAuth state (jc-codex-auth).
+  self-model   Autonomous self-observation loop (jc-self-model).
+  persona      Persona interview engine (jc-persona).
   migrate-to-0.3  Bootstrap an existing 0.2.x instance for the unified gateway.
 
 Global flags:
@@ -103,7 +107,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|migrate-to-0.3|completion)
+    memory|heartbeat|voice|watchdog|workers|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|migrate-to-0.3|completion)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

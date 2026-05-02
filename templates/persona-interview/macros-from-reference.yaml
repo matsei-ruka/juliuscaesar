@@ -1,0 +1,93 @@
+# Persona macros — proper-noun substitutions applied to doctrine sections during sync.
+#
+# When the sync script copies a doctrine section verbatim from a reference
+# instance into the framework template, it first runs these substitutions to
+# replace concrete proper nouns (the reference instance's persona name,
+# principal, employer, etc.) with macro placeholders.
+#
+# At `jc setup` time, the placeholders are bound to the new instance's values
+# (persona.name = 'Alice Chen', principal.name = 'Sam Mehra', etc.) so each
+# downstream instance gets coherent doctrine text in its own language and
+# names — without re-authoring the doctrine.
+#
+# Substitution scope: doctrine sections only (the IMMUTABILE sections in
+# DOCTRINE_SECTIONS). Non-doctrine slots are operator-authored so they don't
+# need substitution.
+#
+# Order matters: the script applies substitutions in descending source-string
+# length to avoid prefix collisions ('Mario Leone' must be replaced before
+# 'Mario'; 'Omnisage LLC' before 'Omnisage').
+#
+# Format:
+#   substitutions:
+#     - source: "<exact string in the reference's doctrine sections>"
+#       macro:  "{{<macro.path>}}"
+#       note:   "<optional human note>"
+#
+# Operators with their own reference instance copy this file, replace the
+# values, and pass `--source-macros <path>` to the sync script. The macro
+# vocabulary itself (persona.name / principal.email / etc.) is the contract
+# downstream — it should not vary across reference instances.
+
+# ---------------------------------------------------------------------------
+# Canonical macro vocabulary — DO NOT rename keys below without updating
+# the binder (`lib/persona_macros.py`) and the spec.
+# ---------------------------------------------------------------------------
+#
+#   {{persona.full_name}}        — "Alice Chen", "Mario Leone"
+#   {{persona.name}}             — "Alice", "Mario"
+#   {{persona.slug}}             — "alice-chen", "mario-leone" (kebab-case)
+#   {{persona.email}}            — "alice@labs.example", "mario.leone@scovai.com"
+#   {{persona.role}}             — "Research Director", "COO"
+#   {{persona.role_with_employer}} — "COO di Omnisage", "Research Director at MIT Media Lab"
+#
+#   {{principal.full_name}}      — "Sam Mehra", "Filippo Perta"
+#   {{principal.name}}           — "Sam", "Filippo"
+#   {{principal.email}}          — "sam@labs.example", "filippo.perta@scovai.com"
+#
+#   {{employer.full_name}}       — "MIT Media Lab", "Omnisage LLC"
+#   {{employer.name}}            — "MIT Media Lab", "Omnisage"
+#
+# Add new macro keys cautiously — every key here is a contract every
+# downstream instance must satisfy at scaffold time.
+
+# ---------------------------------------------------------------------------
+# Substitutions — values from the lead-user reference (/opt/mario_leone_coo).
+# The sync script runs these in length-descending order on doctrine bodies.
+# ---------------------------------------------------------------------------
+
+substitutions:
+
+  # Persona — Mario Leone, COO of Omnisage
+  - source: "Mario Leone"
+    macro: "{{persona.full_name}}"
+  - source: "Mario"
+    macro: "{{persona.name}}"
+    note: "Standalone first-name references in §0 zones, §0.2 agent-self distinction, etc."
+  - source: "mario-leone"
+    macro: "{{persona.slug}}"
+    note: "File path slug, e.g. memory/L2/character-bible/mario-leone.md"
+  - source: "mario.leone@scovai.com"
+    macro: "{{persona.email}}"
+  - source: "COO di Omnisage"
+    macro: "{{persona.role_with_employer}}"
+    note: "Italian preposition baked into source — operators using English will likely localize at bind time."
+  - source: "COO assistant per Omnisage"
+    macro: "{{persona.role_with_employer}}"
+    note: "Variant phrasing in §0 Zona 2."
+  - source: "COO"
+    macro: "{{persona.role}}"
+
+  # Principal — Filippo Perta
+  - source: "Filippo Perta"
+    macro: "{{principal.full_name}}"
+  - source: "Filippo"
+    macro: "{{principal.name}}"
+  - source: "filippo.perta@scovai.com"
+    macro: "{{principal.email}}"
+
+  # Employer — Omnisage LLC
+  - source: "Omnisage LLC"
+    macro: "{{employer.full_name}}"
+  - source: "Omnisage"
+    macro: "{{employer.name}}"
