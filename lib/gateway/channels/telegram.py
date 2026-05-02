@@ -69,8 +69,9 @@ class TelegramChannel:
         "callback_query",
     )
 
-    # Inline-keyboard callback_data prefix for chat-auth Allow/Deny taps.
+    # Inline-keyboard callback_data prefixes.
     _AUTH_CALLBACK_PREFIX = "chat_auth:"
+    _EMAIL_CALLBACK_PREFIX = "jcemail:"
 
     def __init__(self, instance_dir: Path, cfg: ChannelConfig, log: LogFn):
         self.instance_dir = instance_dir
@@ -410,18 +411,15 @@ class TelegramChannel:
             self._auth_prompts_sent.add(chat_id)
 
     def _handle_callback_query(self, update: dict) -> None:
-        """Process an inline-keyboard tap. Only chat_auth: prefix is wired.
-
-        Approval/rejection mutates config files (`ops/gateway.yaml` +
-        `.env`), not the SQLite chats table. `_is_authorized` reads
-        from those files on every poll, so the change takes effect
-        without a gateway restart.
-        """
+        """Process an inline-keyboard tap. Handles chat_auth: and jcemail: prefixes."""
         cq = update.get("callback_query") or {}
         cq_id = cq.get("id")
         data = cq.get("data") or ""
         from_user = cq.get("from") or {}
         msg = cq.get("message") or {}
+        if data.startswith(self._EMAIL_CALLBACK_PREFIX):
+            self._handle_email_callback(cq_id, data, from_user, msg)
+            return
         if not data.startswith(self._AUTH_CALLBACK_PREFIX):
             return
         # Only the operator may authorize.
@@ -475,6 +473,54 @@ class TelegramChannel:
             f"telegram auth flipped chat_id={target_chat_id} action={action} "
             f"(config-only)"
         )
+
+    def _handle_email_callback(
+        self, cq_id: Any, data: str, from_user: dict, msg: dict
+    ) -> None:
+        """Handle jcemail: inline-keyboard taps for email draft approval."""
+        main = self._main_chat_id()
+        if main and str(from_user.get("id", "")) != main:
+            self._answer_callback(cq_id, "not authorized")
+            return
+        try:
+            _, action, draft_id = data.split(":", 2)
+        except ValueError:
+            self._answer_callback(cq_id, "bad payload")
+            return
+        if action not in ("approve", "reject"):
+            self._answer_callback(cq_id, "bad action")
+            return
+        import shutil
+        jc_email = shutil.which("jc-email") or str(
+            Path(__file__).resolve().parents[3] / "bin" / "jc-email"
+        )
+        env = __import__("os").environ.copy()
+        env["JC_INSTANCE_DIR"] = str(self.instance_dir)
+        try:
+            proc = __import__("subprocess").run(
+                [jc_email, "drafts", action, draft_id],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            ok = proc.returncode == 0
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"email draft {action} failed: {exc}")
+            self._answer_callback(cq_id, "error")
+            return
+        if not ok:
+            self.log(f"jc-email drafts {action} {draft_id} rc={proc.returncode} err={proc.stderr[:200]}")
+            self._answer_callback(cq_id, "failed")
+            return
+        label = "✅ Approved" if action == "approve" else "❌ Rejected"
+        self._edit_message_text(
+            chat_id=msg.get("chat", {}).get("id"),
+            message_id=msg.get("message_id"),
+            text=f"{label} — {draft_id}",
+        )
+        self._answer_callback(cq_id, "approved" if action == "approve" else "rejected")
+        self.log(f"email draft {action} draft_id={draft_id}")
 
     def _approve_chat(self, chat_id: str) -> None:
         """Add `chat_id` to yaml `chat_ids` + `.env` `TELEGRAM_CHAT_IDS`.

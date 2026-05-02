@@ -28,6 +28,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+import urllib.parse
+import urllib.request
+
 import yaml
 from . import email_state
 
@@ -208,6 +211,9 @@ def _approval_cfg(cfg: dict[str, Any]) -> tuple[bool, str | None, bool]:
     return notify_on_unknown, notify_chat_id, notify_on_draft
 
 
+_EMAIL_CALLBACK_PREFIX = "jcemail:"
+
+
 def _format_draft_notification(draft: dict[str, Any]) -> str:
     draft_id = draft["draft_id"]
     sender = draft["sender"]
@@ -216,15 +222,63 @@ def _format_draft_notification(draft: dict[str, Any]) -> str:
     if len(draft.get("draft_text") or "") > 500:
         preview += "..."
     return (
-        "Email draft pending approval\n\n"
+        "📧 Email draft pending approval\n\n"
         f"From: `{sender}`\n"
         f"Subject: {subject}\n"
         f"Draft: `{draft_id}`\n\n"
-        f"{preview}\n\n"
-        f"Approve: `jc email drafts approve {draft_id}`\n"
-        f"Reject: `jc email drafts reject {draft_id}`\n"
-        f"Edit: `jc email drafts edit {draft_id} <text>`"
+        f"{preview}"
     )
+
+
+def _send_draft_with_buttons(
+    instance_dir: Path,
+    draft: dict[str, Any],
+    chat_id_override: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Send draft approval notification with Approve/Reject inline keyboard buttons."""
+    _log = log or (lambda _: None)
+    # Resolve token + chat_id from env (same precedence as send_telegram.py).
+    from ..config import env_value
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
+    if not token:
+        _log("telegram draft buttons skipped — no TELEGRAM_BOT_TOKEN")
+        return
+    chat_id = (
+        chat_id_override
+        or os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
+        or os.environ.get("TELEGRAM_CHAT_ID")
+        or env_value(instance_dir, "TELEGRAM_CHAT_ID")
+    )
+    if not chat_id:
+        _log("telegram draft buttons skipped — no chat_id")
+        return
+    draft_id = draft["draft_id"]
+    body = _format_draft_notification(draft)
+    payload = {
+        "chat_id": chat_id,
+        "text": body,
+        "parse_mode": "Markdown",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"{_EMAIL_CALLBACK_PREFIX}approve:{draft_id}"},
+                {"text": "❌ Reject",  "callback_data": f"{_EMAIL_CALLBACK_PREFIX}reject:{draft_id}"},
+            ]]
+        },
+    }
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            if not result.get("ok"):
+                _log(f"telegram draft buttons api error: {result}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"telegram draft buttons failed: {exc}")
 
 
 def enqueue_draft(
@@ -270,9 +324,9 @@ def enqueue_draft(
 
     _notify_on_unknown, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
     if notify_on_draft:
-        _send_telegram_notify(
+        _send_draft_with_buttons(
             instance_dir,
-            _format_draft_notification(draft),
+            draft,
             chat_id_override=notify_chat_id,
             log=log,
         )

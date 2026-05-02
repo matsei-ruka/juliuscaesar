@@ -252,7 +252,7 @@ class TestDrafts(unittest.TestCase):
                 "email_uid": "777",
                 "sender_tier": "external",
             }
-            with patch.object(email_dispatcher, "_send_telegram_notify") as notify:
+            with patch.object(email_dispatcher, "_send_draft_with_buttons") as notify:
                 draft_id = email_dispatcher.enqueue_draft(
                     instance,
                     response="Draft body",
