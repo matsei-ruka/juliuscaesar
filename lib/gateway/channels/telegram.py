@@ -774,12 +774,18 @@ class TelegramChannel:
                                 text = f"[document: {name}]"
                         thread_id = message.get("message_thread_id")
                         conversation_id = f"{chat_id}:{thread_id}" if thread_id else chat_id
+                        _reply_msg = message.get("reply_to_message") or {}
                         meta: dict[str, Any] = {
                             "chat_id": chat_id,
                             "message_id": message.get("message_id"),
                             "message_thread_id": thread_id,
                             "username": (message.get("from") or {}).get("username"),
                             "chat_type": chat.get("type"),
+                            "reply_to_message_id": _reply_msg.get("message_id"),
+                            "reply_to_text": _reply_msg.get("text") or _reply_msg.get("caption"),
+                            "forward_from_message_id": message.get("forward_from_message_id"),
+                            "forward_from_chat_id": message.get("forward_from_chat_id"),
+                            "forward_from_username": (message.get("forward_from") or {}).get("username"),
                         }
                         if audio_path is not None:
                             # `was_voice` keeps its name for downstream voice-reply
