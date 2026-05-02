@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import brain_spec as _brain_spec
+
 
 SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider")
 SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email")
@@ -351,6 +353,16 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
 
     if data.get("default_brain") is not None:
         _validate_brain_spec(errors, "default_brain", data["default_brain"])
+        db_raw = data["default_brain"]
+        if (
+            isinstance(db_raw, str)
+            and ":" in db_raw
+            and data.get("default_model") is not None
+        ):
+            errors.append(
+                "default_brain: includes a model; also setting default_model "
+                "is ambiguous (set only one)"
+            )
     if data.get("default_fallback_brain") is not None:
         _validate_brain_spec(errors, "default_fallback_brain", data["default_fallback_brain"])
 
@@ -463,6 +475,15 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     errors.append(f"channels.{raw_key}.enabled: must be boolean")
                 if raw_value.get("brain") is not None:
                     _validate_brain_spec(errors, f"channels.{raw_key}.brain", raw_value["brain"])
+                    if (
+                        isinstance(raw_value["brain"], str)
+                        and ":" in raw_value["brain"]
+                        and raw_value.get("model") is not None
+                    ):
+                        errors.append(
+                            f"channels.{raw_key}.brain: includes a model; also "
+                            "setting model is ambiguous (set only one)"
+                        )
                 for key in ("timeout_seconds", "poll_interval_seconds"):
                     if raw_value.get(key) is not None:
                         _validate_positive_int(errors, f"channels.{raw_key}.{key}", raw_value[key])
@@ -615,8 +636,14 @@ def _normalize_channel_key(name: str) -> str:
 
 def _load_channel(name: str, raw: dict[str, Any], defaults: ChannelConfig) -> ChannelConfig:
     brain_value = raw.get("brain")
-    brain_name = str(brain_value).partition(":")[0] if brain_value is not None else ""
-    brain = brain_name if brain_name in SUPPORTED_BRAINS else None
+    parsed = _brain_spec.parse(str(brain_value) if brain_value is not None else None)
+    brain = parsed.brain if parsed.brain in SUPPORTED_BRAINS else None
+    explicit_model = str(raw["model"]) if raw.get("model") is not None else None
+    channel_model = (
+        parsed.model
+        if parsed.model is not None
+        else (explicit_model if explicit_model is not None else defaults.model)
+    )
 
     def _opt_str(key: str, default: str | None) -> str | None:
         v = raw.get(key, default)
@@ -636,7 +663,7 @@ def _load_channel(name: str, raw: dict[str, Any], defaults: ChannelConfig) -> Ch
             raw.get("blocked_chat_ids", defaults.blocked_chat_ids)
         ),
         brain=brain,
-        model=str(raw["model"]) if raw.get("model") is not None else defaults.model,
+        model=channel_model,
         timeout_seconds=int(raw.get("timeout_seconds") or defaults.timeout_seconds),
         watch_dir=_opt_str("watch_dir", defaults.watch_dir),
         poll_interval_seconds=_opt_int("poll_interval_seconds", defaults.poll_interval_seconds),
@@ -772,9 +799,29 @@ def load_config(instance_dir: Path) -> GatewayConfig:
     gateway = data.get("gateway", {}) if isinstance(data.get("gateway"), dict) else {}
     channels_raw = data.get("channels", {}) if isinstance(data.get("channels"), dict) else {}
 
-    default_brain = str(data.get("default_brain") or DEFAULT_CONFIG.default_brain)
-    if default_brain not in SUPPORTED_BRAINS:
+    raw_default_brain = data.get("default_brain")
+    parsed_default = _brain_spec.parse(
+        str(raw_default_brain) if raw_default_brain is not None else None
+    )
+    if parsed_default.brain in SUPPORTED_BRAINS:
+        default_brain = parsed_default.brain
+        default_model_from_spec = parsed_default.model
+    else:
+        # _validate_raw_config catches unknown brains before we reach here, so
+        # this branch only runs when default_brain is unset.
         default_brain = DEFAULT_CONFIG.default_brain
+        default_model_from_spec = None
+
+    explicit_default_model = (
+        str(data["default_model"])
+        if data.get("default_model") is not None and not isinstance(data.get("default_model"), dict)
+        else None
+    )
+    default_model = (
+        default_model_from_spec
+        if default_model_from_spec is not None
+        else explicit_default_model
+    )
 
     channels: dict[str, ChannelConfig] = {}
     for name, defaults in DEFAULT_CONFIG.channels.items():
@@ -790,9 +837,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
 
     return GatewayConfig(
         default_brain=default_brain,
-        default_model=str(data["default_model"])
-        if data.get("default_model") is not None and not isinstance(data.get("default_model"), dict)
-        else None,
+        default_model=default_model,
         poll_interval_seconds=float(gateway.get("poll_interval_seconds") or DEFAULT_CONFIG.poll_interval_seconds),
         lease_seconds=int(gateway.get("lease_seconds") or DEFAULT_CONFIG.lease_seconds),
         max_retries=int(gateway.get("max_retries") or DEFAULT_CONFIG.max_retries),

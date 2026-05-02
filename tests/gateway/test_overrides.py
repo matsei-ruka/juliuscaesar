@@ -26,7 +26,7 @@ class InlineOverrideTests(unittest.TestCase):
 
     def test_codex_alias(self):
         result = overrides.parse_inline_override("[gpt5] write tests")
-        self.assertEqual(result.spec, "codex:gpt-5")
+        self.assertEqual(result.spec, "codex:gpt-5.4")
 
     def test_no_prefix_returns_none(self):
         self.assertIsNone(overrides.parse_inline_override("just a message"))

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from . import brain_spec as _brain_spec
 from .config import GatewayConfig
 from .queue import Event
 
@@ -56,12 +57,8 @@ def _decode_meta(event: Event) -> dict:
 
 def _split_brain_spec(spec: str) -> tuple[str, str | None]:
     """`claude:opus-4-7-1m` → ('claude', 'opus-4-7-1m'); `codex` → ('codex', None)."""
-    if not spec:
-        return "", None
-    if ":" in spec:
-        brain, model = spec.split(":", 1)
-        return brain, model or None
-    return spec, None
+    parsed = _brain_spec.parse(spec)
+    return parsed.brain, parsed.model
 
 
 def channel_name(event: Event) -> str:
