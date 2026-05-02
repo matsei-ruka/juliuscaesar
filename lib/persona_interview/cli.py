@@ -228,7 +228,8 @@ def _cmd_interview(
 
 
 def _cmd_gaps(instance_dir: Path, bank: QuestionsBank, as_json: bool) -> int:
-    gaps = find_gaps(instance_dir, bank)
+    all_slots = find_gaps(instance_dir, bank, include_populated=True)
+    gaps = [g for g in all_slots if g.state.value != "populated"]
     if as_json:
         def _prompt_dict(p: Prompt) -> dict:
             d = {
@@ -292,10 +293,10 @@ def _cmd_gaps(instance_dir: Path, bank: QuestionsBank, as_json: bool) -> int:
                 }
                 for g in gaps
             ],
-            "summary": summarize(gaps),
+            "summary": summarize(all_slots),
         }, indent=2))
         return 0
-    summary = summarize(gaps)
+    summary = summarize(all_slots)
     print(f"Total: {summary['total']}  "
           f"missing: {summary['missing']}  "
           f"unfilled: {summary['unfilled']}  "
