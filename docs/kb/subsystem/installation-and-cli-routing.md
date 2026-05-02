@@ -68,4 +68,4 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap still lists public distribution via npm, brew, or curl as future work.
-- 2026-05-01: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.04.28`) used by `jc update` to compare against released framework versions.
+- 2026-05-02: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.05.02`) used by `jc update` to compare against released framework versions.

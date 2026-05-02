@@ -1,7 +1,7 @@
 # JuliusCaesar
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2026.04.28-blue.svg)](https://github.com/matsei-ruka/juliuscaesar/releases/tag/v2026.04.28)
+[![Version](https://img.shields.io/badge/version-2026.05.02-blue.svg)](https://github.com/matsei-ruka/juliuscaesar/releases/tag/v2026.05.02)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-8A2BE2)](https://www.anthropic.com/claude-code)
 

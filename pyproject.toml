@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "juliuscaesar"
-version = "2026.04.28"
+version = "2026.05.02"
 description = "Local-first personal assistant runtime with gateway, watchdog, heartbeat, memory, and voice tooling."
 readme = "README.md"
 requires-python = ">=3.11"
