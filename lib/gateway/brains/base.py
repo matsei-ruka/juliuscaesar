@@ -189,6 +189,17 @@ class Brain:
     def capture_session_id(self, started_at: str) -> str | None:
         return None
 
+    def pre_invoke_snapshot(self) -> object | None:
+        """Optional hook captured before the adapter spawns.
+
+        Subclasses that identify their own native session by diffing
+        before/after state of an external store (e.g. `~/.codex/sessions/`)
+        should override this. The returned value is stored on
+        `self._pre_state` and is available to `capture_session_id`. Default:
+        no snapshot.
+        """
+        return None
+
     # --- invocation --------------------------------------------------------
 
     def validate(self) -> None:
@@ -235,6 +246,10 @@ class Brain:
         timeout = self.override.timeout_seconds or timeout_seconds
         start = now_iso()
         wall_start = time.monotonic()
+        try:
+            self._pre_state = self.pre_invoke_snapshot()
+        except Exception:  # noqa: BLE001 — snapshot is best-effort forensic state
+            self._pre_state = None
         log = log_event or (lambda _msg: None)
         # Stderr goes to a per-invocation scratch file so we can extract a tail
         # for the recovery classifier on rc!=0. We append the full contents to
