@@ -576,12 +576,18 @@ class GatewayRuntime:
         # so a "hi" followed immediately by "compare three providers" still
         # routes the second message to the appropriate brain.
 
-        response = result.response or "(no response)"
+        response = result.response or ""
         meta.setdefault("delivery_channel", channel)
-        if meta.get("was_voice"):
-            self._render_voice_reply(response, meta)
-        self._deliver_response(channel, response, meta)
-        self._log_outbound_transcript(event, response, meta, channel)
+        if response:
+            if meta.get("was_voice"):
+                self._render_voice_reply(response, meta)
+            self._deliver_response(channel, response, meta)
+            self._log_outbound_transcript(event, response, meta, channel)
+        else:
+            self.log(
+                f"dispatch silent id={event.id} brain={brain} — "
+                "brain produced no text, skipping delivery + transcript log"
+            )
         if self._company_reporter is not None:
             try:
                 meta_with_brain = {**meta, "brain": brain}
