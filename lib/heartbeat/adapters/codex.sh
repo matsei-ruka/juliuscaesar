@@ -65,7 +65,36 @@ if [[ $# -gt 0 ]]; then
     ARGS+=("$@")
 fi
 
-# Prompt comes from stdin via the `-` positional.
+# Prompt comes from stdin via the `-` positional. We prepend the gateway
+# output contract so codex emits structured JSON the framework can parse —
+# codex CLI has no --append-system-prompt flag, so the contract rides in
+# the prompt body as a hard rule the model reads first.
 ARGS+=("-")
 
-exec codex "${ARGS[@]}"
+exec codex "${ARGS[@]}" < <(
+    cat <<'CONTRACT'
+[GATEWAY OUTPUT CONTRACT — read carefully, this overrides any default behavior.]
+
+Your FINAL stdout MUST be a single JSON object on a single line (no code fences,
+no prose before or after) with exactly these fields:
+
+  {"push_message_sent": <bool>, "message": <string>}
+
+Rules:
+- If you used PushNotification (or any equivalent push tool) to deliver the
+  user-facing output yourself during this task, set push_message_sent=true.
+  The 'message' field then becomes a short audit log of what you pushed —
+  the framework will NOT re-deliver it.
+- If you did NOT use PushNotification and want the framework to relay your
+  reply to the user, set push_message_sent=false and put the full reply in
+  'message'. The framework will deliver it to the channel.
+- 'message' is always required. Use an empty string only for genuine no-op
+  silent runs.
+- Emit ONLY the JSON object as your final output. No prefix, no suffix, no
+  explanation, no code fence.
+
+[END GATEWAY OUTPUT CONTRACT]
+
+CONTRACT
+    cat
+)

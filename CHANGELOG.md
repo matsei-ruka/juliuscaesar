@@ -33,8 +33,11 @@ Hotfix for operator safety, command UX, and duplicate-message suppression.
     parser; the legacy `SILENT`-detection branches are removed.
   - System-prompt updated in `lib/heartbeat/adapters/claude.sh` and
     `CODEX_API_INSTRUCTIONS` to enforce the contract.
-  - Other adapters (codex CLI, aider, gemini, minimax, opencode) gracefully
-    degrade via the parser's raw-fallback until their prompts are migrated.
+  - `lib/heartbeat/adapters/codex.sh` now prepends the contract to the prompt
+    body via process substitution (codex CLI has no `--append-system-prompt`
+    flag), so codex CLI is first-class with the JSON contract too.
+  - Remaining adapters (aider, gemini, minimax, opencode) gracefully degrade
+    via the parser's raw-fallback until their prompts are migrated.
 
 ## 2026.05.02.1
 
