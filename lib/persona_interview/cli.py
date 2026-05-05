@@ -110,6 +110,24 @@ class TerminalPrompter:
                 return "skip"
             print("  Invalid; choose k / r / s.")
 
+    def confirm_slot_body(self, slot, composed_body: str) -> str:
+        print(f"\n  Preview for {self._bold(slot.slot_id)}:")
+        body = composed_body.rstrip("\n")
+        if body:
+            for line in body.splitlines():
+                print(f"    │ {line}")
+        else:
+            print(self._dim("    │ (empty)"))
+        while True:
+            ans = input("  [a]pply / [r]e-do / [b]abort ? ").strip().lower()
+            if ans in ("a", "apply"):
+                return "apply"
+            if ans in ("r", "redo", "re-do"):
+                return "redo"
+            if ans in ("b", "abort", "s", "skip"):
+                return "abort"
+            print("  Invalid; choose a / r / b.")
+
     # ----- input mode helpers -----
 
     def _ask_text(self) -> str | None:
@@ -117,20 +135,18 @@ class TerminalPrompter:
         return ans if ans != "" else None
 
     def _ask_longtext(self) -> str | None:
-        print(self._dim("    (multi-line; end with a blank line)"))
+        print(self._dim("    (multi-line; type EOF on its own line to finish)"))
         lines: list[str] = []
         while True:
             try:
                 line = input("  > ")
             except EOFError:
                 break
-            if line == "" and lines:
+            if line.strip() == "EOF":
                 break
-            if line == "" and not lines:
-                # First-line empty: treat as skip.
-                return None
             lines.append(line)
-        return "\n".join(lines) if lines else None
+        text = "\n".join(lines)
+        return text if text.strip() else None
 
     def _ask_list(self) -> str | None:
         print(self._dim("    (one item per line; end with a blank line)"))

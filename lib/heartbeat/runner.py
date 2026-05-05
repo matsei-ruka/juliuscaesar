@@ -538,7 +538,8 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         output_path.write_text(output, encoding="utf-8")
 
         stripped = output.strip()
-        if not stripped or stripped == "SILENT":
+        last_line = stripped.splitlines()[-1].strip() if stripped else ""
+        if not stripped or stripped == "SILENT" or last_line == "SILENT":
             log_line(f"task {task_name}: silent/empty output, no Telegram send", log_path)
             return 0
 

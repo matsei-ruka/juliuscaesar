@@ -22,7 +22,7 @@ Sources checked:
 `jc` is a Bash router. It accepts optional global `--instance-dir <path>` or
 `--instance-dir=<path>`, then dispatches `jc <name>` to `jc-<name>` on `PATH`.
 
-Router version: `2026.05.02.1`.
+Router version: `2026.05.05.2`.
 
 Routed public subcommands:
 

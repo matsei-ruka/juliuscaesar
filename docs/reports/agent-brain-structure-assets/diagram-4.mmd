@@ -1,0 +1,8 @@
+flowchart TD
+    Q["state/gateway/queue.db events"] --> C["Corpus reader"]
+    U["memory/L1/USER.md"] --> C
+    C --> D["Detectors"]
+    D --> P["Proposal generator"]
+    P --> S["memory/staging/*.jsonl"]
+    S --> A["Apply or reject"]
+    A --> U

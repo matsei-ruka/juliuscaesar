@@ -3,6 +3,24 @@
 All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 (`YYYY.MM.DD`). Newest first.
 
+## 2026.05.05.2
+
+Hotfix for operator safety, command UX, and duplicate-message suppression.
+
+- `jc persona interview` longtext prompts now finish with an `EOF` line instead
+  of a blank line, so pasted multi-paragraph content keeps internal paragraph
+  breaks instead of bleeding into the next prompt.
+- Multi-prompt persona slots now show a composed-body preview and require
+  apply / re-do / abort before splicing into L1 memory files.
+- Shell completion now includes nested `jc email pending|senders|drafts`
+  subcommands.
+- New instance instructions now tell agents to create or install instance-owned
+  skills at `$JC_INSTANCE_DIR/skills/<skillname>/SKILL.md`.
+- Heartbeat runner now suppresses Telegram delivery when the brain emits a
+  trailing `SILENT` line, mirroring the gateway runtime fix from `788447f`.
+  Previously the heartbeat path bypassed gateway suppression and shipped the
+  full narration + literal `SILENT` to Telegram as a duplicate message.
+
 ## 2026.05.02.1
 
 The **persona system** lands. JuliusCaesar can now host the full coherent-identity

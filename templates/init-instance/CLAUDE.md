@@ -29,6 +29,16 @@ jc memory rebuild              # Re-index after file edits
 
 The routing table is in `memory/INDEX.md` (auto-generated).
 
+## Skills
+
+When creating or installing agent skills for this instance, put each skill under
+`skills/<skillname>/SKILL.md` in the instance home. With an explicit path, that
+is `$JC_INSTANCE_DIR/skills/<skillname>/SKILL.md`.
+
+Do not install instance-owned skills into the JuliusCaesar framework checkout or
+into a global Codex/Claude skills directory unless the operator explicitly asks
+for a global skill.
+
 ## Framework
 
 This instance runs on [JuliusCaesar](https://github.com/matsei-ruka/juliuscaesar). The runner code is invoked via the `jc-*` binaries in `~/.local/bin/`. This repo contains only instance-specific data: identity, memory content, configurations.

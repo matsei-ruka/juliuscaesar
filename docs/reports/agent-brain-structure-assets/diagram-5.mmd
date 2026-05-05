@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph Memory["Memory"]
+        ID["IDENTITY.md"]
+        US["USER.md"]
+        RU["RULES.md"]
+        HO["HOT.md"]
+        L2["L2 vault"]
+    end
+
+    subgraph Runtime["Runtime"]
+        GW["gateway.yaml"]
+        RT["runtime.py"]
+        RO["router.py"]
+    end
+
+    subgraph Models["Brains and models"]
+        BR["dispatch.py registry"]
+        CL["claude"]
+        CX["codex"]
+        CA["codex_api"]
+        GM["gemini"]
+        OP["opencode"]
+        AI["aider"]
+    end
+
+    Memory --> Runtime
+    Runtime --> BR
+    BR --> CL
+    BR --> CX
+    BR --> CA
+    BR --> GM
+    BR --> OP
+    BR --> AI

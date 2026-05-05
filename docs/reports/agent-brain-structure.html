@@ -1,0 +1,193 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Agent Brain Structure</title>
+<style>
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body {
+  color: #172033;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Arial, sans-serif;
+  font-size: 11.2pt;
+  line-height: 1.48;
+  margin: 0 auto;
+  max-width: 900px;
+  background: white;
+}
+h1 { font-size: 30pt; line-height: 1.08; margin: 0 0 12px; color: #0f172a; }
+h2 { font-size: 18pt; margin: 28px 0 10px; color: #18233a; border-top: 1px solid #d9e0ea; padding-top: 16px; }
+h3 { font-size: 13.5pt; margin: 20px 0 8px; }
+p { margin: 8px 0 12px; }
+ul { margin: 8px 0 14px 24px; padding: 0; }
+li { margin: 4px 0; }
+code { background: #f2f5f9; border: 1px solid #e1e7ef; border-radius: 4px; padding: 0 4px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.92em; }
+pre { background: #f6f8fb; border: 1px solid #dbe3ee; border-radius: 8px; padding: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+pre code { background: transparent; border: 0; padding: 0; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0 20px; page-break-inside: avoid; }
+th, td { border: 1px solid #d7dfeb; padding: 7px 9px; vertical-align: top; }
+th { background: #edf2f7; text-align: left; color: #152238; }
+tr:nth-child(even) td { background: #fafbfd; }
+.diagram { margin: 18px 0 24px; padding: 12px; border: 1px solid #dce4ef; border-radius: 8px; background: #fbfcfe; page-break-inside: avoid; }
+.diagram img { display: block; width: 100%; max-height: 470px; object-fit: contain; }
+</style>
+</head>
+<body>
+<h1>Agent Brain Structure</h1>
+<p>Simple high-level report for the JuliusCaesar agent brain.</p>
+<h2>Executive summary</h2>
+<p>The agent brain is not one file. It is a small set of Markdown memory files, runtime configuration files, and Python dispatch code.</p>
+<p>In a real assistant instance, the most important files live under:</p>
+<ul>
+<li><code>CLAUDE.md</code></li>
+<li><code>memory/L1/IDENTITY.md</code></li>
+<li><code>memory/L1/USER.md</code></li>
+<li><code>memory/L1/RULES.md</code></li>
+<li><code>memory/L1/HOT.md</code></li>
+<li><code>memory/L1/CHATS.md</code></li>
+<li><code>memory/L2/**/*.md</code></li>
+<li><code>memory/INDEX.md</code></li>
+<li><code>memory/index.sqlite</code></li>
+<li><code>ops/gateway.yaml</code></li>
+<li><code>ops/user_model.yaml</code></li>
+</ul>
+<p>In this framework repository, the starter versions live under <code>templates/init-instance/</code>. The framework code that reads, indexes, routes, and updates them lives mostly under <code>lib/memory/</code>, <code>lib/gateway/</code>, and <code>lib/user_model/</code>.</p>
+<h2>Brain map</h2>
+<figure class="diagram"><img src="agent-brain-structure-assets/diagram-1.svg" alt="Diagram 1"></figure>
+<h2>L1 memory: always-loaded brain files</h2>
+<p>L1 is the small, durable part of the brain. It should stay compact because it is loaded frequently.</p>
+<table>
+<thead><tr><th>File</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>CLAUDE.md</code></td><td>Entry file for Claude Code sessions. It imports the L1 memory files and explains how to use L2 memory.</td></tr>
+<tr><td><code>memory/L1/IDENTITY.md</code></td><td>Defines who the assistant is, its boundaries, and its basic operating identity.</td></tr>
+<tr><td><code>memory/L1/USER.md</code></td><td>Stores durable information about the user: profile, preferences, communication style, standing requirements.</td></tr>
+<tr><td><code>memory/L1/RULES.md</code></td><td>Stores stable rules, corrections, lessons, and operational policies.</td></tr>
+<tr><td><code>memory/L1/HOT.md</code></td><td>Short rolling cache for what is active now. It is intentionally capped to avoid bloating every session.</td></tr>
+<tr><td><code>memory/L1/CHATS.md</code></td><td>Known chat/thread context. Claude imports it from <code>CLAUDE.md</code>; non-Claude gateway preambles currently load the core four L1 files.</td></tr>
+</tbody></table>
+<p>Template source in this repo:</p>
+<ul>
+<li><code>templates/init-instance/CLAUDE.md</code></li>
+<li><code>templates/init-instance/memory/L1/IDENTITY.md</code></li>
+<li><code>templates/init-instance/memory/L1/USER.md</code></li>
+<li><code>templates/init-instance/memory/L1/RULES.md</code></li>
+<li><code>templates/init-instance/memory/L1/HOT.md</code></li>
+</ul>
+<p>Runtime loader:</p>
+<ul>
+<li><code>lib/gateway/context.py</code></li>
+</ul>
+<p>Important truth: <code>lib/gateway/context.py</code> builds a preamble for non-Claude brains by concatenating <code>IDENTITY.md</code>, <code>USER.md</code>, <code>RULES.md</code>, and <code>HOT.md</code>. Claude Code gets the imports directly from <code>CLAUDE.md</code>.</p>
+<h2>L2 memory: searchable long-term memory</h2>
+<p>L2 is the larger memory vault. It is not always loaded. It is searched when needed.</p>
+<figure class="diagram"><img src="agent-brain-structure-assets/diagram-2.svg" alt="Diagram 2"></figure>
+<p>Key files and code:</p>
+<table>
+<thead><tr><th>File</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>memory/L2/**/*.md</code></td><td>Large durable memory: people, projects, learnings, references, business facts.</td></tr>
+<tr><td><code>memory/INDEX.md</code></td><td>Generated routing/index file for memory entries.</td></tr>
+<tr><td><code>memory/index.sqlite</code></td><td>Generated SQLite + FTS5 search index. Safe to rebuild from Markdown.</td></tr>
+<tr><td><code>memory/LOG.md</code></td><td>Human-readable memory change log.</td></tr>
+<tr><td><code>bin/jc-memory</code></td><td>CLI surface for memory search, read, write, rebuild, lint, link.</td></tr>
+<tr><td><code>lib/memory/db.py</code></td><td>Parser and SQLite/FTS5 index implementation.</td></tr>
+</tbody></table>
+<p>Important truth: Markdown is the source of truth. The SQLite database and <code>INDEX.md</code> are derived artifacts.</p>
+<h2>Model and brain routing</h2>
+<p>The gateway decides which brain and model should answer a message.</p>
+<figure class="diagram"><img src="agent-brain-structure-assets/diagram-3.svg" alt="Diagram 3"></figure>
+<p>Key files:</p>
+<table>
+<thead><tr><th>File</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>ops/gateway.yaml</code></td><td>Instance config for default brain, default model, triage, per-channel routing, and brain overrides.</td></tr>
+<tr><td><code>lib/gateway/config.py</code></td><td>Loads and validates gateway config. Defines supported brains and default routing config.</td></tr>
+<tr><td><code>lib/gateway/router.py</code></td><td>Pure routing decision tree. Order: explicit override, cron pin, sticky, triage, fallback/default.</td></tr>
+<tr><td><code>lib/gateway/runtime.py</code></td><td>Claims events, applies overrides, invokes the chosen brain, delivers the response.</td></tr>
+<tr><td><code>lib/gateway/triage/</code></td><td>Optional classifiers that choose route class and brain/model.</td></tr>
+<tr><td><code>lib/gateway/triage/prompt.md</code></td><td>Triage prompt and default class-to-brain examples.</td></tr>
+<tr><td><code>lib/gateway/brains/dispatch.py</code></td><td>Registry mapping brain names to Python wrappers.</td></tr>
+<tr><td><code>lib/gateway/brains/*.py</code></td><td>Per-brain wrappers for Claude, Codex, Codex API, Gemini, Opencode, Aider.</td></tr>
+<tr><td><code>lib/heartbeat/adapters/*.sh</code></td><td>Shell adapters for native CLI brains.</td></tr>
+</tbody></table>
+<p>Supported brain names in code:</p>
+<ul>
+<li><code>claude</code></li>
+<li><code>codex</code></li>
+<li><code>codex_api</code></li>
+<li><code>gemini</code></li>
+<li><code>opencode</code></li>
+<li><code>aider</code></li>
+</ul>
+<p>The direct OpenAI Responses API path is <code>codex_api</code>. Its default model is currently <code>gpt-5.4-mini</code> in <code>lib/gateway/adapters/codex_api.py</code>, unless the gateway route passes a different model.</p>
+<h2>Autonomous user model</h2>
+<p>The user model system is the part that can notice patterns over time and propose updates to <code>memory/L1/USER.md</code>.</p>
+<figure class="diagram"><img src="agent-brain-structure-assets/diagram-4.svg" alt="Diagram 4"></figure>
+<p>Key files:</p>
+<table>
+<thead><tr><th>File</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>ops/user_model.yaml</code></td><td>Instance config for autonomous user-model updates. Default is disabled.</td></tr>
+<tr><td><code>templates/init-instance/ops/user_model.yaml</code></td><td>Starter config.</td></tr>
+<tr><td><code>bin/jc-user-model</code></td><td>CLI wrapper for running/installing/applying user-model updates.</td></tr>
+<tr><td><code>lib/user_model/conf.py</code></td><td>Loads config.</td></tr>
+<tr><td><code>lib/user_model/corpus.py</code></td><td>Reads recent conversation/event history.</td></tr>
+<tr><td><code>lib/user_model/detector.py</code></td><td>Detects repeated topics, communication preferences, priority shifts, new entities, and rule drift.</td></tr>
+<tr><td><code>lib/user_model/proposer.py</code></td><td>Uses an LLM to generate structured proposals.</td></tr>
+<tr><td><code>lib/user_model/store.py</code></td><td>Stores proposals as JSONL under <code>memory/staging/</code>.</td></tr>
+<tr><td><code>lib/user_model/applier.py</code></td><td>Applies approved proposals safely, only inside <code>memory/</code>, with backups.</td></tr>
+<tr><td><code>lib/user_model/runner.py</code></td><td>Orchestrates the full detect/propose cycle.</td></tr>
+</tbody></table>
+<p>Important truth: this system updates the brain indirectly. It does not blindly rewrite <code>USER.md</code>; it creates proposals, and apply mode decides whether they wait for approval or can be applied automatically.</p>
+<h2>Runtime state that supports the brain</h2>
+<p>These are not the identity of the agent, but they help continuity.</p>
+<table>
+<thead><tr><th>Path</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>state/gateway/queue.db</code></td><td>Event queue and message history used by the gateway.</td></tr>
+<tr><td><code>state/transcripts/*.jsonl</code></td><td>Per-conversation transcripts.</td></tr>
+<tr><td><code>state/sessions/</code> or sessions DB/table</td><td>Brain session ids for resuming conversations.</td></tr>
+<tr><td><code>state/gateway/gateway.log</code></td><td>Runtime log for routing, dispatch, retries, and adapter failures.</td></tr>
+<tr><td><code>state/workers.db</code> and <code>state/workers/</code></td><td>Background worker state.</td></tr>
+</tbody></table>
+<p>These are runtime data. The durable authored brain is still the Markdown memory and config files.</p>
+<h2>Simple mental model</h2>
+<figure class="diagram"><img src="agent-brain-structure-assets/diagram-5.svg" alt="Diagram 5"></figure>
+<p>In one sentence:</p>
+<p>The agent&#x27;s brain is the L1/L2 Markdown memory plus gateway model routing, with <code>USER.md</code> kept fresh manually or through the optional autonomous user-model proposal system.</p>
+<h2>What to edit for common changes</h2>
+<table>
+<thead><tr><th>Need</th><th>Edit</th></tr></thead>
+<tbody>
+<tr><td>Change who the assistant is</td><td><code>memory/L1/IDENTITY.md</code></td></tr>
+<tr><td>Change user preferences</td><td><code>memory/L1/USER.md</code></td></tr>
+<tr><td>Add a stable rule or correction</td><td><code>memory/L1/RULES.md</code></td></tr>
+<tr><td>Add temporary active context</td><td><code>memory/L1/HOT.md</code></td></tr>
+<tr><td>Add larger reference memory</td><td><code>memory/L2/**/*.md</code>, then run <code>jc memory rebuild</code></td></tr>
+<tr><td>Change default brain/model</td><td><code>ops/gateway.yaml</code></td></tr>
+<tr><td>Change route by message class</td><td><code>ops/gateway.yaml</code> triage routing</td></tr>
+<tr><td>Enable automatic user-profile proposals</td><td><code>ops/user_model.yaml</code></td></tr>
+</tbody></table>
+<h2>Source files checked</h2>
+<ul>
+<li><code>docs/ARCHITECTURE.md</code></li>
+<li><code>docs/GATEWAY.md</code></li>
+<li><code>docs/kb/subsystem/memory-system.md</code></li>
+<li><code>docs/kb/contract/brain-capabilities.md</code></li>
+<li><code>docs/kb/contract/instance-layout-and-resolution.md</code></li>
+<li><code>docs/specs/autonomous-user-model.md</code></li>
+<li><code>templates/init-instance/CLAUDE.md</code></li>
+<li><code>templates/init-instance/memory/L1/*.md</code></li>
+<li><code>templates/init-instance/ops/user_model.yaml</code></li>
+<li><code>lib/gateway/context.py</code></li>
+<li><code>lib/gateway/config.py</code></li>
+<li><code>lib/gateway/router.py</code></li>
+<li><code>lib/gateway/runtime.py</code></li>
+<li><code>lib/gateway/brains/dispatch.py</code></li>
+<li><code>lib/gateway/adapters/codex_api.py</code></li>
+<li><code>lib/memory/db.py</code></li>
+<li><code>lib/user_model/*.py</code></li>
+</ul>
+</body>
+</html>

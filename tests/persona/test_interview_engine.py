@@ -37,8 +37,11 @@ class FakePrompter:
     macros: dict[str, str] = field(default_factory=dict)
     answers: dict[str, dict[str, str]] = field(default_factory=dict)
     overwrite_decisions: dict[str, str] = field(default_factory=dict)
+    slot_body_decisions: dict[str, list[str]] = field(default_factory=dict)
     messages: list[str] = field(default_factory=list)
     phases_announced: list[str] = field(default_factory=list)
+    prompt_calls: list[tuple[str, str]] = field(default_factory=list)
+    previews: list[tuple[str, str]] = field(default_factory=list)
 
     def announce_phase(self, phase, detail=""):
         self.phases_announced.append(f"{phase}:{detail}")
@@ -50,10 +53,18 @@ class FakePrompter:
         return self.macros.get(macro_key, "")
 
     def ask_prompt(self, prompt, slot):
+        self.prompt_calls.append((slot.slot_id, prompt.id))
         return self.answers.get(slot.slot_id, {}).get(prompt.id)
 
     def confirm_overwrite(self, slot, current_body):
         return self.overwrite_decisions.get(slot.slot_id, "skip")
+
+    def confirm_slot_body(self, slot, composed_body):
+        self.previews.append((slot.slot_id, composed_body))
+        decisions = self.slot_body_decisions.get(slot.slot_id)
+        if decisions:
+            return decisions.pop(0)
+        return "apply"
 
     def show_message(self, message):
         self.messages.append(message)
@@ -218,6 +229,102 @@ def test_interview_brownfield_keep_does_not_modify(tmp_path):
     assert "rules.modes" in result.skipped
     text = (tmp_path / "memory/L1/RULES.md").read_text(encoding="utf-8")
     assert "Old content." in text
+
+
+def test_interview_multi_prompt_slot_previews_before_splice(tmp_path):
+    _build_instance(tmp_path, {
+        "memory/L1/IDENTITY.md": "## Character\n<!-- OPEN -->\n\n{{slot:identity.character}}\n",
+    })
+    slot = _slot(
+        "identity.character",
+        "memory/L1/IDENTITY.md",
+        "## Character",
+        kind="structured",
+        prompts=[
+            Prompt(id="bio", text="Bio?", kind="longtext", validation=Validation(required=True)),
+            Prompt(id="voice", text="Voice?", kind="longtext", validation=Validation(required=False)),
+        ],
+        composition=Composition(template="Bio:\n{{bio}}\n\nVoice:\n{{voice}}\n"),
+    )
+    bank = QuestionsBank(version=1, slots=(slot,))
+    prompter = FakePrompter(
+        answers={"identity.character": {"bio": "Personal Details\n\nFull name: Florian Berger"}},
+        slot_body_decisions={"identity.character": ["apply"]},
+    )
+
+    result = interview(tmp_path, bank, prompter)
+
+    assert "identity.character" in result.filled
+    assert prompter.previews == [
+        (
+            "identity.character",
+            "Bio:\nPersonal Details\n\nFull name: Florian Berger\n\nVoice:\n",
+        )
+    ]
+    text = (tmp_path / "memory/L1/IDENTITY.md").read_text(encoding="utf-8")
+    assert "Personal Details\n\nFull name: Florian Berger" in text
+
+
+def test_interview_multi_prompt_redo_restarts_without_intermediate_splice(tmp_path):
+    _build_instance(tmp_path, {
+        "memory/L1/IDENTITY.md": "## Character\n<!-- OPEN -->\n\n{{slot:identity.character}}\n",
+    })
+    slot = _slot(
+        "identity.character",
+        "memory/L1/IDENTITY.md",
+        "## Character",
+        kind="structured",
+        prompts=[
+            Prompt(id="bio", text="Bio?", kind="text", validation=Validation(required=True)),
+            Prompt(id="voice", text="Voice?", kind="text", validation=Validation(required=False)),
+        ],
+    )
+    bank = QuestionsBank(version=1, slots=(slot,))
+    prompter = FakePrompter(
+        answers={"identity.character": {"bio": "Bio", "voice": "Voice"}},
+        slot_body_decisions={"identity.character": ["redo", "apply"]},
+    )
+
+    result = interview(tmp_path, bank, prompter)
+
+    assert "identity.character" in result.filled
+    assert len(prompter.previews) == 2
+    assert prompter.prompt_calls == [
+        ("identity.character", "bio"),
+        ("identity.character", "voice"),
+        ("identity.character", "bio"),
+        ("identity.character", "voice"),
+    ]
+    text = (tmp_path / "memory/L1/IDENTITY.md").read_text(encoding="utf-8")
+    assert text.count("- **bio:** Bio") == 1
+
+
+def test_interview_multi_prompt_abort_leaves_file_unchanged_and_audits_skip(tmp_path):
+    original = "## Character\n<!-- OPEN -->\n\n{{slot:identity.character}}\n"
+    _build_instance(tmp_path, {"memory/L1/IDENTITY.md": original})
+    slot = _slot(
+        "identity.character",
+        "memory/L1/IDENTITY.md",
+        "## Character",
+        kind="structured",
+        prompts=[
+            Prompt(id="bio", text="Bio?", kind="text", validation=Validation(required=True)),
+            Prompt(id="voice", text="Voice?", kind="text", validation=Validation(required=False)),
+        ],
+    )
+    bank = QuestionsBank(version=1, slots=(slot,))
+    prompter = FakePrompter(
+        answers={"identity.character": {"bio": "Bio", "voice": "Voice"}},
+        slot_body_decisions={"identity.character": ["abort"]},
+    )
+
+    result = interview(tmp_path, bank, prompter)
+
+    assert "identity.character" in result.skipped
+    text = (tmp_path / "memory/L1/IDENTITY.md").read_text(encoding="utf-8")
+    assert text == original
+    assert result.audit_log_path is not None
+    assert '"event": "slot_skipped"' in result.audit_log_path.read_text(encoding="utf-8")
 
 
 def test_interview_only_slot_id_targets_one(tmp_path):

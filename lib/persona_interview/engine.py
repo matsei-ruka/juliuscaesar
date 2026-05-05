@@ -15,7 +15,8 @@ Flow:
 
   3. Slot interview — for each gap, walk visible prompts (respecting
      `depends_on`), validate each answer against `Validation`, compose the
-     answers via `compose.compose()`, splice into the target file.
+     answers via `compose.compose()`, preview multi-prompt slots, splice into
+     the target file.
 
   4. Audit log — every slot interaction (filled, skipped, redone) is
      appended to `state/persona/interview/<timestamp>.jsonl`.
@@ -67,6 +68,9 @@ class Prompter(Protocol):
 
     def confirm_overwrite(self, slot: Slot, current_body: str) -> str:
         """Returns one of: keep | replace | skip. Used in --include-populated mode."""
+
+    def confirm_slot_body(self, slot: Slot, composed_body: str) -> str:
+        """Returns one of: apply | redo | abort before multi-prompt splice."""
 
     def show_message(self, message: str) -> None: ...
 
@@ -296,30 +300,38 @@ def _interview_slot(
             return "skipped"
         # decision == "replace": fall through to interview.
 
-    answers: dict[str, str] = {}
-    for prompt in slot.prompts:
-        # depends_on: skip prompts whose dependency isn't satisfied.
-        if not _prompt_visible(prompt, answers):
-            continue
-        rendered = _render_prompt_with_macros(prompt, bound_macros)
-        ans = prompter.ask_prompt(rendered, slot)
-        if ans is None:
-            if prompt.validation.required:
-                raise InterviewSkipRequired(prompt.id)
-            continue
-        valid_err = _validate(ans, prompt.validation)
-        if valid_err:
-            prompter.show_message(f"  [validation] {valid_err}")
-            # Re-ask once.
-            ans = prompter.ask_prompt(rendered, slot) or ""
+    while True:
+        answers: dict[str, str] = {}
+        for prompt in slot.prompts:
+            # depends_on: skip prompts whose dependency isn't satisfied.
+            if not _prompt_visible(prompt, answers):
+                continue
+            rendered = _render_prompt_with_macros(prompt, bound_macros)
+            ans = prompter.ask_prompt(rendered, slot)
+            if ans is None:
+                if prompt.validation.required:
+                    raise InterviewSkipRequired(prompt.id)
+                continue
             valid_err = _validate(ans, prompt.validation)
             if valid_err:
-                raise InterviewValidationFailure(prompt.id, valid_err)
-        answers[prompt.id] = ans
+                prompter.show_message(f"  [validation] {valid_err}")
+                # Re-ask once.
+                ans = prompter.ask_prompt(rendered, slot) or ""
+                valid_err = _validate(ans, prompt.validation)
+                if valid_err:
+                    raise InterviewValidationFailure(prompt.id, valid_err)
+            answers[prompt.id] = ans
 
-    composed = compose(slot, answers)
-    splice_slot_body(instance_dir, slot, composed)
-    return "filled"
+        composed = compose(slot, answers)
+        if len(slot.prompts) >= 2:
+            decision = prompter.confirm_slot_body(slot, composed)
+            if decision == "redo":
+                continue
+            if decision == "abort":
+                return "skipped"
+
+        splice_slot_body(instance_dir, slot, composed)
+        return "filled"
 
 
 class InterviewSkipRequired(RuntimeError):

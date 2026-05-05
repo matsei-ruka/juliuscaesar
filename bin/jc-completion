@@ -22,7 +22,7 @@ EOF
 bash_completion() {
     cat <<'EOF'
 _jc_complete() {
-    local cur prev sub
+    local cur prev sub group
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
@@ -34,6 +34,16 @@ _jc_complete() {
     fi
 
     sub="${COMP_WORDS[1]}"
+    if [[ "$sub" == "email" && $COMP_CWORD -eq 3 ]]; then
+        group="${COMP_WORDS[2]}"
+        case "$group" in
+            pending) COMPREPLY=( $(compgen -W "list show approve deny --sender --json" -- "$cur") ) ;;
+            senders) COMPREPLY=( $(compgen -W "list trust external block --json" -- "$cur") ) ;;
+            drafts)  COMPREPLY=( $(compgen -W "list show edit approve reject --sender --all --json" -- "$cur") ) ;;
+        esac
+        return 0
+    fi
+
     case "$sub" in
         memory)       COMPREPLY=( $(compgen -W "new write read search link lint log rebuild consolidate --instance-dir" -- "$cur") ) ;;
         heartbeat)    COMPREPLY=( $(compgen -W "run --instance-dir" -- "$cur") ) ;;
@@ -69,6 +79,15 @@ top=(memory heartbeat voice watchdog workers chats email transcripts gateway com
 
 if (( CURRENT == 2 )); then
   _describe 'jc command' top
+  return
+fi
+
+if [[ "$words[2]" == email && CURRENT == 4 ]]; then
+  case "$words[3]" in
+    pending) _values 'email pending command' list show approve deny ;;
+    senders) _values 'email senders command' list trust external block ;;
+    drafts)  _values 'email drafts command' list show edit approve reject ;;
+  esac
   return
 fi
 

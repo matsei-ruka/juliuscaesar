@@ -1,0 +1,12 @@
+flowchart TD
+    E["Inbound event"] --> O["Explicit override?"]
+    O -->|yes| S["Use requested brain:model"]
+    O -->|no| C["Cron-pinned brain?"]
+    C -->|yes| S
+    C -->|no| ST["Sticky conversation brain?"]
+    ST -->|yes| S
+    ST -->|no| T["Triage result confident?"]
+    T -->|yes| S
+    T -->|no| F["Fallback or channel default"]
+    F --> S
+    S --> D["lib/gateway/brains/dispatch.py"]

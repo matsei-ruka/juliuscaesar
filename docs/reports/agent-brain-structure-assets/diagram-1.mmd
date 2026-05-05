@@ -1,0 +1,16 @@
+flowchart TD
+    U["User message"] --> G["Gateway runtime"]
+    G --> R["Router and triage"]
+    R --> B["Selected brain and model"]
+    B --> A["Brain adapter"]
+    A --> O["Assistant reply"]
+
+    C["CLAUDE.md"] --> L1["L1 memory files"]
+    L1 --> B
+
+    L2["L2 memory vault"] --> I["FTS5 search index"]
+    I --> B
+
+    Y["ops/gateway.yaml"] --> R
+    YM["ops/user_model.yaml"] --> UM["User model updater"]
+    UM --> USER["memory/L1/USER.md"]

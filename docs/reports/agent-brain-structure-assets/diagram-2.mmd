@@ -1,0 +1,6 @@
+flowchart LR
+    MD["memory/L1/*.md and memory/L2/**/*.md"] --> DB["memory/index.sqlite"]
+    MD --> IDX["memory/INDEX.md"]
+    DB --> SEARCH["jc memory search"]
+    SEARCH --> READ["jc memory read"]
+    READ --> PROMPT["Relevant context enters the task"]
