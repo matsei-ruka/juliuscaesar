@@ -577,7 +577,10 @@ class GatewayRuntime:
         # routes the second message to the appropriate brain.
 
         response = result.response or ""
-        if response.strip() == "SILENT":
+        stripped = response.strip()
+        is_internal_source = event.source in ("cron", "jc-events")
+        last_line = stripped.splitlines()[-1].strip() if stripped else ""
+        if stripped == "SILENT" or (is_internal_source and last_line == "SILENT"):
             self.log(
                 f"dispatch silent id={event.id} brain={brain} — "
                 "brain produced SILENT sentinel, skipping delivery + transcript log"

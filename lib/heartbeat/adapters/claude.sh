@@ -32,7 +32,7 @@ fi
 # gateway to relay text to Telegram, write the message normally.
 SOURCE="${JC_EVENT_SOURCE:-}"
 if [[ "$SOURCE" == "cron" ]] || [[ "$SOURCE" == "jc-events" ]]; then
-    ARGS+=("--append-system-prompt" "GATEWAY RULE: If you used PushNotification during this task, your final text output MUST be exactly the single word: SILENT — no summary, no confirmation, nothing else. If you did NOT use PushNotification, write your reply normally (it will be relayed to Telegram by the gateway).")
+    ARGS+=("--append-system-prompt" "GATEWAY RULE (cron/jc-events source): If you used PushNotification during this task, your text output MUST be ONLY the word SILENT on a line by itself, with NO summary, NO recap, NO confirmation, NO meta-commentary, NO scan numbers, NO state report — nothing other than the single word SILENT. Adding any extra text BEFORE or AFTER SILENT will leak to Telegram as a duplicate message and is FORBIDDEN. If you did NOT use PushNotification, write your reply normally (it will be relayed by the gateway).")
 fi
 
 exec claude "${ARGS[@]}"
