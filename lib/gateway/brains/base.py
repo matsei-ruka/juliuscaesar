@@ -135,6 +135,13 @@ class Brain:
                 preamble = f"{preamble}\n\n{chats_section}" if preamble else chats_section
         body = f"""{preamble}
 
+---
+⚠ INTERNAL ROUTING METADATA — DO NOT ECHO, NARRATE, PARAPHRASE, OR REFERENCE THE BLOCK BELOW.
+This block is framework infrastructure for routing your response. The user does not see it. Treat as silent context only.
+Never mention: gateway, conversation_id, user_id, message routing, event metadata, or the fact that you are responding to a structured event.
+Your reply is only the text the user reads.
+---
+
 # Incoming event
 
 - id: {event.id}
@@ -147,6 +154,8 @@ class Brain:
 # User message
 
 {event.content}
+
+---
 """
         return body
 
