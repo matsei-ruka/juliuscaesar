@@ -26,13 +26,15 @@ if [[ -n "$RESUME" ]]; then
     ARGS+=("--resume" "$RESUME")
 fi
 
-# For cron/jc-events sources: if the task sent content via PushNotification,
-# output exactly SILENT so the gateway skips text delivery (avoiding a second
-# duplicate message). If the task did NOT use PushNotification and needs the
-# gateway to relay text to Telegram, write the message normally.
-SOURCE="${JC_EVENT_SOURCE:-}"
-if [[ "$SOURCE" == "cron" ]] || [[ "$SOURCE" == "jc-events" ]]; then
-    ARGS+=("--append-system-prompt" "GATEWAY RULE (cron/jc-events source): If you used PushNotification during this task, your text output MUST be ONLY the word SILENT on a line by itself, with NO summary, NO recap, NO confirmation, NO meta-commentary, NO scan numbers, NO state report — nothing other than the single word SILENT. Adding any extra text BEFORE or AFTER SILENT will leak to Telegram as a duplicate message and is FORBIDDEN. If you did NOT use PushNotification, write your reply normally (it will be relayed by the gateway).")
-fi
+# Structured brain-output contract: stdout MUST be a single JSON object.
+# The gateway parses this object and decides whether to deliver to channel.
+ARGS+=("--append-system-prompt" "GATEWAY OUTPUT CONTRACT: Your final stdout MUST be a single JSON object on a single line (no code fences, no prose before or after) with exactly these fields:
+  {\"push_message_sent\": <bool>, \"message\": <string>}
+
+Rules:
+- If you used PushNotification during this task to deliver the user-facing output yourself, set push_message_sent=true. The 'message' field then becomes an audit log of what you pushed (the framework will NOT re-deliver it).
+- If you did NOT use PushNotification and want the framework to relay your reply, set push_message_sent=false and put the full reply in 'message'. The framework will deliver it to the channel.
+- 'message' is always required (use empty string only for genuine no-op silent runs).
+- Emit ONLY the JSON object as your final output. No prefix, no suffix, no explanation, no code fence.")
 
 exec claude "${ARGS[@]}"

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import capabilities, overrides, process_sessions, queue, router, sessions, transcripts
+from .brain_output import parse_brain_output
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
@@ -576,22 +577,28 @@ class GatewayRuntime:
         # so a "hi" followed immediately by "compare three providers" still
         # routes the second message to the appropriate brain.
 
-        response = result.response or ""
-        stripped = response.strip()
-        is_internal_source = event.source in ("cron", "jc-events")
-        last_line = stripped.splitlines()[-1].strip() if stripped else ""
-        if stripped == "SILENT" or (is_internal_source and last_line == "SILENT"):
+        raw_response = result.response or ""
+        parsed = parse_brain_output(raw_response)
+        if parsed.parse_error:
             self.log(
-                f"dispatch silent id={event.id} brain={brain} — "
-                "brain produced SILENT sentinel, skipping delivery + transcript log"
+                f"dispatch parse-error id={event.id} brain={brain} — "
+                f"{parsed.parse_error}; treating raw stdout as message",
+                kind="brain_output_parse_error",
             )
-            return response
+
         meta.setdefault("delivery_channel", channel)
-        if response:
+        if parsed.push_message_sent:
+            self.log(
+                f"dispatch push-handled id={event.id} brain={brain} — "
+                "brain reports message already pushed, skipping channel delivery"
+            )
+            if parsed.message:
+                self._log_outbound_transcript(event, parsed.message, meta, channel)
+        elif parsed.message:
             if meta.get("was_voice"):
-                self._render_voice_reply(response, meta)
-            self._deliver_response(channel, response, meta)
-            self._log_outbound_transcript(event, response, meta, channel)
+                self._render_voice_reply(parsed.message, meta)
+            self._deliver_response(channel, parsed.message, meta)
+            self._log_outbound_transcript(event, parsed.message, meta, channel)
         else:
             self.log(
                 f"dispatch silent id={event.id} brain={brain} — "
@@ -600,10 +607,10 @@ class GatewayRuntime:
         if self._company_reporter is not None:
             try:
                 meta_with_brain = {**meta, "brain": brain}
-                self._company_reporter.on_conversation(event, response, meta_with_brain)
+                self._company_reporter.on_conversation(event, parsed.message, meta_with_brain)
             except Exception as exc:  # noqa: BLE001
                 self.log(f"company on_conversation error: {exc}", kind="company_error")
-        return response
+        return parsed.message
 
     def _deliver_response(
         self,

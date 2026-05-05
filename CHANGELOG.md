@@ -20,6 +20,21 @@ Hotfix for operator safety, command UX, and duplicate-message suppression.
   trailing `SILENT` line, mirroring the gateway runtime fix from `788447f`.
   Previously the heartbeat path bypassed gateway suppression and shipped the
   full narration + literal `SILENT` to Telegram as a duplicate message.
+- **Structured brain-output contract** replaces the ad-hoc `SILENT` sentinel.
+  Brains now emit a single JSON object on stdout:
+  `{"push_message_sent": <bool>, "message": <string>}`. The framework reads
+  the flag to decide whether to deliver `message` (when false) or treat it as
+  audit log of an already-pushed PushNotification (when true). One channel
+  per source, no more case-by-case suppression heuristics. Parser falls back
+  to delivering raw stdout on parse failure so brains that haven't migrated
+  yet still surface their output to the user.
+  - New module: `lib/gateway/brain_output.py`.
+  - `lib/gateway/runtime.py` and `lib/heartbeat/runner.py` route through the
+    parser; the legacy `SILENT`-detection branches are removed.
+  - System-prompt updated in `lib/heartbeat/adapters/claude.sh` and
+    `CODEX_API_INSTRUCTIONS` to enforce the contract.
+  - Other adapters (codex CLI, aider, gemini, minimax, opencode) gracefully
+    degrade via the parser's raw-fallback until their prompts are migrated.
 
 ## 2026.05.02.1
 

@@ -27,6 +27,8 @@ from dotenv import load_dotenv
 
 from jc_paths import resolve_instance_path
 
+from gateway.brain_output import parse_brain_output
+
 from . import builtins as _builtins
 
 
@@ -537,11 +539,23 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(output, encoding="utf-8")
 
-        stripped = output.strip()
-        last_line = stripped.splitlines()[-1].strip() if stripped else ""
-        if not stripped or stripped == "SILENT" or last_line == "SILENT":
-            log_line(f"task {task_name}: silent/empty output, no Telegram send", log_path)
+        parsed = parse_brain_output(output)
+        if parsed.parse_error:
+            log_line(
+                f"task {task_name}: brain output parse error — {parsed.parse_error}; "
+                "treating raw stdout as message",
+                log_path,
+            )
+        if parsed.push_message_sent:
+            log_line(
+                f"task {task_name}: brain reports message already pushed, no Telegram send",
+                log_path,
+            )
             return 0
+        if not parsed.message.strip():
+            log_line(f"task {task_name}: empty message, no Telegram send", log_path)
+            return 0
+        output = parsed.message
 
         if dry_run:
             print(output)
