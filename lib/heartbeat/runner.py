@@ -218,6 +218,8 @@ def call_adapter(
         raise FileNotFoundError(f"adapter not found: {adapter}")
     if not os.access(adapter, os.X_OK):
         raise PermissionError(f"adapter not executable: {adapter}")
+    env = os.environ.copy()
+    env["JC_EVENT_SOURCE"] = "cron"
     proc = subprocess.Popen(
         [str(adapter), model or ""],
         stdin=subprocess.PIPE,
@@ -226,6 +228,7 @@ def call_adapter(
         cwd=str(workdir),
         start_new_session=True,
         text=True,
+        env=env,
     )
     try:
         stdout, stderr = proc.communicate(prompt, timeout=timeout_seconds)
