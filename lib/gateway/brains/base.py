@@ -236,6 +236,7 @@ class Brain:
                 prompt = priming + "\n\n" + prompt
         env = os.environ.copy()
         env["JC_INSTANCE_DIR"] = str(self.instance_dir)
+        env["JC_EVENT_SOURCE"] = event.source or ""
         if resume_session:
             env["JC_RESUME_SESSION"] = resume_session
             env["WORKER_RESUME_SESSION"] = resume_session

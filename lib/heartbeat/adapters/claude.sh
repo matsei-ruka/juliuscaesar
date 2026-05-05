@@ -26,4 +26,13 @@ if [[ -n "$RESUME" ]]; then
     ARGS+=("--resume" "$RESUME")
 fi
 
+# For cron/jc-events sources: if the task sent content via PushNotification,
+# output exactly SILENT so the gateway skips text delivery (avoiding a second
+# duplicate message). If the task did NOT use PushNotification and needs the
+# gateway to relay text to Telegram, write the message normally.
+SOURCE="${JC_EVENT_SOURCE:-}"
+if [[ "$SOURCE" == "cron" ]] || [[ "$SOURCE" == "jc-events" ]]; then
+    ARGS+=("--append-system-prompt" "GATEWAY RULE: If you used PushNotification during this task, your final text output MUST be exactly the single word: SILENT — no summary, no confirmation, nothing else. If you did NOT use PushNotification, write your reply normally (it will be relayed to Telegram by the gateway).")
+fi
+
 exec claude "${ARGS[@]}"

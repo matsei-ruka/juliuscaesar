@@ -577,6 +577,12 @@ class GatewayRuntime:
         # routes the second message to the appropriate brain.
 
         response = result.response or ""
+        if response.strip() == "SILENT":
+            self.log(
+                f"dispatch silent id={event.id} brain={brain} — "
+                "brain produced SILENT sentinel, skipping delivery + transcript log"
+            )
+            return response
         meta.setdefault("delivery_channel", channel)
         if response:
             if meta.get("was_voice"):
