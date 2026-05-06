@@ -27,7 +27,11 @@ from dotenv import load_dotenv
 
 from jc_paths import resolve_instance_path
 
-from gateway.brain_output import parse_brain_output, push_marker_sent
+from gateway.brain_output import (
+    RECOVERED_ENVELOPE_ERROR,
+    parse_brain_output,
+    push_marker_sent,
+)
 
 from . import builtins as _builtins
 
@@ -551,9 +555,14 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
 
         parsed = parse_brain_output(output, event_source="cron")
         if parsed.parse_error:
+            delivery_note = (
+                "using recovered envelope message"
+                if parsed.parse_error == RECOVERED_ENVELOPE_ERROR
+                else "treating raw stdout as message"
+            )
             log_line(
-                f"task {task_name}: brain output parse error — {parsed.parse_error}; "
-                "treating raw stdout as message",
+                f"task {task_name}: brain output parse error — "
+                f"{parsed.parse_error}; {delivery_note}",
                 log_path,
             )
         if parsed.push_message_sent:

@@ -27,6 +27,7 @@ from typing import Any
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```\s*$", re.DOTALL)
 _JSON_DECODER = json.JSONDecoder()
+RECOVERED_ENVELOPE_ERROR = "recovered JSON envelope with surrounding stdout"
 _INTERNAL_SOURCES = {"cron", "jc-events"}
 _SILENT_TOKENS = {
     "SILENT",
@@ -130,7 +131,7 @@ def _parse_embedded_contract(text: str) -> BrainOutput | None:
     suffix = text[end:].strip()
     parse_error = None
     if prefix or suffix:
-        parse_error = "recovered JSON envelope with surrounding stdout"
+        parse_error = RECOVERED_ENVELOPE_ERROR
     return BrainOutput(
         push_message_sent=bool(obj["push_message_sent"]),
         message=msg,

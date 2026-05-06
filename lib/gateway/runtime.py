@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import capabilities, overrides, process_sessions, queue, router, sessions, transcripts
-from .brain_output import parse_brain_output, push_marker_sent
+from .brain_output import (
+    RECOVERED_ENVELOPE_ERROR,
+    parse_brain_output,
+    push_marker_sent,
+)
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
@@ -581,9 +585,14 @@ class GatewayRuntime:
         parsed = parse_brain_output(raw_response, event_source=event.source)
         pushed_via_marker = push_marker_sent(result.push_marker_path)
         if parsed.parse_error:
+            delivery_note = (
+                "using recovered envelope message"
+                if parsed.parse_error == RECOVERED_ENVELOPE_ERROR
+                else "treating raw stdout as message"
+            )
             self.log(
                 f"dispatch parse-error id={event.id} brain={brain} — "
-                f"{parsed.parse_error}; treating raw stdout as message",
+                f"{parsed.parse_error}; {delivery_note}",
                 kind="brain_output_parse_error",
             )
 

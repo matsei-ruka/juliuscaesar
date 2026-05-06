@@ -119,13 +119,14 @@ class GatewayTests(unittest.TestCase):
             meta={"chat_id": "28547271"},
         )
         conn.close()
+        log_path = queue.queue_dir(instance) / "test.log"
         raw = (
             "Bozza pronta.\n\n"
             '{"push_message_sent": false, "message": "Bozza pronta pulita."}'
         )
         runtime = GatewayRuntime(
             instance,
-            log_path=queue.queue_dir(instance) / "test.log",
+            log_path=log_path,
             stop_requested=lambda: True,
         )
         with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult(raw, "sess-1")), \
@@ -140,6 +141,38 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(saved.response, "Bozza pronta pulita.")
         finally:
             conn2.close()
+        log_text = log_path.read_text(encoding="utf-8")
+        self.assertIn("using recovered envelope message", log_text)
+        self.assertNotIn("recovered JSON envelope with surrounding stdout; treating raw stdout", log_text)
+        runtime.close()
+
+    def test_invalid_contract_parse_error_logs_raw_stdout_fallback(self):
+        instance = self.make_instance()
+        conn = queue.connect(instance)
+        event, _ = queue.enqueue(
+            conn,
+            source="telegram",
+            source_message_id="m1",
+            conversation_id="28547271",
+            content="hi",
+            meta={"chat_id": "28547271"},
+        )
+        conn.close()
+        log_path = queue.queue_dir(instance) / "test.log"
+        raw = '{"push_message_sent": "nope", "message": "not valid"}'
+        runtime = GatewayRuntime(
+            instance,
+            log_path=log_path,
+            stop_requested=lambda: True,
+        )
+        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult(raw, "sess-1")), \
+             mock.patch("gateway.runtime.deliver_response", return_value="m-out") as deliver:
+            self.assertTrue(runtime.dispatch_once())
+
+        deliver.assert_called_once()
+        self.assertEqual(deliver.call_args.kwargs["response"], raw)
+        log_text = log_path.read_text(encoding="utf-8")
+        self.assertIn("treating raw stdout as message", log_text)
         runtime.close()
 
     def test_embedded_push_handled_contract_skips_delivery(self):
