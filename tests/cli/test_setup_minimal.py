@@ -97,7 +97,11 @@ def test_setup_preserves_env_secrets(fresh_instance: Path) -> None:
         "TELEGRAM_BOT_TOKEN='preserved-abc'\n"
         "TELEGRAM_CHAT_ID='12345'\n"
         "SLACK_APP_TOKEN=''\n"
-        "SLACK_BOT_TOKEN=''\n",
+        "SLACK_BOT_TOKEN=''\n"
+        "BRAVE_API_KEY='brave-secret'\n"
+        "TAVILY_API_KEY='tavily-secret'\n"
+        "FIRECRAWL_API_KEY='firecrawl-secret'\n"
+        "BROWSER_USE_API_KEY='browser-use-secret'\n",
         encoding="utf-8",
     )
 
@@ -108,6 +112,20 @@ def test_setup_preserves_env_secrets(fresh_instance: Path) -> None:
     assert env["DASHSCOPE_API_KEY"] == "ds-secret"
     assert env["TELEGRAM_BOT_TOKEN"] == "preserved-abc"
     assert env["TELEGRAM_CHAT_ID"] == "12345"
+    assert env["BRAVE_API_KEY"] == "brave-secret"
+    assert env["TAVILY_API_KEY"] == "tavily-secret"
+    assert env["FIRECRAWL_API_KEY"] == "firecrawl-secret"
+    assert env["BROWSER_USE_API_KEY"] == "browser-use-secret"
+
+
+def test_setup_preships_web_skills(fresh_instance: Path) -> None:
+    skills = fresh_instance / "skills"
+
+    assert (skills / "Index.md").exists()
+    for name in ("brave", "tavily", "firecrawl", "browser-use"):
+        skill = skills / name / "SKILL.md"
+        assert skill.exists()
+        assert f"name: {name}" in skill.read_text(encoding="utf-8")
 
 
 def test_setup_no_mission_prompt(tmp_path: Path) -> None:

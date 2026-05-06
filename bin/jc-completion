@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-TOP="memory heartbeat voice watchdog workers chats email transcripts gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 completion help version"
+TOP="memory heartbeat voice watchdog workers skills chats email transcripts gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 completion help version"
 
 usage() {
     cat <<'EOF'
@@ -27,7 +27,7 @@ _jc_complete() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local top="memory heartbeat voice watchdog workers chats email transcripts gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 completion help version"
+    local top="memory heartbeat voice watchdog workers skills chats email transcripts gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 completion help version"
     if [[ $COMP_CWORD -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$top" -- "$cur") )
         return 0
@@ -50,6 +50,7 @@ _jc_complete() {
         voice)        COMPREPLY=( $(compgen -W "speak transcribe enroll list-voices --instance-dir" -- "$cur") ) ;;
         watchdog)     COMPREPLY=( $(compgen -W "tick install uninstall status status-v2 tail reset reload migrate test-notify --instance-dir" -- "$cur") ) ;;
         workers)      COMPREPLY=( $(compgen -W "spawn list show tail cancel gc reconcile history --instance-dir" -- "$cur") ) ;;
+        skills)       COMPREPLY=( $(compgen -W "status list menu sync configure test show --instance-dir --json --force --set --timeout" -- "$cur") ) ;;
         chats)        COMPREPLY=( $(compgen -W "list approve deny show migrate-to-config prune --instance-dir" -- "$cur") ) ;;
         email)        COMPREPLY=( $(compgen -W "doctor test-imap test-smtp pending senders drafts --instance-dir" -- "$cur") ) ;;
         transcripts)  COMPREPLY=( $(compgen -W "read tail search get list --instance-dir" -- "$cur") ) ;;
@@ -75,7 +76,7 @@ zsh_completion() {
 #compdef jc
 
 local -a top
-top=(memory heartbeat voice watchdog workers chats email transcripts gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 completion help version)
+top=(memory heartbeat voice watchdog workers skills chats email transcripts gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 completion help version)
 
 if (( CURRENT == 2 )); then
   _describe 'jc command' top
@@ -97,6 +98,7 @@ case "$words[2]" in
   voice)        _values 'voice command' speak transcribe enroll list-voices ;;
   watchdog)     _values 'watchdog command' tick install uninstall status status-v2 tail reset reload migrate test-notify ;;
   workers)      _values 'workers command' spawn list show tail cancel gc reconcile history ;;
+  skills)       _values 'skills command' status list menu sync configure test show ;;
   chats)        _values 'chats command' list approve deny show migrate-to-config prune ;;
   email)        _values 'email command' doctor test-imap test-smtp pending senders drafts ;;
   transcripts)  _values 'transcripts command' read tail search get list ;;

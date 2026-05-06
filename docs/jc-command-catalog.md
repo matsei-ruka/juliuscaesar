@@ -1,7 +1,7 @@
 # JC Command Catalog
 
 Status: Inventory draft
-Date: 2026-05-01
+Date: 2026-05-06
 
 ## Purpose
 
@@ -22,7 +22,7 @@ Sources checked:
 `jc` is a Bash router. It accepts optional global `--instance-dir <path>` or
 `--instance-dir=<path>`, then dispatches `jc <name>` to `jc-<name>` on `PATH`.
 
-Router version: `2026.05.05.2`.
+Router version: `2026.05.06.01`.
 
 Routed public subcommands:
 
@@ -33,6 +33,7 @@ Routed public subcommands:
 | `jc voice` | `jc-voice` | voice | DashScope TTS, ASR, voice enrollment |
 | `jc watchdog` | `jc-watchdog` | supervision | Legacy plus v2 watchdog surface |
 | `jc workers` | `jc-workers` | background agents | Spawn/list/show/tail/cancel worker jobs |
+| `jc skills` | `jc-skills` | skills | Instance skill status, .env configuration, sync, and provider tests |
 | `jc chats` | `jc-chats` | channel ops | Telegram chat directory and compatibility email sender aliases |
 | `jc email` | `jc-email` | channel ops | Email doctor, sender policy, pending inbox, draft approval |
 | `jc transcripts` | `jc-transcripts` | gateway history | Per-conversation transcript read/search/tail |
@@ -168,6 +169,44 @@ Subcommands:
 | `gc` | `--days`, `--prune-files` | Delete old completed workers |
 | `reconcile` | none | Mark stale running rows failed when pid is dead |
 | `history` | `--name` | Show runs for a named worker |
+
+### `jc skills`
+
+Binary: `bin/jc-skills`
+
+Purpose: inspect and configure instance-owned skills under `skills/`.
+
+Behavior:
+
+- no arguments: opens an interactive menu when attached to a TTY; otherwise
+  prints status;
+- `status` / `list`: shows pre-shipped and custom skill state;
+- `configure`: writes managed provider keys to the instance `.env`;
+- `test`: validates provider credentials and records the latest result under
+  `state/skills/status.json`;
+- `sync`: copies missing pre-shipped skill files from
+  `templates/init-instance/skills/` into older instances without overwriting by
+  default;
+- `show`: prints detailed configuration for one skill or all skills.
+
+Subcommands:
+
+| Subcommand | Arguments/options | Purpose |
+|---|---|---|
+| `status` / `list` | `--json` | Show installed/active/missing skill state |
+| `menu` | none | Open the interactive menu |
+| `sync` | `--force`, `--json` | Copy missing pre-shipped skill files into the instance |
+| `configure` | `skill`, `--set KEY=VALUE`, `--json` | Write managed provider config to `.env` |
+| `test` | optional `skill|all`, `--timeout`, `--json` | Test one or all pre-shipped provider credentials |
+| `show` | optional `skill` | Show skill details |
+
+Managed credentials:
+
+- `BRAVE_API_KEY`
+- `TAVILY_API_KEY`
+- `FIRECRAWL_API_KEY`
+- `FIRECRAWL_API_URL` (optional custom/self-hosted Firecrawl base URL)
+- `BROWSER_USE_API_KEY`
 
 ### `jc chats`
 

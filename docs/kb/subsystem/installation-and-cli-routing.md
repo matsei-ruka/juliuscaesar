@@ -7,8 +7,10 @@ code_anchors:
     symbol: "BINARIES=("
   - path: bin/jc
     symbol: "case \"$SUB\" in"
-last_verified: 2026-05-01
-verified_by: l.mattei
+  - path: bin/jc-skills
+    symbol: "PRE_SHIPPED"
+last_verified: 2026-05-06
+verified_by: Matsei Ruka
 related:
   - contract/instance-layout-and-resolution.md
 ---
@@ -19,7 +21,7 @@ related:
 
 The top-level `jc` command is a bash router. It dispatches to matching `jc-*` binaries on PATH. Current subcommand surface (router help in `bin/jc:usage()`):
 
-- Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `gateway`, `init`, `setup`, `doctor`, `completion`.
+- Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `skills`, `gateway`, `init`, `setup`, `doctor`, `completion`.
 - Lifecycle: `update` (CalVer framework upgrade), `upgrade` (reconfigure existing instance: channels, brain, triage), `migrate-to-0.3` (one-shot migration helper for 0.2.x instances).
 - Conversation surface: `chats` (Telegram chat directory), `email` (email channel operations), `transcripts` (per-conversation chat history read/tail/search).
 - Observability: `company` (fleet observability client — see `lib/company/`).
@@ -31,7 +33,9 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - `install.sh` owns dependency setup and shim generation.
 - `bin/jc` owns the public router surface, including the first-class `email`
   subcommand that dispatches to `jc-email`.
-- Individual binaries own subcommand behavior.
+- Individual binaries own subcommand behavior. `bin/jc-skills` owns instance
+  skill status, pre-shipped skill sync, provider credential writes, and live
+  provider checks.
 - `bin/jc-setup` owns the guided first-run configurator.
 
 ## Important behavior
@@ -49,6 +53,9 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
   `.env` plus `ops/gateway.yaml`, creates bootstrap L1 memory, and rebuilds the
   memory index.
 - `jc completion` prints bash/zsh shell completion scripts.
+- `jc skills` opens an interactive menu when attached to a TTY, and exposes
+  non-interactive `status`, `sync`, `configure`, `test`, and `show`
+  subcommands for automation.
 - `jc gateway` owns the unified gateway surface: durable SQLite queue initialization, daemon lifecycle, Telegram/Slack polling, brain dispatch, enqueue, claim, complete/fail, retry, config, logs, and status/list inspection.
 - `jc email` owns email-channel operations: doctor, IMAP/SMTP credential
   checks, sender policy, pending inbound inspection/drain, and outbound draft
@@ -68,4 +75,4 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap still lists public distribution via npm, brew, or curl as future work.
-- 2026-05-02: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.05.02`) used by `jc update` to compare against released framework versions.
+- 2026-05-06: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.05.06.01`) used by `jc update` to compare against released framework versions.

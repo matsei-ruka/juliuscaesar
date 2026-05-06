@@ -35,6 +35,10 @@ When creating or installing agent skills for this instance, put each skill under
 `skills/<skillname>/SKILL.md` in the instance home. With an explicit path, that
 is `$JC_INSTANCE_DIR/skills/<skillname>/SKILL.md`.
 
+This instance ships with a skill index at `skills/Index.md`. Read it before
+choosing instance skills. The default web/data skill pack includes Brave Search,
+Tavily, Firecrawl, and Browser Use; their credentials live in the root `.env`.
+
 Do not install instance-owned skills into the JuliusCaesar framework checkout or
 into a global Codex/Claude skills directory unless the operator explicitly asks
 for a global skill.

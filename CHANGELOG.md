@@ -3,6 +3,23 @@
 All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 (`YYYY.MM.DD`). Newest first.
 
+## 2026.05.06.01
+
+Skill management for pre-shipped agent tools.
+
+- Added `jc skills`, an interactive and scriptable command for inspecting
+  instance skill status, syncing pre-shipped skills into older instances,
+  writing managed provider credentials to `.env`, and testing provider
+  configuration.
+- Managed skills currently cover Brave Search, Tavily, Firecrawl, and Browser
+  Use. Status is active when the skill file exists and the required credential
+  is present.
+- `jc skills test` validates credentials against low-impact provider account
+  or search endpoints and records the last redacted result under
+  `state/skills/status.json`.
+- Installer, router, shell completions, doctor diagnostics, command catalog,
+  and KB contracts now include the skills command.
+
 ## 2026.05.05.2
 
 Hotfix for operator safety, command UX, and duplicate-message suppression.

@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+"""jc-skills - manage instance skills and their provider credentials."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE.parent
+_LIB = _ROOT / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
+
+
+@dataclass(frozen=True)
+class SkillSpec:
+    name: str
+    display: str
+    path: str
+    required_env: tuple[str, ...]
+    optional_env: tuple[str, ...] = ()
+    test_kind: str = ""
+    description: str = ""
+
+
+PRE_SHIPPED: tuple[SkillSpec, ...] = (
+    SkillSpec(
+        name="brave",
+        display="Brave Search",
+        path="brave/SKILL.md",
+        required_env=("BRAVE_API_KEY",),
+        test_kind="brave",
+        description="Independent-index web search.",
+    ),
+    SkillSpec(
+        name="tavily",
+        display="Tavily",
+        path="tavily/SKILL.md",
+        required_env=("TAVILY_API_KEY",),
+        test_kind="tavily",
+        description="Agent-optimized search, extraction, crawl, map, and research.",
+    ),
+    SkillSpec(
+        name="firecrawl",
+        display="Firecrawl",
+        path="firecrawl/SKILL.md",
+        required_env=("FIRECRAWL_API_KEY",),
+        optional_env=("FIRECRAWL_API_URL",),
+        test_kind="firecrawl",
+        description="Clean page/site extraction, crawling, and structured scrape.",
+    ),
+    SkillSpec(
+        name="browser-use",
+        display="Browser Use",
+        path="browser-use/SKILL.md",
+        required_env=("BROWSER_USE_API_KEY",),
+        test_kind="browser-use",
+        description="Interactive browser automation.",
+    ),
+)
+
+PRE_SHIPPED_BY_NAME = {s.name: s for s in PRE_SHIPPED}
+STATE_PATH = Path("state") / "skills" / "status.json"
+
+
+@dataclass
+class TestResult:
+    skill: str
+    ok: bool
+    message: str
+    checked_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "skill": self.skill,
+            "ok": self.ok,
+            "message": self.message,
+            "checked_at": self.checked_at,
+        }
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("skills", "memory"))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def read_env(instance: Path) -> dict[str, str]:
+    env_path = instance / ".env"
+    values: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, raw = stripped.split("=", 1)
+            key = key.strip()
+            raw = raw.strip()
+            if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
+                raw = raw[1:-1]
+            values[key] = raw
+    for spec in PRE_SHIPPED:
+        for key in (*spec.required_env, *spec.optional_env):
+            if not values.get(key) and os.environ.get(key):
+                values[key] = os.environ[key]
+    return values
+
+
+def quote_env(value: str) -> str:
+    if value == "" or any(ch.isspace() for ch in value) or "#" in value:
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
+
+
+def write_env_keys(instance: Path, updates: dict[str, str]) -> None:
+    env_path = instance / ".env"
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    else:
+        lines = ["# JuliusCaesar instance secrets. Do not commit."]
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            out.append(raw)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in updates:
+            out.append(f"{key}={quote_env(updates[key])}")
+            seen.add(key)
+        else:
+            out.append(raw)
+
+    for key, value in updates.items():
+        if key not in seen:
+            out.append(f"{key}={quote_env(value)}")
+
+    tmp = env_path.with_suffix(env_path.suffix + ".skills.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    tmp.replace(env_path)
+    os.chmod(env_path, 0o600)
+
+
+def load_test_state(instance: Path) -> dict[str, Any]:
+    path = instance / STATE_PATH
+    if not path.exists():
+        return {"skills": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"skills": {}}
+    if not isinstance(data, dict):
+        return {"skills": {}}
+    data.setdefault("skills", {})
+    return data
+
+
+def save_test_state(instance: Path, results: list[TestResult]) -> None:
+    data = load_test_state(instance)
+    skills = data.setdefault("skills", {})
+    for result in results:
+        skills[result.skill] = result.to_dict()
+    path = instance / STATE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def parse_skill_name(path: Path, fallback: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return fallback
+    if not text.startswith("---"):
+        return fallback
+    for line in text.splitlines()[1:30]:
+        if line.strip() == "---":
+            break
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'") or fallback
+    return fallback
+
+
+def status_rows(instance: Path) -> list[dict[str, Any]]:
+    env = read_env(instance)
+    state = load_test_state(instance).get("skills", {})
+    rows: list[dict[str, Any]] = []
+    skills_dir = instance / "skills"
+
+    for spec in PRE_SHIPPED:
+        skill_path = skills_dir / spec.path
+        installed = skill_path.exists()
+        missing_env = [key for key in spec.required_env if not env.get(key)]
+        if not installed:
+            status = "missing_files"
+        elif missing_env:
+            status = "inactive"
+        else:
+            status = "active"
+        rows.append(
+            {
+                "name": spec.name,
+                "display": spec.display,
+                "kind": "pre_shipped",
+                "status": status,
+                "installed": installed,
+                "active": status == "active",
+                "path": str(skill_path),
+                "required_env": list(spec.required_env),
+                "optional_env": list(spec.optional_env),
+                "missing_env": missing_env,
+                "description": spec.description,
+                "last_test": state.get(spec.name),
+            }
+        )
+
+    known_dirs = {Path(spec.path).parts[0] for spec in PRE_SHIPPED}
+    if skills_dir.exists():
+        for child in sorted(skills_dir.iterdir()):
+            if not child.is_dir() or child.name in known_dirs:
+                continue
+            skill_md = child / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            name = parse_skill_name(skill_md, child.name)
+            rows.append(
+                {
+                    "name": name,
+                    "display": name,
+                    "kind": "custom",
+                    "status": "custom",
+                    "installed": True,
+                    "active": None,
+                    "path": str(skill_md),
+                    "required_env": [],
+                    "optional_env": [],
+                    "missing_env": [],
+                    "description": "Custom instance skill; configuration is not managed by jc skills.",
+                    "last_test": state.get(name),
+                }
+            )
+    return rows
+
+
+def format_status(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        f"{'STATUS':<14} {'SKILL':<16} {'CONFIG':<34} {'LAST TEST'}",
+        "-" * 86,
+    ]
+    for row in rows:
+        status = row["status"].upper().replace("_", "-")
+        if row["missing_env"]:
+            config = "missing " + ", ".join(row["missing_env"])
+        elif row["required_env"]:
+            config = ", ".join(row["required_env"])
+        else:
+            config = "custom"
+        last = row.get("last_test") or {}
+        if last:
+            result = "ok" if last.get("ok") else "failed"
+            checked = str(last.get("checked_at", ""))[:19].replace("T", " ")
+            last_text = f"{result} {checked}".strip()
+        else:
+            last_text = "-"
+        lines.append(f"{status:<14} {row['display']:<16} {config:<34} {last_text}")
+    return "\n".join(lines)
+
+
+def copy_path(src: Path, dst: Path, *, force: bool) -> str:
+    if dst.exists() and not force:
+        return "kept"
+    if src.is_dir():
+        if dst.exists() and force:
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    return "copied"
+
+
+def sync_preshipped(instance: Path, *, force: bool) -> list[dict[str, str]]:
+    src_root = _ROOT / "templates" / "init-instance" / "skills"
+    dst_root = instance / "skills"
+    dst_root.mkdir(parents=True, exist_ok=True)
+    targets = ["Index.md", "README.md", *(Path(spec.path).parts[0] for spec in PRE_SHIPPED)]
+    results: list[dict[str, str]] = []
+    for name in targets:
+        src = src_root / name
+        dst = dst_root / name
+        if not src.exists():
+            results.append({"target": str(dst), "status": "source_missing"})
+            continue
+        status = copy_path(src, dst, force=force)
+        results.append({"target": str(dst), "status": status})
+    return results
+
+
+def http_json(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: int = 10,
+    secret: str = "",
+) -> tuple[bool, str, dict[str, Any] | None]:
+    data = None
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(200_000)
+            payload = json.loads(raw.decode("utf-8") or "{}")
+            return 200 <= resp.status < 300, f"HTTP {resp.status}", payload
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(4_000).decode("utf-8", errors="replace")
+        if secret:
+            detail = detail.replace(secret, "[redacted]")
+        return False, f"HTTP {exc.code}: {detail[:240]}", None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return False, str(exc), None
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def test_brave(env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    key = env["BRAVE_API_KEY"]
+    query = urllib.parse.urlencode({"q": "juliuscaesar", "count": "1"})
+    ok, msg, payload = http_json(
+        f"https://api.search.brave.com/res/v1/web/search?{query}",
+        headers={"X-Subscription-Token": key},
+        timeout=timeout,
+        secret=key,
+    )
+    if ok and isinstance(payload, dict):
+        return True, "Brave Search API reachable"
+    return False, msg
+
+
+def test_tavily(env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    key = env["TAVILY_API_KEY"]
+    ok, msg, payload = http_json(
+        "https://api.tavily.com/usage",
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=timeout,
+        secret=key,
+    )
+    if ok and isinstance(payload, dict):
+        return True, "Tavily usage endpoint reachable"
+    return False, msg
+
+
+def _firecrawl_base(env: dict[str, str]) -> str:
+    raw = env.get("FIRECRAWL_API_URL") or "https://api.firecrawl.dev/v2"
+    base = raw.rstrip("/")
+    if base == "https://api.firecrawl.dev":
+        return f"{base}/v2"
+    return base
+
+
+def test_firecrawl(env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    key = env["FIRECRAWL_API_KEY"]
+    base = _firecrawl_base(env)
+    url = base if base.endswith("/team/credit-usage") else f"{base}/team/credit-usage"
+    ok, msg, payload = http_json(
+        url,
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=timeout,
+        secret=key,
+    )
+    if ok and isinstance(payload, dict):
+        return True, "Firecrawl credit usage endpoint reachable"
+    return False, msg
+
+
+def test_browser_use(env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    key = env["BROWSER_USE_API_KEY"]
+    ok, msg, payload = http_json(
+        "https://api.browser-use.com/api/v2/billing/account",
+        headers={"X-Browser-Use-API-Key": key},
+        timeout=timeout,
+        secret=key,
+    )
+    if ok and isinstance(payload, dict):
+        return True, "Browser Use billing endpoint reachable"
+    return False, msg
+
+
+TESTERS = {
+    "brave": test_brave,
+    "tavily": test_tavily,
+    "firecrawl": test_firecrawl,
+    "browser-use": test_browser_use,
+}
+
+
+def run_test(spec: SkillSpec, env: dict[str, str], timeout: int) -> TestResult:
+    missing = [key for key in spec.required_env if not env.get(key)]
+    if missing:
+        return TestResult(spec.name, False, "missing " + ", ".join(missing), _iso_now())
+    tester = TESTERS[spec.test_kind]
+    ok, message = tester(env, timeout)
+    return TestResult(spec.name, ok, message, _iso_now())
+
+
+def spec_or_exit(name: str) -> SkillSpec:
+    try:
+        return PRE_SHIPPED_BY_NAME[name]
+    except KeyError as exc:
+        choices = ", ".join(sorted(PRE_SHIPPED_BY_NAME))
+        raise SystemExit(f"Unknown managed skill: {name}. Choices: {choices}") from exc
+
+
+def cmd_status(args: argparse.Namespace, instance: Path) -> int:
+    rows = status_rows(instance)
+    if args.json:
+        print(json.dumps({"instance": str(instance), "skills": rows}, indent=2))
+    else:
+        print(format_status(rows))
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace, instance: Path) -> int:
+    results = sync_preshipped(instance, force=args.force)
+    if args.json:
+        print(json.dumps({"instance": str(instance), "results": results}, indent=2))
+    else:
+        for result in results:
+            print(f"{result['status']:<14} {result['target']}")
+    return 0
+
+
+def parse_set_values(values: list[str]) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise SystemExit(f"--set expects KEY=VALUE, got: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise SystemExit(f"--set expects KEY=VALUE, got: {item}")
+        updates[key] = value
+    return updates
+
+
+def cmd_configure(args: argparse.Namespace, instance: Path) -> int:
+    spec = spec_or_exit(args.skill)
+    allowed = set(spec.required_env + spec.optional_env)
+    updates = parse_set_values(args.set_values or [])
+    unknown = sorted(set(updates) - allowed)
+    if unknown:
+        raise SystemExit(f"{spec.name} does not manage: {', '.join(unknown)}")
+
+    env = read_env(instance)
+    if not updates:
+        if not sys.stdin.isatty():
+            raise SystemExit("No --set values provided and stdin is not interactive.")
+        for key in spec.required_env:
+            existing = env.get(key, "")
+            suffix = " [keep existing]" if existing else ""
+            value = getpass.getpass(f"{key}{suffix}: ").strip()
+            if value:
+                updates[key] = value
+            elif not existing:
+                raise SystemExit(f"{key} is required.")
+        for key in spec.optional_env:
+            existing = env.get(key, "")
+            suffix = f" [{existing}]" if existing else " [optional]"
+            value = input(f"{key}{suffix}: ").strip()
+            if value:
+                updates[key] = value
+
+    write_env_keys(instance, updates)
+    if args.json:
+        print(json.dumps({"instance": str(instance), "skill": spec.name, "updated": sorted(updates)}, indent=2))
+    else:
+        print(f"Updated {spec.display}: {', '.join(sorted(updates))}")
+    return 0
+
+
+def cmd_test(args: argparse.Namespace, instance: Path) -> int:
+    env = read_env(instance)
+    specs = list(PRE_SHIPPED) if args.skill == "all" else [spec_or_exit(args.skill)]
+    results = [run_test(spec, env, args.timeout) for spec in specs]
+    save_test_state(instance, results)
+    if args.json:
+        print(json.dumps({"instance": str(instance), "results": [r.to_dict() for r in results]}, indent=2))
+    else:
+        for result in results:
+            label = "ok" if result.ok else "failed"
+            print(f"{label:<7} {result.skill:<12} {result.message}")
+    return 0 if all(r.ok for r in results) else 1
+
+
+def cmd_show(args: argparse.Namespace, instance: Path) -> int:
+    rows = status_rows(instance)
+    wanted = args.skill
+    found = False
+    for row in rows:
+        if wanted and row["name"] != wanted:
+            continue
+        found = True
+        print(f"# {row['display']}")
+        print(f"status: {row['status']}")
+        print(f"path: {row['path']}")
+        if row["required_env"]:
+            print(f"required env: {', '.join(row['required_env'])}")
+        if row["optional_env"]:
+            print(f"optional env: {', '.join(row['optional_env'])}")
+        if row["missing_env"]:
+            print(f"missing: {', '.join(row['missing_env'])}")
+        if row.get("last_test"):
+            last = row["last_test"]
+            label = "ok" if last.get("ok") else "failed"
+            print(f"last test: {label} {last.get('checked_at')} - {last.get('message')}")
+        print()
+    if wanted and not found:
+        print(f"Unknown skill: {wanted}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def choose_skill(prompt: str) -> SkillSpec:
+    print()
+    for idx, spec in enumerate(PRE_SHIPPED, start=1):
+        print(f"{idx}) {spec.display}")
+    while True:
+        raw = input(f"{prompt}: ").strip().lower()
+        if raw in {"q", "quit", "exit"}:
+            raise KeyboardInterrupt
+        if raw.isdigit() and 1 <= int(raw) <= len(PRE_SHIPPED):
+            return PRE_SHIPPED[int(raw) - 1]
+        if raw in PRE_SHIPPED_BY_NAME:
+            return PRE_SHIPPED_BY_NAME[raw]
+        print("Choose a number or skill name.")
+
+
+def interactive_menu(instance: Path) -> int:
+    print(f"JuliusCaesar skills: {instance}")
+    while True:
+        print()
+        print(format_status(status_rows(instance)))
+        print()
+        print("1) Configure a skill")
+        print("2) Test a skill")
+        print("3) Test all configured skills")
+        print("4) Sync pre-shipped skills into this instance")
+        print("5) Show details")
+        print("q) Quit")
+        choice = input("> ").strip().lower()
+        try:
+            if choice in {"q", "quit", "exit"}:
+                return 0
+            if choice == "1":
+                spec = choose_skill("Configure which skill")
+                cmd_configure(argparse.Namespace(skill=spec.name, set_values=[], json=False), instance)
+                if input("Test now? [y/N]: ").strip().lower() in {"y", "yes"}:
+                    cmd_test(argparse.Namespace(skill=spec.name, timeout=10, json=False), instance)
+            elif choice == "2":
+                spec = choose_skill("Test which skill")
+                cmd_test(argparse.Namespace(skill=spec.name, timeout=10, json=False), instance)
+            elif choice == "3":
+                cmd_test(argparse.Namespace(skill="all", timeout=10, json=False), instance)
+            elif choice == "4":
+                cmd_sync(argparse.Namespace(force=False, json=False), instance)
+            elif choice == "5":
+                spec = choose_skill("Show which skill")
+                cmd_show(argparse.Namespace(skill=spec.name), instance)
+            else:
+                print("Choose 1-5 or q.")
+        except KeyboardInterrupt:
+            print()
+            return 0
+        except SystemExit as exc:
+            print(str(exc), file=sys.stderr)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="jc-skills",
+        description="Manage instance skills, credentials, and live configuration checks.",
+    )
+    parser.add_argument("--instance-dir", help="Override instance dir")
+    parser.add_argument("--json", action="store_true", help="JSON output for default status")
+    sub = parser.add_subparsers(dest="command")
+
+    p_status = sub.add_parser("status", aliases=["list"], help="Show skill status")
+    p_status.add_argument("--json", action="store_true")
+
+    sub.add_parser("menu", help="Open the interactive menu")
+
+    p_sync = sub.add_parser("sync", help="Copy missing pre-shipped skills into the instance")
+    p_sync.add_argument("--force", action="store_true", help="Overwrite existing pre-shipped skill files")
+    p_sync.add_argument("--json", action="store_true")
+
+    p_config = sub.add_parser("configure", help="Set provider configuration in the instance .env")
+    p_config.add_argument("skill", choices=sorted(PRE_SHIPPED_BY_NAME))
+    p_config.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
+    p_config.add_argument("--json", action="store_true")
+
+    p_test = sub.add_parser("test", help="Test one skill or all pre-shipped skills")
+    p_test.add_argument("skill", nargs="?", default="all", choices=["all", *sorted(PRE_SHIPPED_BY_NAME)])
+    p_test.add_argument("--timeout", type=int, default=10)
+    p_test.add_argument("--json", action="store_true")
+
+    p_show = sub.add_parser("show", help="Show detailed skill configuration")
+    p_show.add_argument("skill", nargs="?")
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None and sys.stdin.isatty() and not args.json:
+        instance = resolve_instance_dir(args.instance_dir)
+        return interactive_menu(instance)
+
+    instance = resolve_instance_dir(args.instance_dir)
+    command = args.command or "status"
+    if command in {"status", "list"}:
+        return cmd_status(args, instance)
+    if command == "menu":
+        return interactive_menu(instance)
+    if command == "sync":
+        return cmd_sync(args, instance)
+    if command == "configure":
+        return cmd_configure(args, instance)
+    if command == "test":
+        return cmd_test(args, instance)
+    if command == "show":
+        return cmd_show(args, instance)
+    parser.error(f"unknown command: {command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

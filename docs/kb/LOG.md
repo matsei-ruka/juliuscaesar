@@ -57,3 +57,6 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-06] update | contract/adapter-and-delivery-contracts.md + subsystem/heartbeat-runner.md — structured brain-output parser recovery and sentinel suppression
 ## [2026-05-06] update | contract/adapter-and-delivery-contracts.md + subsystem/workers-background-agents.md + subsystem/channel-jc-events.md — canonical Telegram push markers suppress framework follow-up delivery
 ## [2026-05-06] update | contract/adapter-and-delivery-contracts.md — adapters prepend user-local CLI paths for daemon launches
+## [2026-05-06] update | contract/instance-layout-and-resolution.md — documented pre-shipped instance skills and skills/Index.md
+## [2026-05-06] update | contract/config-and-secret-boundaries.md — documented pre-shipped web/data skill credentials
+## [2026-05-06] update | subsystem/installation-and-cli-routing.md + contract/config-and-secret-boundaries.md + contract/instance-layout-and-resolution.md — added jc skills command, provider config writes, tests, and sync behavior

@@ -101,6 +101,12 @@ if [[ ! -f "$TARGET/.env" ]]; then
 # Required for heartbeat / watchdog Telegram notifications:
 # TELEGRAM_BOT_TOKEN=
 # TELEGRAM_CHAT_ID=
+#
+# Optional pre-shipped web/data skills:
+# BRAVE_API_KEY=
+# TAVILY_API_KEY=
+# FIRECRAWL_API_KEY=
+# BROWSER_USE_API_KEY=
 EOF
     umask "$OLD_UMASK"
     chmod 600 "$TARGET/.env"
@@ -111,6 +117,7 @@ cat <<EOF
 
   1. cd $TARGET
   2. Edit .env and fill in DASHSCOPE_API_KEY / TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+     Optional web skills use BRAVE_API_KEY / TAVILY_API_KEY / FIRECRAWL_API_KEY / BROWSER_USE_API_KEY.
   3. Edit memory/L1/*.md to describe who this assistant is and who they help.
   4. Enroll a voice (optional):      jc voice enroll path/to/sample.mp3 --name <name>
   5. Scaffold the SQLite index:      jc memory rebuild

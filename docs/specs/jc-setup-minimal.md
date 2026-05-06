@@ -156,6 +156,10 @@ write_env() {
         [TELEGRAM_CHAT_ID]="$3"
         [SLACK_APP_TOKEN]="$4"
         [SLACK_BOT_TOKEN]="$5"
+        [BRAVE_API_KEY]="$6"
+        [TAVILY_API_KEY]="$7"
+        [FIRECRAWL_API_KEY]="$8"
+        [BROWSER_USE_API_KEY]="$9"
     )
 
     old_umask=$(umask)
@@ -163,7 +167,7 @@ write_env() {
     tmp=$(mktemp "$TARGET/.env.tmp.XXXXXX")
     {
         printf '%s\n' "# JuliusCaesar instance secrets. Do not commit."
-        for key in DASHSCOPE_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SLACK_APP_TOKEN SLACK_BOT_TOKEN; do
+        for key in DASHSCOPE_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID SLACK_APP_TOKEN SLACK_BOT_TOKEN BRAVE_API_KEY TAVILY_API_KEY FIRECRAWL_API_KEY BROWSER_USE_API_KEY; do
             value="${new_values[$key]}"
             # If user passed empty AND existing .env has value, preserve existing
             if [[ -z "$value" && -f "$TARGET/.env" ]]; then

@@ -110,7 +110,7 @@ load_env_file() {
         key="${key#"${key%%[![:space:]]*}"}"
         key="${key%"${key##*[![:space:]]}"}"
         case "$key" in
-            DASHSCOPE_API_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|SLACK_APP_TOKEN|SLACK_BOT_TOKEN) ;;
+            DASHSCOPE_API_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|SLACK_APP_TOKEN|SLACK_BOT_TOKEN|BRAVE_API_KEY|TAVILY_API_KEY|FIRECRAWL_API_KEY|BROWSER_USE_API_KEY) ;;
             *) continue ;;
         esac
         value="${value#"${value%%[![:space:]]*}"}"
@@ -172,7 +172,7 @@ fi
 
 section "JuliusCaesar binaries"
 
-for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-gateway jc-init jc-setup jc-doctor jc-email; do
+for b in jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-skills jc-gateway jc-init jc-setup jc-doctor jc-email; do
     if command -v "$b" >/dev/null 2>&1; then
         ok "$b"
     else
@@ -434,6 +434,15 @@ else
     else
         info "Slack tokens not set (required only for Slack channel)"
     fi
+
+    # Pre-shipped web/data skills.
+    for key in BRAVE_API_KEY TAVILY_API_KEY FIRECRAWL_API_KEY BROWSER_USE_API_KEY; do
+        if [[ -n "${!key:-}" ]]; then
+            ok "$key set (prefix: ${!key:0:6}…)"
+        else
+            info "$key not set (required only for matching pre-shipped skill)"
+        fi
+    done
 fi
 
 # --- Watchdog + runtime ---
