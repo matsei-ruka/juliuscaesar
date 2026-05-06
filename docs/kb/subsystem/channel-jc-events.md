@@ -7,8 +7,8 @@ code_anchors:
     symbol: "class JcEventsChannel:"
   - path: bin/jc-workers
     symbol: "def _write_worker_event"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-06
+verified_by: Matsei Ruka
 related:
   - subsystem/gateway-queue.md
   - subsystem/workers-background-agents.md
@@ -61,6 +61,10 @@ Override with `WORKERS_NOTIFY_MODE`:
 | `events`          | always write event JSON (requires gateway)                  |
 | `gateway-deliver` | enqueue raw body with `deliver_only=true`, no synthesis     |
 | `telegram-direct` | invoke `lib/heartbeat/lib/send_telegram.sh` directly        |
+
+When a worker adapter already pushed via the canonical Telegram sender, its
+`JC_PUSH_MARKER_PATH` marker suppresses the terminal worker event for `done` /
+`need_input` states, so jc-events does not synthesize a second message.
 
 ## Invariants
 

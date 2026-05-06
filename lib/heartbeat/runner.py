@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from jc_paths import resolve_instance_path
 
-from gateway.brain_output import parse_brain_output
+from gateway.brain_output import parse_brain_output, push_marker_sent
 
 from . import builtins as _builtins
 
@@ -214,6 +214,7 @@ def call_adapter(
     log_path: Path,
     *,
     timeout_seconds: int | None = None,
+    push_marker_path: Path | None = None,
 ) -> str:
     adapter = ADAPTERS_DIR / f"{tool}.sh"
     if not adapter.exists():
@@ -222,6 +223,8 @@ def call_adapter(
         raise PermissionError(f"adapter not executable: {adapter}")
     env = os.environ.copy()
     env["JC_EVENT_SOURCE"] = "cron"
+    if push_marker_path is not None:
+        env["JC_PUSH_MARKER_PATH"] = str(push_marker_path)
     proc = subprocess.Popen(
         [str(adapter), model or ""],
         stdin=subprocess.PIPE,
@@ -518,6 +521,12 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         # Snapshot before adapter so we can find the new/resumed session by diff, not mtime.
         pre_snapshot = snapshot_jsonl(_claude_proj_dir(instance_dir)) if tool == "claude" else {}
 
+        push_marker_path = state / "push_markers" / f"{task_name}-{ts_tag}.jsonl"
+        try:
+            push_marker_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
         output = call_adapter(
             tool,
             model,
@@ -525,6 +534,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
             folder,
             log_path,
             timeout_seconds=timeout_seconds,
+            push_marker_path=push_marker_path,
         )
 
         # Capture session ID for next run.
@@ -539,7 +549,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(output, encoding="utf-8")
 
-        parsed = parse_brain_output(output)
+        parsed = parse_brain_output(output, event_source="cron")
         if parsed.parse_error:
             log_line(
                 f"task {task_name}: brain output parse error — {parsed.parse_error}; "
@@ -549,6 +559,12 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         if parsed.push_message_sent:
             log_line(
                 f"task {task_name}: brain reports message already pushed, no Telegram send",
+                log_path,
+            )
+            return 0
+        if push_marker_sent(push_marker_path):
+            log_line(
+                f"task {task_name}: canonical sender marker detected, no Telegram send",
                 log_path,
             )
             return 0

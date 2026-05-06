@@ -36,6 +36,7 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 class BrainResult:
     response: str
     session_id: str | None = None
+    push_marker_path: str | None = None
 
 
 class AdapterFailure(RuntimeError):
@@ -246,6 +247,14 @@ Your reply is only the text the user reads.
         env = os.environ.copy()
         env["JC_INSTANCE_DIR"] = str(self.instance_dir)
         env["JC_EVENT_SOURCE"] = event.source or ""
+        push_marker_path = (
+            self.instance_dir / "state" / "gateway" / "push_markers" / f"{event.id}.jsonl"
+        )
+        try:
+            push_marker_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        env["JC_PUSH_MARKER_PATH"] = str(push_marker_path)
         if resume_session:
             env["JC_RESUME_SESSION"] = resume_session
             env["WORKER_RESUME_SESSION"] = resume_session
@@ -346,7 +355,11 @@ Your reply is only the text the user reads.
             session_id = self.capture_session_id(start)
         except Exception:  # noqa: BLE001
             session_id = None
-        return BrainResult(response=stdout.strip(), session_id=session_id)
+        return BrainResult(
+            response=stdout.strip(),
+            session_id=session_id,
+            push_marker_path=str(push_marker_path),
+        )
 
     # --- helpers -----------------------------------------------------------
 

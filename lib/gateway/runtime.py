@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import capabilities, overrides, process_sessions, queue, router, sessions, transcripts
-from .brain_output import parse_brain_output
+from .brain_output import parse_brain_output, push_marker_sent
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
@@ -578,7 +578,8 @@ class GatewayRuntime:
         # routes the second message to the appropriate brain.
 
         raw_response = result.response or ""
-        parsed = parse_brain_output(raw_response)
+        parsed = parse_brain_output(raw_response, event_source=event.source)
+        pushed_via_marker = push_marker_sent(result.push_marker_path)
         if parsed.parse_error:
             self.log(
                 f"dispatch parse-error id={event.id} brain={brain} — "
@@ -587,10 +588,15 @@ class GatewayRuntime:
             )
 
         meta.setdefault("delivery_channel", channel)
-        if parsed.push_message_sent:
+        if parsed.push_message_sent or pushed_via_marker:
+            reason = (
+                "canonical sender marker detected"
+                if pushed_via_marker and not parsed.push_message_sent
+                else "brain reports message already pushed"
+            )
             self.log(
                 f"dispatch push-handled id={event.id} brain={brain} — "
-                "brain reports message already pushed, skipping channel delivery"
+                f"{reason}, skipping channel delivery"
             )
             if parsed.message:
                 self._log_outbound_transcript(event, parsed.message, meta, channel)

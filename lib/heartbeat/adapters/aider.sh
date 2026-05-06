@@ -8,6 +8,8 @@
 # AIDER_EXTRA_ARGS if needed.
 set -euo pipefail
 
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 MODEL="${1:-}"
 HISTORY_DIR="${AIDER_HISTORY_DIR:-}"
 RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"

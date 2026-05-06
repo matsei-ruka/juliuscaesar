@@ -57,6 +57,55 @@ def test_invalid_json_falls_back_to_raw_with_error():
     assert "JSONDecodeError" in out.parse_error
 
 
+def test_embedded_json_relay_discards_surrounding_stdout():
+    raw = (
+        "Drafting the action plan reply.\n\n"
+        '{"push_message_sent": false, "message": "Clean user-facing answer."}'
+    )
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == "Clean user-facing answer."
+    assert out.parse_error == "recovered JSON envelope with surrounding stdout"
+
+
+def test_embedded_json_push_handled_discards_surrounding_stdout():
+    raw = (
+        "Inviato al gruppo (message_id 955).\n\n"
+        '{"push_message_sent": true, "message": "Pushed Telegram message 955."}'
+    )
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is True
+    assert out.message == "Pushed Telegram message 955."
+    assert out.parse_error == "recovered JSON envelope with surrounding stdout"
+
+
+def test_embedded_fenced_json_recovered():
+    raw = (
+        "Here is the final envelope:\n"
+        "```json\n"
+        '{"push_message_sent": false, "message": "ok"}\n'
+        "```"
+    )
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == "ok"
+    assert out.parse_error == "recovered JSON envelope with surrounding stdout"
+
+
+def test_last_embedded_json_wins_when_model_prints_duplicate_envelopes():
+    raw = (
+        "Drafting reply.\n\n"
+        "```json\n"
+        '{"push_message_sent": false, "message": "draft"}\n'
+        "```\n\n"
+        '{"push_message_sent": false, "message": "final"}'
+    )
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == "final"
+    assert out.parse_error == "recovered JSON envelope with surrounding stdout"
+
+
 def test_non_object_falls_back():
     raw = '["not", "an", "object"]'
     out = parse_brain_output(raw)
@@ -108,13 +157,32 @@ def test_missing_message_defaults_empty_when_flag_present():
     assert out.parse_error is None
 
 
-def test_trailing_silent_legacy_falls_through_to_raw():
-    """Legacy brains emitting summary + 'SILENT' last line now go via the
-    parser's fallback. Operator log surfaces parse_error; the raw text is
-    delivered so users aren't dropped silently. Heartbeat-runner-level
-    suppression has been removed in favor of the contract."""
+def test_trailing_silent_without_internal_source_falls_back_to_raw():
     raw = "Sent. Message ID 447. 3 decisions locked.\n\nSILENT"
     out = parse_brain_output(raw)
     assert out.push_message_sent is False
     assert out.message == raw
     assert out.parse_error is not None
+
+
+def test_internal_trailing_silent_suppresses_delivery():
+    raw = "Sent. Message ID 447. 3 decisions locked.\n\nSILENT"
+    out = parse_brain_output(raw, event_source="cron")
+    assert out.push_message_sent is False
+    assert out.message == ""
+    assert out.parse_error is None
+
+
+def test_internal_trailing_silence_alias_suppresses_delivery():
+    raw = "Nothing useful to report.\n\nSILENCE"
+    out = parse_brain_output(raw, event_source="jc-events")
+    assert out.push_message_sent is False
+    assert out.message == ""
+    assert out.parse_error is None
+
+
+def test_exact_silent_alias_suppresses_any_source():
+    out = parse_brain_output("[no-reply]", event_source="telegram")
+    assert out.push_message_sent is False
+    assert out.message == ""
+    assert out.parse_error is None

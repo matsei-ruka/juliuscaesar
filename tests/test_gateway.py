@@ -107,6 +107,110 @@ class GatewayTests(unittest.TestCase):
         finally:
             conn2.close()
 
+    def test_embedded_json_contract_delivers_message_without_leaking_json(self):
+        instance = self.make_instance()
+        conn = queue.connect(instance)
+        event, _ = queue.enqueue(
+            conn,
+            source="telegram",
+            source_message_id="m1",
+            conversation_id="28547271",
+            content="hi",
+            meta={"chat_id": "28547271"},
+        )
+        conn.close()
+        raw = (
+            "Bozza pronta.\n\n"
+            '{"push_message_sent": false, "message": "Bozza pronta pulita."}'
+        )
+        runtime = GatewayRuntime(
+            instance,
+            log_path=queue.queue_dir(instance) / "test.log",
+            stop_requested=lambda: True,
+        )
+        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult(raw, "sess-1")), \
+             mock.patch("gateway.runtime.deliver_response", return_value="m-out") as deliver:
+            self.assertTrue(runtime.dispatch_once())
+
+        deliver.assert_called_once()
+        self.assertEqual(deliver.call_args.kwargs["response"], "Bozza pronta pulita.")
+        conn2 = queue.connect(instance)
+        try:
+            saved = queue.get(conn2, event.id)
+            self.assertEqual(saved.response, "Bozza pronta pulita.")
+        finally:
+            conn2.close()
+        runtime.close()
+
+    def test_embedded_push_handled_contract_skips_delivery(self):
+        instance = self.make_instance()
+        conn = queue.connect(instance)
+        event, _ = queue.enqueue(
+            conn,
+            source="telegram",
+            source_message_id="m1",
+            conversation_id="28547271",
+            content="send this to the group",
+            meta={"chat_id": "28547271"},
+        )
+        conn.close()
+        raw = (
+            "Inviato al gruppo (message_id 955).\n\n"
+            '{"push_message_sent": true, "message": "Pushed Telegram message 955."}'
+        )
+        runtime = GatewayRuntime(
+            instance,
+            log_path=queue.queue_dir(instance) / "test.log",
+            stop_requested=lambda: True,
+        )
+        with mock.patch("gateway.runtime.invoke_brain", return_value=BrainResult(raw, "sess-1")), \
+             mock.patch("gateway.runtime.deliver_response", return_value="m-out") as deliver:
+            self.assertTrue(runtime.dispatch_once())
+
+        deliver.assert_not_called()
+        conn2 = queue.connect(instance)
+        try:
+            saved = queue.get(conn2, event.id)
+            self.assertEqual(saved.response, "Pushed Telegram message 955.")
+        finally:
+            conn2.close()
+        runtime.close()
+
+    def test_canonical_push_marker_skips_delivery_without_json_contract(self):
+        instance = self.make_instance()
+        marker = instance / "state" / "gateway" / "push_markers" / "marker.jsonl"
+        marker.parent.mkdir(parents=True)
+        marker.write_text('{"message_id":"955"}\n', encoding="utf-8")
+        conn = queue.connect(instance)
+        event, _ = queue.enqueue(
+            conn,
+            source="telegram",
+            source_message_id="m1",
+            conversation_id="28547271",
+            content="send this",
+            meta={"chat_id": "28547271"},
+        )
+        conn.close()
+        runtime = GatewayRuntime(
+            instance,
+            log_path=queue.queue_dir(instance) / "test.log",
+            stop_requested=lambda: True,
+        )
+        with mock.patch(
+            "gateway.runtime.invoke_brain",
+            return_value=BrainResult("Already sent via helper.", "sess-1", str(marker)),
+        ), mock.patch("gateway.runtime.deliver_response", return_value="m-out") as deliver:
+            self.assertTrue(runtime.dispatch_once())
+
+        deliver.assert_not_called()
+        conn2 = queue.connect(instance)
+        try:
+            saved = queue.get(conn2, event.id)
+            self.assertEqual(saved.response, "Already sent via helper.")
+        finally:
+            conn2.close()
+        runtime.close()
+
     def test_discord_delivery_uses_live_channel_instance(self):
         instance = self.make_instance()
         conn = queue.connect(instance)

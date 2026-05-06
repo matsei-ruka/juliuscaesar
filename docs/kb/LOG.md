@@ -54,3 +54,6 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-01] update | contract/config-and-secret-boundaries.md — clarify setup secret prompt behavior
 ## [2026-05-01] update | subsystem/memory-system.md — accept active memory state and note derived DB schema reset
 ## [2026-05-02] update | contract/instance-layout-and-resolution.md — document instance-owned skills path
+## [2026-05-06] update | contract/adapter-and-delivery-contracts.md + subsystem/heartbeat-runner.md — structured brain-output parser recovery and sentinel suppression
+## [2026-05-06] update | contract/adapter-and-delivery-contracts.md + subsystem/workers-background-agents.md + subsystem/channel-jc-events.md — canonical Telegram push markers suppress framework follow-up delivery
+## [2026-05-06] update | contract/adapter-and-delivery-contracts.md — adapters prepend user-local CLI paths for daemon launches

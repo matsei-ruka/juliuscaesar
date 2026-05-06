@@ -12,6 +12,8 @@
 #                         only pick this when the task is truly self-contained.
 set -euo pipefail
 
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 MODEL="${1:-}"
 YOLO="${GEMINI_YOLO:-true}"
 

@@ -50,6 +50,7 @@ from workers import (  # type: ignore  # noqa: E402
     workers_dir,
 )
 from workers.db import _now_iso  # type: ignore  # noqa: E402
+from gateway.brain_output import push_marker_sent  # type: ignore  # noqa: E402
 from gateway import queue as gateway_queue  # type: ignore  # noqa: E402
 from gateway.config import config_path as gateway_config_path  # type: ignore  # noqa: E402
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
@@ -644,7 +645,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         # not as the chat session. CLAUDE.md / RULES.md gate the
         # "spawn workers for dev work" rule on its absence so a worker does
         # not recursively spawn sub-workers on its own prompt.
-        env = {**os.environ, "JC_IN_WORKER": "1", "JC_WORKER_ID": str(worker_id)}
+        push_marker_path = _worker_dir(instance, worker_id) / "push_marker.jsonl"
+        try:
+            push_marker_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        env = {
+            **os.environ,
+            "JC_IN_WORKER": "1",
+            "JC_WORKER_ID": str(worker_id),
+            "JC_PUSH_MARKER_PATH": str(push_marker_path),
+        }
         try:
             # start_new_session=True puts the adapter in its own session/pgid
             # so killpg on timeout only hits the adapter tree, not the runner.
@@ -755,7 +766,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                 conn2.close()
             worker.session_id = sid
 
-    if worker is not None:
+    if (
+        worker is not None
+        and worker.status in ("done", "need_input")
+        and push_marker_sent(push_marker_path)
+    ):
+        try:
+            with log_path.open("ab") as log_f:
+                log_f.write(
+                    f"[{_now_iso()}] notification skipped: canonical sender marker\n".encode()
+                )
+        except OSError:
+            pass
+    elif worker is not None:
         _send_notification(instance, worker)
     return 0
 

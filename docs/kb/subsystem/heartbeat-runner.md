@@ -7,10 +7,12 @@ code_anchors:
     symbol: "run <task-name>"
   - path: lib/heartbeat/runner.py
     symbol: "def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:"
+  - path: lib/gateway/brain_output.py
+    symbol: "def parse_brain_output"
   - path: templates/init-instance/heartbeat/tasks.yaml
     symbol: "only_if_delta"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-06
+verified_by: Matsei Ruka
 related:
   - contract/adapter-and-delivery-contracts.md
   - contract/config-and-secret-boundaries.md
@@ -18,7 +20,7 @@ related:
 
 ## Summary
 
-Heartbeat is the cron-driven scheduled work system. It reads `<instance>/heartbeat/tasks.yaml`, builds a prompt from L1 memory, optional context files, an optional pre-fetch bundle, and a task prompt, then calls a configured brain adapter. Non-empty output is delivered to Telegram unless `--dry-run` is set or output is empty / `SILENT`.
+Heartbeat is the cron-driven scheduled work system. It reads `<instance>/heartbeat/tasks.yaml`, builds a prompt from L1 memory, optional context files, an optional pre-fetch bundle, and a task prompt, then calls a configured brain adapter. Adapter stdout is parsed through the gateway brain-output contract before delivery. Non-empty parsed messages are delivered to Telegram unless `--dry-run` is set, the parsed message is empty, `push_message_sent=true`, a canonical sender push marker exists, or a legacy silent sentinel suppresses delivery.
 
 ## Pipeline
 
@@ -33,8 +35,9 @@ Heartbeat is the cron-driven scheduled work system. It reads `<instance>/heartbe
 9. Render template variables: `bundle_path`, `date`, `time`, `timezone`.
 10. Write the final prompt under `heartbeat/state/prompts`.
 11. Call adapter from `lib/heartbeat/adapters/<tool>.sh`.
-12. Write output under `heartbeat/state/outputs`.
-13. Send to Telegram and append to `heartbeat/state/sent.log`.
+12. Write raw adapter output under `heartbeat/state/outputs`.
+13. Parse the brain-output envelope / legacy sentinel.
+14. Send the parsed message to Telegram and append to `heartbeat/state/sent.log`.
 
 ## Task configuration
 
@@ -46,8 +49,11 @@ Named destinations are optional. If absent, delivery falls back to `TELEGRAM_CHA
 
 - `pre_fetch` scripts run under `<instance>/heartbeat`.
 - L1 memory is always prepended.
-- The adapter contract is stdin prompt to stdout response.
-- `SILENT` suppresses delivery.
+- The adapter contract is stdin prompt to stdout response, with structured
+  envelopes preferred over legacy plain text.
+- `push_message_sent=true`, canonical sender push markers, empty parsed
+  messages, exact silent sentinels, and cron trailing silent sentinels suppress
+  Telegram delivery.
 - Locks prevent overlapping runs of the same task.
 - MCP servers are enabled for adapter runs (commit 1a180dc); session continuity is preserved between heartbeat runs of the same task.
 - Session id capture uses pre/post JSONL snapshot diff (`snapshot_jsonl` + `capture_session_id`, commit fa37487), not file mtimes — closes the mtime race that previously misattributed sessions when two heartbeats finished within the same second.

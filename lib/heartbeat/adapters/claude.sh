@@ -5,6 +5,8 @@
 # interactive session (the one serving Telegram).
 set -euo pipefail
 
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 MODEL="${1:-}"
 
 # Use subscription auth (no API key env var set). No --channels flag: scheduled

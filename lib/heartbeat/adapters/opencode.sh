@@ -13,6 +13,8 @@
 # truncation happens so callers notice the lossy boundary.
 set -euo pipefail
 
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 MODEL="${1:-}"
 MAX_PROMPT_BYTES=102400
 

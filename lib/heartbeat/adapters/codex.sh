@@ -12,6 +12,8 @@
 #   yolo                       — bypass all approvals + sandbox (DANGEROUS)
 set -euo pipefail
 
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 MODEL="${1:-}"
 shift || true
 SANDBOX="${CODEX_SANDBOX:-read-only}"
@@ -71,7 +73,7 @@ fi
 # the prompt body as a hard rule the model reads first.
 ARGS+=("-")
 
-exec codex "${ARGS[@]}" < <(
+{
     cat <<'CONTRACT'
 [GATEWAY OUTPUT CONTRACT — read carefully, this overrides any default behavior.]
 
@@ -97,4 +99,4 @@ Rules:
 
 CONTRACT
     cat
-)
+} | codex "${ARGS[@]}"

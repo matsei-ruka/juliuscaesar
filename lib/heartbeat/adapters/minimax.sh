@@ -9,5 +9,6 @@
 #     -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"'"$PROMPT"'"}]}' \
 #   | jq -r '.choices[0].message.content'
 set -euo pipefail
+export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp}/.bun/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 echo "minimax adapter not yet implemented" >&2
 exit 127

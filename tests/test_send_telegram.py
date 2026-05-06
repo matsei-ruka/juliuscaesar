@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -108,6 +109,39 @@ class SenderEscapingTests(unittest.TestCase):
         self.assertFalse(
             self.mod._is_parse_error(403, {"ok": False, "description": "Forbidden"})
         )
+
+    def test_main_writes_push_marker_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".jc").write_text("", encoding="utf-8")
+            (instance / ".env").write_text(
+                "TELEGRAM_BOT_TOKEN=test-token\nTELEGRAM_CHAT_ID=123\n",
+                encoding="utf-8",
+            )
+            marker = instance / "state" / "push.jsonl"
+
+            def fake_post(url, payload, *, timeout=20):
+                return 200, {"ok": True, "result": {"message_id": 888}}
+
+            with mock.patch.object(self.mod, "_post", side_effect=fake_post), \
+                 mock.patch.object(sys, "stdin", io.StringIO("hello marker")), \
+                 mock.patch.object(sys, "stdout", io.StringIO()), \
+                 mock.patch.dict(
+                     os.environ,
+                     {
+                         "JC_INSTANCE_DIR": str(instance),
+                         "JC_PUSH_MARKER_PATH": str(marker),
+                     },
+                     clear=False,
+                 ):
+                rc = self.mod.main()
+
+            self.assertEqual(rc, 0)
+            record = json.loads(marker.read_text(encoding="utf-8").strip())
+            self.assertEqual(record["channel"], "telegram")
+            self.assertEqual(record["chat_id"], "123")
+            self.assertEqual(record["message_id"], "888")
+            self.assertEqual(record["body_preview"], "hello marker")
 
 
 class SenderShellShimTests(unittest.TestCase):

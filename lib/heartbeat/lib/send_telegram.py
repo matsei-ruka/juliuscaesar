@@ -29,6 +29,7 @@ import os
 import sys
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -156,6 +157,27 @@ def send(
     return str(msg_id)
 
 
+def _write_push_marker(instance: Path, *, chat_id: str, message_id: str, body: str) -> None:
+    marker_raw = os.environ.get("JC_PUSH_MARKER_PATH")
+    if not marker_raw:
+        return
+    marker = Path(marker_raw).expanduser()
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "instance": str(instance),
+        "channel": "telegram",
+        "chat_id": str(chat_id),
+        "message_id": str(message_id),
+        "body_preview": body.strip()[:500],
+    }
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        with marker.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
 def main() -> int:
     instance = _resolve_instance_dir()
     env_path = instance / ".env"
@@ -185,6 +207,7 @@ def main() -> int:
     except RuntimeError as exc:
         sys.stderr.write(f"send_telegram: {exc}\n")
         return 1
+    _write_push_marker(instance, chat_id=chat_id, message_id=msg_id, body=body)
     print(msg_id)
     return 0
 
