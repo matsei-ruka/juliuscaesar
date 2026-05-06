@@ -101,9 +101,44 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def proc_cwd(pid: int) -> Path | None:
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+    except (OSError, FileNotFoundError):
+        return None
+
+
+def proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            raw = handle.read()
+    except (OSError, FileNotFoundError):
+        return ""
+    return raw.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+
+
+def pid_is_gateway_for_instance(pid: int | None, instance_dir: Path) -> bool:
+    if not pid_alive(pid):
+        return False
+    assert pid is not None
+    target = instance_dir.resolve()
+    cwd = proc_cwd(pid)
+    if cwd is not None and cwd != target:
+        return False
+    cmdline = proc_cmdline(pid)
+    if cmdline:
+        if "jc-gateway" not in cmdline:
+            return False
+        if "--instance-dir" in cmdline and str(target) not in cmdline:
+            return False
+        if " run" not in f" {cmdline} ":
+            return False
+    return True
+
+
 def remove_stale_pid(instance_dir: Path) -> None:
     pid = read_pid(instance_dir)
-    if pid is None or not pid_alive(pid):
+    if pid is None or not pid_is_gateway_for_instance(pid, instance_dir):
         pid_path(instance_dir).unlink(missing_ok=True)
 
 
@@ -143,8 +178,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"config:   {config_path(instance)}")
     print(f"pidfile:  {pid_path(instance)}")
     print(f"log:      {log_path(instance)}")
-    if pid_alive(pid):
+    if pid_is_gateway_for_instance(pid, instance):
         print(f"daemon:   running (pid {pid})")
+    elif pid_alive(pid):
+        print(f"daemon:   foreign pidfile (pid {pid})")
     elif pid is not None:
         print(f"daemon:   stale pidfile (pid {pid})")
     else:
@@ -164,7 +201,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     conn.close()
     queue.queue_dir(instance).mkdir(parents=True, exist_ok=True)
     existing = read_pid(instance)
-    if pid_alive(existing) and existing != os.getpid():
+    if pid_is_gateway_for_instance(existing, instance) and existing != os.getpid():
         raise SystemExit(f"gateway already running (pid {existing})")
     remove_stale_pid(instance)
     pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -211,9 +248,12 @@ def cmd_start(args: argparse.Namespace) -> int:
     conn = queue.connect(instance)
     conn.close()
     existing = read_pid(instance)
-    if pid_alive(existing):
+    if pid_is_gateway_for_instance(existing, instance):
         print(f"gateway already running (pid {existing})")
         return 0
+    if pid_alive(existing):
+        print(f"removing foreign gateway pidfile (pid {existing})")
+        log_line(instance, f"removed foreign gateway pidfile pid={existing}")
     remove_stale_pid(instance)
     queue.queue_dir(instance).mkdir(parents=True, exist_ok=True)
     log_handle = log_path(instance).open("a", encoding="utf-8")
@@ -244,9 +284,12 @@ def cmd_start(args: argparse.Namespace) -> int:
 def cmd_stop(args: argparse.Namespace) -> int:
     instance = resolve_instance_dir(args.instance_dir)
     pid = read_pid(instance)
-    if not pid_alive(pid):
+    if not pid_is_gateway_for_instance(pid, instance):
+        if pid_alive(pid):
+            print(f"gateway already stopped (removed foreign pidfile pid {pid})")
+        else:
+            print("gateway already stopped")
         remove_stale_pid(instance)
-        print("gateway already stopped")
         return 0
     assert pid is not None
     os.kill(pid, signal.SIGTERM)
