@@ -60,10 +60,6 @@ load_env_file() {
         value="${line#*=}"
         key="${key#"${key%%[![:space:]]*}"}"
         key="${key%"${key##*[![:space:]]}"}"
-        case "$key" in
-            TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID) ;;
-            *) continue ;;
-        esac
         value="${value#"${value%%[![:space:]]*}"}"
         if [[ "$value" == \'* && "$value" == *\' ]]; then
             value="${value:1:${#value}-2}"
