@@ -67,6 +67,32 @@ def _expand(value: str, instance_dir: Path) -> str:
     return os.path.expandvars(value).replace("$INSTANCE_DIR", str(instance_dir))
 
 
+def _load_env_file(env_path: Path) -> dict[str, str]:
+    """Load .env file and return a dict of key-value pairs."""
+    env = {}
+    if not env_path.exists():
+        return env
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.rstrip('\r\n')
+                if not line or line.strip().startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, _, value = line.partition('=')
+                key = key.strip()
+                value = value.strip()
+                if value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1]
+                elif value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                env[key] = value
+    except (OSError, ValueError):
+        pass
+    return env
+
+
 def _start_daemon(spec: ChildSpec, instance_dir: Path, log_file: Path) -> tuple[int, str]:
     if not spec.start:
         return 1, "no start command configured"
@@ -80,6 +106,10 @@ def _start_daemon(spec: ChildSpec, instance_dir: Path, log_file: Path) -> tuple[
     with log_file.open("ab") as handle:
         env = os.environ.copy()
         env.setdefault("JC_INSTANCE_DIR", str(instance_dir))
+        # Load and merge .env file from instance directory
+        env_file = instance_dir / ".env"
+        dot_env = _load_env_file(env_file)
+        env.update(dot_env)
         proc = subprocess.run(
             argv,
             cwd=str(instance_dir),
