@@ -19,9 +19,11 @@ SUPPORTED_TRIAGE_BACKENDS = (
     "always",
     "ollama",
     "openrouter",
+    "api_classifier",
     "claude-channel",
     "codex_api",
 )
+SUPPORTED_TRIAGE_PROTOCOLS = ("openai_compat", "anthropic")
 REJECTED_CHANNELS = {"web": "web channel removed in 0.3.0; use `jc gateway enqueue` for local testing"}
 CODEX_SANDBOX_VALUES = {"read-only", "workspace-write", "yolo", "danger", "danger-full-access"}
 CODEX_YOLO_SANDBOX_VALUES = {"yolo", "danger", "danger-full-access"}
@@ -71,6 +73,12 @@ class TriageConfig:
     openrouter_model: str = "meta-llama/llama-3.1-8b-instruct"
     openrouter_api_key_env: str = "OPENROUTER_API_KEY"
     openrouter_timeout_seconds: int = 5
+    protocol: str = "openai_compat"
+    base_url: str = ""
+    api_key_env: str = ""
+    model: str = ""
+    timeout_seconds: int = 5
+    max_tokens: int | None = None
     claude_triage_screen: str = "jc-triage"
     claude_triage_model: str = "claude-haiku-4-5"
     claude_triage_port: int = 9876
@@ -350,6 +358,12 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "openrouter_model",
         "openrouter_api_key_env",
         "openrouter_timeout_seconds",
+        "triage_protocol",
+        "triage_base_url",
+        "triage_api_key_env",
+        "triage_model",
+        "triage_timeout_seconds",
+        "triage_max_tokens",
         "claude_triage_screen",
         "claude_triage_model",
         "claude_triage_port",
@@ -412,6 +426,18 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "openrouter_model",
                 "openrouter_api_key_env",
                 "openrouter_timeout_seconds",
+                "triage_protocol",
+                "protocol",
+                "triage_base_url",
+                "base_url",
+                "triage_api_key_env",
+                "api_key_env",
+                "triage_model",
+                "model",
+                "triage_timeout_seconds",
+                "timeout_seconds",
+                "triage_max_tokens",
+                "max_tokens",
                 "claude_triage_screen",
                 "claude_triage_model",
                 "claude_triage_port",
@@ -423,6 +449,52 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         backend = str(triage_raw)
     if backend not in SUPPORTED_TRIAGE_BACKENDS:
         errors.append(f"triage.backend: unsupported backend {backend!r}")
+    def _triage_opt(name: str, nested: str | None = None) -> Any:
+        if data.get(name) is not None:
+            return data.get(name)
+        if isinstance(triage_raw, dict):
+            return triage_raw.get(nested or name)
+        return None
+
+    triage_protocol = _triage_opt("triage_protocol", "protocol")
+    triage_base_url = _triage_opt("triage_base_url", "base_url")
+    triage_api_key_env = _triage_opt("triage_api_key_env", "api_key_env")
+    triage_model = _triage_opt("triage_model", "model")
+    triage_timeout = _triage_opt("triage_timeout_seconds", "timeout_seconds")
+    triage_max_tokens = _triage_opt("triage_max_tokens", "max_tokens")
+    if triage_protocol is not None:
+        if backend != "api_classifier":
+            errors.append("triage_protocol: only valid when triage backend is api_classifier")
+        elif str(triage_protocol) not in SUPPORTED_TRIAGE_PROTOCOLS:
+            supported = ", ".join(SUPPORTED_TRIAGE_PROTOCOLS)
+            errors.append(f"triage_protocol: unsupported protocol {triage_protocol!r} (supported: {supported})")
+    if backend == "api_classifier":
+        protocol = str(triage_protocol or "openai_compat")
+        if protocol not in SUPPORTED_TRIAGE_PROTOCOLS:
+            supported = ", ".join(SUPPORTED_TRIAGE_PROTOCOLS)
+            errors.append(f"triage_protocol: unsupported protocol {protocol!r} (supported: {supported})")
+        if not isinstance(triage_base_url, str) or not triage_base_url.strip():
+            errors.append("triage_base_url: required when triage backend is api_classifier")
+        elif not triage_base_url.startswith(("http://", "https://")):
+            errors.append("triage_base_url: must start with http:// or https://")
+        if not isinstance(triage_api_key_env, str) or not triage_api_key_env.strip():
+            errors.append("triage_api_key_env: required when triage backend is api_classifier")
+        if not isinstance(triage_model, str) or not triage_model.strip():
+            errors.append("triage_model: required when triage backend is api_classifier")
+        if triage_timeout is not None and (
+            not _is_number_like(triage_timeout)
+            or float(triage_timeout) <= 0
+            or float(triage_timeout) > 60
+        ):
+            errors.append("triage_timeout_seconds: must be a positive number <= 60")
+        if triage_max_tokens is not None and (
+            not _is_int_like(triage_max_tokens)
+            or int(triage_max_tokens) <= 0
+            or int(triage_max_tokens) > 4096
+        ):
+            errors.append("triage_max_tokens: must be a positive integer <= 4096")
+        if protocol == "anthropic" and triage_max_tokens is None:
+            errors.append("triage_max_tokens: required when triage_protocol is anthropic")
     if data.get("triage_confidence_threshold") is not None:
         threshold = data["triage_confidence_threshold"]
         if not _is_number_like(threshold) or not 0 <= float(threshold) <= 1:
@@ -706,6 +778,9 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
     def _opt(key: str, default: Any) -> Any:
         return data.get(key, raw.get(key, default))
 
+    def _opt_pair(top: str, nested: str, default: Any) -> Any:
+        return data.get(top, raw.get(nested, raw.get(top, default)))
+
     return TriageConfig(
         backend=str(backend or "none"),
         confidence_threshold=float(_opt("triage_confidence_threshold", 0.7)),
@@ -719,6 +794,16 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
         openrouter_model=str(_opt("openrouter_model", "meta-llama/llama-3.1-8b-instruct")),
         openrouter_api_key_env=str(_opt("openrouter_api_key_env", "OPENROUTER_API_KEY")),
         openrouter_timeout_seconds=int(_opt("openrouter_timeout_seconds", 5)),
+        protocol=str(_opt_pair("triage_protocol", "protocol", "openai_compat")),
+        base_url=str(_opt_pair("triage_base_url", "base_url", "")),
+        api_key_env=str(_opt_pair("triage_api_key_env", "api_key_env", "")),
+        model=str(_opt_pair("triage_model", "model", "")),
+        timeout_seconds=int(_opt_pair("triage_timeout_seconds", "timeout_seconds", 5)),
+        max_tokens=(
+            int(_opt_pair("triage_max_tokens", "max_tokens", 0))
+            if _opt_pair("triage_max_tokens", "max_tokens", None) is not None
+            else None
+        ),
         claude_triage_screen=str(_opt("claude_triage_screen", "jc-triage")),
         claude_triage_model=str(_opt("claude_triage_model", "claude-haiku-4-5")),
         claude_triage_port=int(_opt("claude_triage_port", 9876)),

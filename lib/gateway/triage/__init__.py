@@ -1,6 +1,7 @@
 """Triage layer — backends, prompt, cache, metrics."""
 
 from .base import TriageBackend, TriageResult
+from .api_classifier import ApiClassifierTriage
 from .cache import TriageCache
 from .claude_channel import ClaudeChannelTriage
 from .codex_api import CodexApiTriage
@@ -13,6 +14,7 @@ from .openrouter import OpenRouterTriage
 __all__ = [
     "ClaudeChannelTriage",
     "CodexApiTriage",
+    "ApiClassifierTriage",
     "MetricsRecorder",
     "OllamaTriage",
     "OpenRouterTriage",

@@ -35,7 +35,7 @@ OUTBOUND CHANNELS  ◄───────────────────�
 | Overrides | `lib/gateway/overrides.py`            | `[brain]` prefix and `/brain` slash      |
 | Channels  | `lib/gateway/channels/`               | Per-channel modules                      |
 | Brains    | `lib/gateway/brains/`                 | Per-brain Python wrappers                |
-| Triage    | `lib/gateway/triage/`                 | ollama / openrouter / claude-channel     |
+| Triage    | `lib/gateway/triage/`                 | api_classifier / openrouter / ollama / claude-channel / codex_api |
 | Context   | `lib/gateway/context.py`              | L1 memory preamble loader                |
 | Logging   | `lib/gateway/logging_setup.py`        | Rotating JSON logs                       |
 | Metrics   | `state/gateway/triage-metrics.db`     | Class counts, confidence, fallback rate  |

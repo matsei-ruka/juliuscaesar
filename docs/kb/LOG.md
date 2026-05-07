@@ -61,3 +61,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-06] update | contract/config-and-secret-boundaries.md — documented pre-shipped web/data skill credentials
 ## [2026-05-06] update | subsystem/installation-and-cli-routing.md + contract/config-and-secret-boundaries.md + contract/instance-layout-and-resolution.md — added jc skills command, provider config writes, tests, and sync behavior
 ## [2026-05-07] update | subsystem/gateway-queue.md + decision/why-unified-gateway.md + contract/brain-capabilities.md - documented slim triage output and config-owned class-to-brain routing
+## [2026-05-07] update | subsystem/gateway-queue.md + contract/config-and-secret-boundaries.md + decision/native-cli-over-api-simulation.md - documented api_classifier triage protocols and direct-provider config

@@ -530,10 +530,13 @@ if [[ -f "$GATEWAY_CONFIG" ]]; then
     GATEWAY_CONFIG_CHECK=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
 from pathlib import Path
 import sys
-from gateway.config import load_config, SUPPORTED_BRAINS
+from urllib.parse import urlparse
+
+from gateway.config import load_config, SUPPORTED_BRAINS, env_value
 
 try:
-    cfg = load_config(Path(sys.argv[1]))
+    instance = Path(sys.argv[1])
+    cfg = load_config(instance)
 except Exception as exc:
     print(f"ERROR:{exc}")
     raise SystemExit(0)
@@ -542,12 +545,41 @@ for name, ch in cfg.channels.items():
     print(f"CHANNEL:{name}:{'enabled' if ch.enabled else 'disabled'}")
 if cfg.default_brain not in SUPPORTED_BRAINS:
     print(f"ERROR:unsupported default brain {cfg.default_brain}")
+triage = cfg.triage
+print(f"TRIAGE_BACKEND:{triage.backend}")
+if triage.backend == "api_classifier":
+    base_host = urlparse(triage.base_url).netloc or triage.base_url
+    key_status = "set" if env_value(instance, triage.api_key_env) else "missing"
+    print(f"TRIAGE_PROTOCOL:{triage.protocol}")
+    print(f"TRIAGE_BASE:{base_host}")
+    print(f"TRIAGE_MODEL:{triage.model}")
+    print(f"TRIAGE_KEY:{triage.api_key_env}:{key_status}")
+elif triage.backend == "openrouter":
+    key_status = "set" if env_value(instance, triage.openrouter_api_key_env) else "missing"
+    print("TRIAGE_PROTOCOL:openai_compat")
+    print("TRIAGE_BASE:openrouter.ai")
+    print(f"TRIAGE_MODEL:{triage.openrouter_model}")
+    print(f"TRIAGE_KEY:{triage.openrouter_api_key_env}:{key_status}")
 PY
 )
     while IFS= read -r line; do
         case "$line" in
             BRAIN:*) ok "gateway default brain: ${line#BRAIN:}" ;;
             CHANNEL:*) info "gateway ${line#CHANNEL:}" ;;
+            TRIAGE_BACKEND:*) info "gateway triage backend: ${line#TRIAGE_BACKEND:}" ;;
+            TRIAGE_PROTOCOL:*) info "gateway triage protocol: ${line#TRIAGE_PROTOCOL:}" ;;
+            TRIAGE_BASE:*) info "gateway triage base: ${line#TRIAGE_BASE:}" ;;
+            TRIAGE_MODEL:*) info "gateway triage model: ${line#TRIAGE_MODEL:}" ;;
+            TRIAGE_KEY:*)
+                triage_key="${line#TRIAGE_KEY:}"
+                key_name="${triage_key%:*}"
+                key_status="${triage_key##*:}"
+                if [[ "$key_status" == "set" ]]; then
+                    ok "gateway triage api key resolves: $key_name"
+                else
+                    warn "gateway triage api key missing: $key_name"
+                fi
+                ;;
             ERROR:*) fail "gateway config: ${line#ERROR:}" ;;
         esac
     done <<<"$GATEWAY_CONFIG_CHECK"

@@ -34,7 +34,12 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
   and writer for `channels.email.senders`.
 - `lib/gateway/brain.py` + `lib/gateway/brains/<name>.py`: per-brain Python wrappers; legacy `brain.py` is the fallback path for brains without a wrapper.
 - `lib/gateway/router.py`: per-event brain selection (default → cron-pinned → triage → sticky → override).
-- `lib/gateway/triage/`: pluggable triage backends — `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and `metrics`. Classifiers return only class and confidence; `GatewayRuntime` maps classes to brains through `triage_routing` plus `default_fallback_brain`.
+- `lib/gateway/triage/`: pluggable triage backends — `api_classifier`,
+  `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and
+  `metrics`. The `api_classifier` backend supports OpenAI-compatible chat
+  completions and Anthropic Messages through protocol modules. Classifiers
+  return only class and confidence; `GatewayRuntime` maps classes to brains
+  through `triage_routing` plus `default_fallback_brain`.
 - `lib/gateway/recovery/`: failure classifier + per-handler recovery (e.g. session-drop on `--resume <expired-uuid>`).
 - `lib/gateway/sessions.py` + `lib/gateway/process_sessions.py`: per-`(channel, conversation_id, brain)` session map and live-process tracking.
 - `lib/gateway/transcripts.py`: per-conversation chat transcripts (read by `bin/jc-transcripts`).

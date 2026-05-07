@@ -43,6 +43,38 @@ echo OPENROUTER_API_KEY=sk-or-... >> .env
 jc gateway reload
 ```
 
+### Switching triage from OpenRouter to a direct provider
+
+OpenRouter remains supported, but the gateway can also call providers directly
+through the generic `api_classifier` backend. For OpenAI-compatible providers
+such as DeepSeek, Groq, Together, Fireworks, or Cerebras:
+
+```yaml
+triage: api_classifier
+triage_protocol: openai_compat
+triage_base_url: https://api.deepseek.com/v1
+triage_api_key_env: DEEPSEEK_API_KEY
+triage_model: deepseek-chat
+triage_timeout_seconds: 5
+triage_max_tokens: 200
+```
+
+For Anthropic's Messages API:
+
+```yaml
+triage: api_classifier
+triage_protocol: anthropic
+triage_base_url: https://api.anthropic.com/v1
+triage_api_key_env: ANTHROPIC_API_KEY
+triage_model: claude-haiku-4-5
+triage_timeout_seconds: 5
+triage_max_tokens: 200
+```
+
+Store the matching key in `.env`, then run `jc doctor` and `jc gateway reload`.
+`jc doctor` reports the configured protocol, provider host, model, and whether
+the configured key env var resolves.
+
 ## What the migrator does
 
 - Reads `ops/watchdog.conf` and `.env` for current channel + chat id values.

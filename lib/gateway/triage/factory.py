@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..config import CodexAuthConfig, TriageConfig
 from .base import TriageBackend
+from .api_classifier import ApiClassifierTriage
 from .claude_channel import ClaudeChannelTriage
 from .codex_api import CodexApiTriage
 from .ollama import OllamaTriage
@@ -34,6 +35,8 @@ def build_backend(
         return OllamaTriage(cfg)
     if backend == "openrouter":
         return OpenRouterTriage(cfg, instance_dir)
+    if backend == "api_classifier":
+        return ApiClassifierTriage(cfg, instance_dir)
     if backend == "claude-channel":
         return ClaudeChannelTriage(cfg)
     if backend in ("codex_api", "codex-api"):

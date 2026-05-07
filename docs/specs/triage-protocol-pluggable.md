@@ -1,6 +1,6 @@
 # Spec: Pluggable triage protocol (OpenAI-compatible + Anthropic)
 
-**Status:** Draft
+**Status:** Implemented
 **Date:** 2026-05-07
 **Branch base:** `main`
 **Owner:** tbd
@@ -29,7 +29,8 @@ selects the wire shape; the backend stays generic.
   stay; they are not HTTP-protocol-shaped (Ollama has its own API; the Codex
   Responses path uses subscription auth; Claude-channel uses a screen-attached
   CLI). Future converging is out of scope.
-- Not changing `TriageResult` parsing or the prompt template.
+- Not changing the slim triage parser/prompt contract from
+  `triage-output-slim`: classifiers still produce `class + confidence`.
 
 ## Current behavior
 
@@ -362,9 +363,9 @@ Required passing cases:
 
 1. `triage: api_classifier`, `protocol: openai_compat`, mocked DeepSeek 200
    response with a valid JSON line in `choices[0].message.content` →
-   `TriageResult(class_=..., brain=..., confidence>0)`.
+   `TriageResult(class_=..., confidence>0)`.
 2. `triage: api_classifier`, `protocol: anthropic`, mocked Anthropic 200 with
-   `content=[{type:"text", text:"<json>"}]` → same parsed result.
+   `content=[{type:"text", text:"<json>"}]` → same slim parsed result.
 3. `triage: api_classifier`, missing API key env → `_failure("missing
    <KEY_ENV>")` with `class_="quick"` and confidence `0.0`. Identical fallback
    shape to today's openrouter backend.
@@ -393,12 +394,9 @@ Required passing cases:
 modules, validation, and tests. `openrouter` becomes a shim. No template or
 default changes; existing instances are unaffected.
 
-**Phase 2 — Update docs and `jc setup` defaults.** Update
-`docs/MIGRATION-*.md` with a "switching from OpenRouter to a direct provider"
-section showing DeepSeek and Anthropic configs. Update `jc setup` triage
-prompts to offer `api_classifier` with a provider picker (DeepSeek / Anthropic
-/ Groq / OpenRouter-compat / custom). Default for new instances stays
-`triage: none`.
+**Phase 2 — Update `jc setup` defaults.** Update `jc setup` triage prompts to
+offer `api_classifier` with a provider picker (DeepSeek / Anthropic / Groq /
+OpenRouter-compat / custom). Default for new instances stays `triage: none`.
 
 **Phase 3 (optional, separate spec).** Once adoption is verified, deprecate
 the `triage: openrouter` alias by emitting a doctor warning and a
@@ -429,32 +427,32 @@ version change and out of scope here.
 
 ## Definition of done
 
-- [ ] `lib/gateway/triage/api_classifier.py` implemented with both protocol
+- [x] `lib/gateway/triage/api_classifier.py` implemented with both protocol
       modules under `protocols/`.
-- [ ] `factory.build_backend()` routes `api_classifier` to the new backend.
-- [ ] `OpenRouterTriage` is a thin shim over `ApiClassifierTriage`; existing
+- [x] `factory.build_backend()` routes `api_classifier` to the new backend.
+- [x] `OpenRouterTriage` is a thin shim over `ApiClassifierTriage`; existing
       `triage: openrouter` config produces the same outbound request as before
       (verified by snapshot test).
-- [ ] `TriageConfig` carries the new fields; loader and validator updated.
-- [ ] Validation rejects: unsupported `triage_protocol`, missing
+- [x] `TriageConfig` carries the new fields; loader and validator updated.
+- [x] Validation rejects: unsupported `triage_protocol`, missing
       `triage_base_url`, missing `triage_max_tokens` when
       `protocol=anthropic`, non-`http(s)` URLs.
-- [ ] `parse_triage_json()` is unchanged. `TriageResult` is unchanged.
-      `render_prompt()` is unchanged.
-- [ ] All failure paths (missing key, 401, 5xx, timeout, malformed JSON,
+- [x] `parse_triage_json()` and `render_prompt()` are unchanged by this PR;
+      `TriageResult` remains the slim #38 shape.
+- [x] All failure paths (missing key, 401, 5xx, timeout, malformed JSON,
       Anthropic `max_tokens` truncation) return the existing `_failure(...)`
       shape — no exceptions escape.
-- [ ] `jc doctor` reports the configured triage backend, protocol, base URL
+- [x] `jc doctor` reports the configured triage backend, protocol, base URL
       (host only), model, and whether the api-key env var resolves.
-- [ ] Targeted tests green:
+- [x] Targeted tests green:
 
 ```bash
 pytest \
   tests/gateway/test_triage.py \
-  tests/gateway/triage/        # if split
+  tests/gateway/triage/
 ```
 
-- [ ] `docs/MIGRATION-*.md` updated with the direct-provider switch guide
+- [x] `docs/MIGRATION-*.md` updated with the direct-provider switch guide
       (Phase 2).
 
 ## Discrepancies with prompt
