@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import os
 from pathlib import Path
 
 import requests
+
+from gateway.config import env_value
 
 
 URL_INTL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
@@ -25,6 +26,7 @@ DEFAULT_PROMPT = (
 def transcribe(
     audio_path: Path,
     *,
+    instance_dir: Path,
     model: str = DEFAULT_MODEL,
     prompt: str = DEFAULT_PROMPT,
     url: str = URL_INTL,
@@ -35,9 +37,9 @@ def transcribe(
     if not audio_path.exists():
         raise FileNotFoundError(f"audio file not found: {audio_path}")
 
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
+    api_key = env_value(instance_dir, "DASHSCOPE_API_KEY")
     if not api_key:
-        raise RuntimeError("Missing DASHSCOPE_API_KEY in env")
+        raise RuntimeError("Missing DASHSCOPE_API_KEY in instance .env or env")
 
     mime = mimetypes.guess_type(str(audio_path))[0] or "audio/ogg"
     data_uri = f"data:{mime};base64,{base64.b64encode(audio_path.read_bytes()).decode()}"

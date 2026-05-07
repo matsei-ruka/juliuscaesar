@@ -773,7 +773,10 @@ class TelegramChannel:
                                 audio_path = self._ingest_audio_attachment(
                                     attachment, kind, update_id
                                 )
-                                text = _transcribe_audio(audio_path)
+                                text = _transcribe_audio(
+                                    audio_path,
+                                    instance_dir=self.instance_dir,
+                                )
                             except Exception as exc:  # noqa: BLE001
                                 self.log(
                                     f"telegram {kind} ingestion failed update_id={update_id}: {exc}"

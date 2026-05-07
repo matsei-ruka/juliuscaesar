@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from gateway.config import merge_instance_env
+
 from . import health, legacy_claude, policy
 from .child import (
     ChildSpec,
@@ -78,8 +80,8 @@ def _start_daemon(spec: ChildSpec, instance_dir: Path, log_file: Path) -> tuple[
             argv[0] = replacement
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open("ab") as handle:
-        env = os.environ.copy()
-        env.setdefault("JC_INSTANCE_DIR", str(instance_dir))
+        env = merge_instance_env(instance_dir)
+        env["JC_INSTANCE_DIR"] = str(instance_dir)
         proc = subprocess.run(
             argv,
             cwd=str(instance_dir),
@@ -103,7 +105,7 @@ def _emit_alert(
     if not sender.exists() or not os.access(sender, os.X_OK):
         log(f"alert: sender missing at {sender} — printing to log: {msg}")
         return
-    env = os.environ.copy()
+    env = merge_instance_env(instance_dir)
     env["JC_INSTANCE_DIR"] = str(instance_dir)
     try:
         subprocess.run(

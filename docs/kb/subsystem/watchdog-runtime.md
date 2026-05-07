@@ -9,8 +9,8 @@ code_anchors:
     symbol: "main_gateway()"
   - path: templates/init-instance/ops/watchdog.conf
     symbol: "CLAUDE_ARGS_EXTRA"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-07
+verified_by: Codex
 related:
   - contract/config-and-secret-boundaries.md
   - decision/native-cli-over-api-simulation.md
@@ -41,6 +41,8 @@ Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_M
 - Detection scopes Claude processes by working directory, which matters on multi-instance hosts.
 - Telegram plugin health requires the `bot.pid` process to descend from this instance's Claude process. A live pidfile owned by a different Claude is treated as hijacked/orphaned and killed before restart.
 - Runtime startup passes the instance path and Claude binary as positional args to `bash -c`, not interpolated shell text.
+- Python watchdog v2 child and alert launches merge only safe keys from the target instance `.env`, then set `JC_INSTANCE_DIR` explicitly.
+- The legacy bash watchdog parser allowlists secret/provider keys from `.env` and ignores runtime-control keys such as `PATH`, `RUNTIME_MODE`, `SCREEN_NAME`, and `JC_*`.
 
 ## Degraded plugin handling
 

@@ -14,9 +14,9 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
-from watchdog.child import StateStore  # noqa: E402
+from watchdog.child import ChildSpec, HealthSpec, RestartSpec, StateStore  # noqa: E402
 from watchdog.registry import registry_path  # noqa: E402
-from watchdog.supervisor import Supervisor  # noqa: E402
+from watchdog.supervisor import Supervisor, _start_daemon  # noqa: E402
 
 
 def _make_instance(tmp: Path, *, yaml: str) -> Path:
@@ -135,6 +135,43 @@ class SupervisorTests(unittest.TestCase):
             now[0] += 60
             tick()
             self.assertEqual(len(alerts), 1)
+
+    def test_start_daemon_merges_safe_instance_env_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = _make_instance(Path(tmp), yaml=_HEALTHY_YAML)
+            seen = inst / "state" / "seen.env"
+            (inst / "state").mkdir(parents=True, exist_ok=True)
+            (inst / ".env").write_text(
+                "DASHSCOPE_API_KEY=instance-key\n"
+                "PATH=/evil\n"
+                "JC_INSTANCE_DIR=/wrong\n"
+                "RUNTIME_MODE=legacy-claude\n",
+                encoding="utf-8",
+            )
+            spec = ChildSpec(
+                name="env-capture",
+                type="daemon",
+                start=(
+                    "/bin/sh -c "
+                    f"'printf \"%s|%s|%s|%s\" \"$DASHSCOPE_API_KEY\" \"$PATH\" "
+                    f"\"$JC_INSTANCE_DIR\" \"${{RUNTIME_MODE:-}}\" > {seen}'"
+                ),
+                health=HealthSpec(),
+                restart=RestartSpec(),
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"PATH": "/usr/bin:/bin", "RUNTIME_MODE": "supervisor"},
+                clear=False,
+            ):
+                result = _start_daemon(spec, inst, inst / "state" / "start.log")
+
+            self.assertEqual(result[0], 0)
+            token, path, instance_dir, runtime_mode = seen.read_text(encoding="utf-8").split("|")
+            self.assertEqual(token, "instance-key")
+            self.assertEqual(path, "/usr/bin:/bin")
+            self.assertEqual(instance_dir, str(inst))
+            self.assertEqual(runtime_mode, "supervisor")
 
 
 if __name__ == "__main__":

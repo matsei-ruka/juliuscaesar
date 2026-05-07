@@ -5,8 +5,8 @@ status: active
 code_anchors:
   - path: lib/gateway/channels/voice.py
     symbol: "class VoiceChannel:"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-07
+verified_by: Codex
 related:
   - subsystem/gateway-queue.md
   - subsystem/voice-dashscope.md
@@ -35,9 +35,10 @@ channels:
     tts_provider: dashscope
 ```
 
-`DASHSCOPE_API_KEY` must be set in `<instance>/.env`.
+`DASHSCOPE_API_KEY` should be set in `<instance>/.env`. The voice channel passes its active instance directory to ASR/TTS, so the instance value wins over any exported process env and process env is only a fallback.
 
 ## Invariants
 
 - Voice never owns a transport — disabling the paired channel disables voice.
 - Failed ASR/TTS log and continue with text-only fallback.
+- ASR/TTS calls must receive the active `instance_dir` to avoid cross-instance credential leaks.

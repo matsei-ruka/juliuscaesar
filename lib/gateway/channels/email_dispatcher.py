@@ -240,14 +240,13 @@ def _send_draft_with_buttons(
     _log = log or (lambda _: None)
     # Resolve token + chat_id from env (same precedence as send_telegram.py).
     from ..config import env_value
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
+    token = env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
     if not token:
         _log("telegram draft buttons skipped — no TELEGRAM_BOT_TOKEN")
         return
     chat_id = (
         chat_id_override
         or os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
-        or os.environ.get("TELEGRAM_CHAT_ID")
         or env_value(instance_dir, "TELEGRAM_CHAT_ID")
     )
     if not chat_id:
@@ -494,12 +493,10 @@ def _load_yaml_email_cfg(instance_dir: Path) -> dict[str, Any]:
 
 def _cli_poll(args: argparse.Namespace) -> int:
     """One-shot poll: fetch via adapter, dispatch, exit. Used by cron."""
-    from dotenv import load_dotenv  # type: ignore
+    from ..config import apply_instance_env
 
     instance = Path(args.instance_dir).resolve()
-    env_file = instance / ".env"
-    if env_file.exists():
-        load_dotenv(str(env_file))
+    apply_instance_env(instance)
 
     cfg_raw = _load_yaml_email_cfg(instance)
     if not cfg_raw.get("enabled", True):

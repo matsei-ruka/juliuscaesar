@@ -52,12 +52,12 @@ def download_telegram_file(
     return dest
 
 
-def transcribe_audio(audio_path: Path) -> str:
+def transcribe_audio(audio_path: Path, *, instance_dir: Path) -> str:
     """Best-effort ASR via `voice.asr.transcribe`. Returns "" on failure."""
     from importlib import import_module
 
     mod = import_module("voice.asr")
-    return str(mod.transcribe(audio_path)).strip()
+    return str(mod.transcribe(audio_path, instance_dir=instance_dir)).strip()
 
 
 def ingest_audio_attachment(

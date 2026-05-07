@@ -143,6 +143,68 @@ class SenderEscapingTests(unittest.TestCase):
             self.assertEqual(record["message_id"], "888")
             self.assertEqual(record["body_preview"], "hello marker")
 
+    def test_main_prefers_instance_env_over_process_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".jc").write_text("", encoding="utf-8")
+            (instance / ".env").write_text(
+                "TELEGRAM_BOT_TOKEN=instance-token\nTELEGRAM_CHAT_ID=instance-chat\n",
+                encoding="utf-8",
+            )
+            captured: list[dict] = []
+
+            def fake_post(url, payload, *, timeout=20):
+                captured.append({"url": url, "payload": payload})
+                return 200, {"ok": True, "result": {"message_id": 889}}
+
+            with mock.patch.object(self.mod, "_post", side_effect=fake_post), \
+                 mock.patch.object(sys, "stdin", io.StringIO("hello env")), \
+                 mock.patch.object(sys, "stdout", io.StringIO()), \
+                 mock.patch.dict(
+                     os.environ,
+                     {
+                         "JC_INSTANCE_DIR": str(instance),
+                         "TELEGRAM_BOT_TOKEN": "process-token",
+                         "TELEGRAM_CHAT_ID": "process-chat",
+                     },
+                     clear=True,
+                 ):
+                rc = self.mod.main()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured[0]["url"].split("/bot", 1)[1].split("/", 1)[0], "instance-token")
+            self.assertEqual(captured[0]["payload"]["chat_id"], "instance-chat")
+
+    def test_main_chat_override_still_wins_over_instance_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".jc").write_text("", encoding="utf-8")
+            (instance / ".env").write_text(
+                "TELEGRAM_BOT_TOKEN=instance-token\nTELEGRAM_CHAT_ID=instance-chat\n",
+                encoding="utf-8",
+            )
+            captured: list[dict] = []
+
+            def fake_post(url, payload, *, timeout=20):
+                captured.append(payload)
+                return 200, {"ok": True, "result": {"message_id": 890}}
+
+            with mock.patch.object(self.mod, "_post", side_effect=fake_post), \
+                 mock.patch.object(sys, "stdin", io.StringIO("hello override")), \
+                 mock.patch.object(sys, "stdout", io.StringIO()), \
+                 mock.patch.dict(
+                     os.environ,
+                     {
+                         "JC_INSTANCE_DIR": str(instance),
+                         "TELEGRAM_CHAT_ID_OVERRIDE": "override-chat",
+                     },
+                     clear=True,
+                 ):
+                rc = self.mod.main()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured[0]["chat_id"], "override-chat")
+
 
 class SenderShellShimTests(unittest.TestCase):
     """The `.sh` wrapper must exec the python sender — same body, same env."""

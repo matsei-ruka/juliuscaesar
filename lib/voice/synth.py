@@ -7,11 +7,12 @@ the TTS realtime stream and OGG/Opus conversion.
 from __future__ import annotations
 
 import base64
-import os
 import subprocess
 import tempfile
 import threading
 from pathlib import Path
+
+from gateway.config import env_value
 
 
 WS_URL_INTL = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
@@ -38,6 +39,7 @@ def _check_deps() -> None:
 def _synthesize_pcm(
     text: str,
     *,
+    instance_dir: Path,
     voice_id: str,
     target_model: str,
     ws_url: str,
@@ -51,9 +53,9 @@ def _synthesize_pcm(
         QwenTtsRealtimeCallback,
     )
 
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
+    api_key = env_value(instance_dir, "DASHSCOPE_API_KEY")
     if not api_key:
-        raise RuntimeError("Missing DASHSCOPE_API_KEY in env")
+        raise RuntimeError("Missing DASHSCOPE_API_KEY in instance .env or env")
     dashscope.api_key = api_key
 
     class CB(QwenTtsRealtimeCallback):
@@ -108,6 +110,7 @@ def synthesize(
     text: str,
     out_path: Path,
     *,
+    instance_dir: Path,
     voice_id: str,
     target_model: str,
     ws_url: str = WS_URL_INTL,
@@ -123,6 +126,7 @@ def synthesize(
         pcm = Path(td) / "out.pcm"
         _synthesize_pcm(
             text,
+            instance_dir=instance_dir,
             voice_id=voice_id,
             target_model=target_model,
             ws_url=ws_url,

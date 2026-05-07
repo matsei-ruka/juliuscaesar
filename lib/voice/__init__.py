@@ -1,11 +1,11 @@
 """JuliusCaesar voice — DashScope Qwen TTS + ASR + enrollment.
 
-Library functions take explicit parameters; the CLI (bin/jc-voice) does
-all instance-aware wiring (loads voice.json, loads .env from the instance,
-then calls these with the values).
+ASR/TTS functions take an explicit instance_dir so each instance resolves
+DASHSCOPE_API_KEY from its own .env before falling back to process env. The CLI
+still applies the instance .env for enrollment/listing helpers.
 
 Requirements:
-- DASHSCOPE_API_KEY in env (caller loads the instance's .env before calling)
+- DASHSCOPE_API_KEY in the instance .env or process env
 - ffmpeg on PATH
 - Python deps: dashscope, requests
 """

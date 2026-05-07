@@ -22,7 +22,7 @@ from typing import Callable, Iterable
 
 from .. import chats as chats_module
 from .. import transcripts as transcripts_module
-from ..config import BrainOverrideConfig, GatewayConfig
+from ..config import BrainOverrideConfig, GatewayConfig, merge_instance_env
 from ..context import render_preamble
 from ..queue import Event
 
@@ -244,7 +244,7 @@ Your reply is only the text the user reads.
             priming = self._build_transcript_priming(event)
             if priming:
                 prompt = priming + "\n\n" + prompt
-        env = os.environ.copy()
+        env = merge_instance_env(self.instance_dir)
         env["JC_INSTANCE_DIR"] = str(self.instance_dir)
         env["JC_EVENT_SOURCE"] = event.source or ""
         push_marker_path = (

@@ -217,7 +217,7 @@ def _drive_telegram(
     telegram_media.http_json = fake_http_json
     telegram_media.urllib.request.urlopen = lambda *_a, **_k: FakeResp(urlopen_payload)
     if transcript is not None:
-        telegram_module._transcribe_audio = lambda _path: transcript
+        telegram_module._transcribe_audio = lambda _path, *, instance_dir: transcript
     try:
         thread = threading.Thread(
             target=channel.run, args=(enqueue, should_stop), daemon=True
@@ -832,8 +832,9 @@ class VoiceChannelSynthTests(unittest.TestCase):
 
             captured: dict[str, Any] = {}
 
-            def fake_synthesize(text, out_path, *, voice_id, target_model, **_):
+            def fake_synthesize(text, out_path, *, instance_dir, voice_id, target_model, **_):
                 captured["text"] = text
+                captured["instance_dir"] = instance_dir
                 captured["voice_id"] = voice_id
                 captured["target_model"] = target_model
                 # Touch the file to mimic real synth writing OGG bytes.
@@ -858,6 +859,7 @@ class VoiceChannelSynthTests(unittest.TestCase):
             self.assertTrue(Path(result).exists())
             self.assertTrue(Path(result).is_relative_to(instance / "state" / "voice" / "outbound"))
             self.assertEqual(captured["text"], "hello luca")
+            self.assertEqual(captured["instance_dir"], instance)
             self.assertEqual(captured["voice_id"], "qwen-tts-vc-rachel-test")
             self.assertEqual(captured["target_model"], "qwen3-tts-vc-realtime-test")
 

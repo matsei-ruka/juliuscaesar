@@ -32,13 +32,12 @@ import json
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 _HERE = Path(__file__).resolve().parent
 _LIB = _HERE.parent / "lib"
 if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
+from gateway.config import apply_instance_env  # type: ignore  # noqa: E402
 from voice import enroll, synthesize, transcribe  # type: ignore  # noqa: E402
 from voice.enroll import list_voices  # type: ignore  # noqa: E402
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
@@ -52,9 +51,7 @@ def resolve_instance_dir(arg: str | None) -> Path:
 
 
 def load_instance_env(instance: Path) -> None:
-    env_file = instance / ".env"
-    if env_file.exists():
-        load_dotenv(str(env_file))
+    apply_instance_env(instance)
 
 
 def load_voice_json(instance: Path) -> dict:
@@ -87,6 +84,7 @@ def cmd_speak(args: argparse.Namespace, instance: Path) -> int:
     path = synthesize(
         args.text,
         out,
+        instance_dir=instance,
         voice_id=v["voice"],
         target_model=v["target_model"],
     )
@@ -96,7 +94,7 @@ def cmd_speak(args: argparse.Namespace, instance: Path) -> int:
 
 def cmd_transcribe(args: argparse.Namespace, instance: Path) -> int:
     load_instance_env(instance)
-    text = transcribe(Path(args.audio))
+    text = transcribe(Path(args.audio), instance_dir=instance)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
     print(text)

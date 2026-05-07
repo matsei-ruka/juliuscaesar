@@ -23,7 +23,6 @@ import sys
 from pathlib import Path
 
 import yaml
-from dotenv import load_dotenv
 
 from jc_paths import resolve_instance_path
 
@@ -32,6 +31,7 @@ from gateway.brain_output import (
     parse_brain_output,
     push_marker_sent,
 )
+from gateway.config import merge_instance_env
 
 from . import builtins as _builtins
 
@@ -118,11 +118,14 @@ def run_pre_fetch(
         raise FileNotFoundError(f"pre_fetch script not found: {script}")
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     with bundle_path.open("w", encoding="utf-8") as out:
+        env = merge_instance_env(instance_dir)
+        env["JC_INSTANCE_DIR"] = str(instance_dir)
         proc = subprocess.Popen(
             ["bash", str(script)],
             stdout=out,
             stderr=subprocess.PIPE,
             cwd=str(instance_dir / "heartbeat"),
+            env=env,
             start_new_session=True,
         )
         try:
@@ -219,6 +222,7 @@ def call_adapter(
     *,
     timeout_seconds: int | None = None,
     push_marker_path: Path | None = None,
+    instance_dir: Path | None = None,
 ) -> str:
     adapter = ADAPTERS_DIR / f"{tool}.sh"
     if not adapter.exists():
@@ -226,6 +230,8 @@ def call_adapter(
     if not os.access(adapter, os.X_OK):
         raise PermissionError(f"adapter not executable: {adapter}")
     env = os.environ.copy()
+    if instance_dir is not None:
+        env = merge_instance_env(instance_dir, env)
     env["JC_EVENT_SOURCE"] = "cron"
     if push_marker_path is not None:
         env["JC_PUSH_MARKER_PATH"] = str(push_marker_path)
@@ -263,7 +269,7 @@ def send_telegram(
     `chat_id_override` to send to a specific chat (used for named
     destinations). Returns message_id as string on success, or None.
     """
-    env = os.environ.copy()
+    env = merge_instance_env(instance_dir)
     env["JC_INSTANCE_DIR"] = str(instance_dir)
     if chat_id_override:
         env["TELEGRAM_CHAT_ID_OVERRIDE"] = str(chat_id_override)
@@ -411,11 +417,6 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
     ts = dt.datetime.now()
     ts_tag = ts.strftime("%Y%m%dT%H%M%S")
 
-    # Source instance .env (secrets like TELEGRAM_BOT_TOKEN, DASHSCOPE_API_KEY)
-    env_file = instance_dir / ".env"
-    if env_file.exists():
-        load_dotenv(str(env_file))
-
     # Load tasks
     tasks_file = heartbeat_dir / "tasks.yaml"
     cfg = load_tasks(tasks_file)
@@ -539,6 +540,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
             log_path,
             timeout_seconds=timeout_seconds,
             push_marker_path=push_marker_path,
+            instance_dir=instance_dir,
         )
 
         # Capture session ID for next run.

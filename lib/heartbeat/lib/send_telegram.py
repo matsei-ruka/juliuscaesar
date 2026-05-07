@@ -17,6 +17,7 @@ Instance resolution (in order):
 Env precedence for chat_id:
   1. $TELEGRAM_CHAT_ID_OVERRIDE
   2. $TELEGRAM_CHAT_ID from the instance's `.env`
+  3. $TELEGRAM_CHAT_ID from the process env
 
 Exits non-zero on failure; stderr carries a short error note. Prints the
 resulting `message_id` to stdout on success.
@@ -183,14 +184,14 @@ def main() -> int:
     env_path = instance / ".env"
     env = _load_env_file(env_path, ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN")
+    token = env.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         sys.exit(f"send_telegram: TELEGRAM_BOT_TOKEN not set (define in {env_path})")
 
     chat_id = (
         os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
-        or os.environ.get("TELEGRAM_CHAT_ID")
         or env.get("TELEGRAM_CHAT_ID")
+        or os.environ.get("TELEGRAM_CHAT_ID")
     )
     if not chat_id:
         sys.exit(

@@ -11,10 +11,14 @@ code_anchors:
     symbol: "TELEGRAM_BOT_TOKEN valid"
   - path: bin/jc-skills
     symbol: "def write_env_keys(instance: Path, updates: dict[str, str]) -> None:"
-  - path: lib/heartbeat/runner.py
-    symbol: "load_dotenv(str(env_file))"
-last_verified: 2026-05-06
-verified_by: Matsei Ruka
+  - path: lib/gateway/config.py
+    symbol: "def env_value(instance_dir: Path, name: str) -> str:"
+  - path: lib/gateway/config.py
+    symbol: "def merge_instance_env("
+  - path: lib/watchdog/watchdog.sh
+    symbol: "load_env_file()"
+last_verified: 2026-05-07
+verified_by: Codex
 related:
   - contract/instance-layout-and-resolution.md
   - subsystem/heartbeat-runner.md
@@ -25,6 +29,8 @@ related:
 ## Summary
 
 The framework keeps user secrets and identity out of the framework repo. Runtime secrets live in the instance `.env`; instance config files live under instance subdirectories such as `heartbeat/`, `ops/`, and `voice/`.
+
+For framework lookups, the target instance `.env` is authoritative for allowed secret/provider keys. Process env is a fallback only when the key is absent from the instance `.env`, so two instances running under the same Linux user do not borrow each other's exported tokens.
 
 ## Secret files
 
@@ -77,6 +83,9 @@ Common keys:
 ## Invariants
 
 - Framework code should not contain instance credentials.
+- Secret lookups should use `env_value(instance_dir, name)` or another instance-aware helper. Instance `.env` values win over process env for allowed keys.
+- Subprocess launchers that need instance secrets should use `merge_instance_env(instance_dir)` and then set runtime-control variables explicitly.
+- Runtime-control variables from `.env` must not alter supervisors or framework launchers. Reserved names include `PATH`, `HOME`, `PYTHONPATH`, `RUNTIME_MODE`, `SCREEN_NAME`, `SESSION_ID`, `JC_*`, `CODEX_*`, and `WORKER_*`.
 - Telegram `getMe` validation is only possible when a token is present.
 - Slack `auth.test` validation is only possible when both Slack tokens are present.
 - Voice calls fail fast when `DASHSCOPE_API_KEY` is missing.
@@ -84,7 +93,7 @@ Common keys:
   must never contain API keys.
 - `jc skills test` may call provider account/search endpoints and records only
   redacted status messages.
-- Runtime scripts must not `source` `.env`. Bash consumers use an allowlisted key parser so values such as `$(...)` remain data, not shell code.
+- Runtime scripts must not `source` `.env`. Bash consumers use an allowlisted key parser so values such as `$(...)` remain data, not shell code, and runtime-control names stay blocked.
 - `watchdog.conf` is sourced by bash, so it must stay shell-compatible.
 - `gateway.yaml` is parsed as data and must not contain secrets.
 - `jc doctor` supports both `--instance-dir <path>` and `--instance-dir=<path>`.

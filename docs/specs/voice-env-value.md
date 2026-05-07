@@ -1,180 +1,88 @@
-# Spec: voice ASR/TTS use `env_value()` instead of `os.environ` directly
+# Spec: instance-local env resolution for voice and runtime subprocesses
 
 **Branch:** `feat/voice-env-value`
-**Author:** Rachel
-**Status:** draft
+**Author:** Codex
+**Status:** implemented
 **Date:** 2026-05-07
 
 ## Problem
 
-`lib/voice/asr.py:transcribe()` and `lib/voice/synth.py:_synthesize_pcm()` read `DASHSCOPE_API_KEY` directly from `os.environ`. When the gateway is started with a clean process environment — the normal case for cron-spawned watchdogs and any `env -i` invocation — the key is absent and the call raises `RuntimeError("Missing DASHSCOPE_API_KEY in env")`.
+Voice ASR/TTS read `DASHSCOPE_API_KEY` directly from `os.environ`. That fails under clean cron/watchdog launches where the process env does not export the key, even though the target instance has the key in `<instance>/.env`.
 
-The error is caught by `VoiceChannel._asr()` / `_synthesize()` and swallowed into a log line (`voice asr error: ...` / `voice tts skipped: ...`). Inbound voice messages are silently dropped: no transcription, no reply, no escalation. The user sees nothing.
+The earlier watchdog-level mitigation was unsafe because it loaded `.env` into broad runtime processes. On multi-instance hosts that allows ambient user env, runtime-control names, or another instance's values to influence the wrong gateway.
 
-This is the second time the same gap has bitten production. The previous mitigation (commit `edaae8f`, "load .env in supervisor") was reverted (`a07219b`) because the merge strategy clobbered process-level env vars and broke the gateway subprocess. The proper fix lives in the voice layer, not the supervisor.
+## Invariant
 
-## Why the rest of the gateway is fine
+Secrets are instance-local:
 
-Every other channel resolves secrets via `lib/gateway/config.py:env_value(instance_dir, name)`:
-
-```python
-def env_value(instance_dir: Path, name: str) -> str:
-    return os.environ.get(name) or env_values(instance_dir).get(name, "")
-```
-
-It checks `os.environ` first, then falls back to the parsed `<instance>/.env`. That means a clean-env gateway still finds its secrets — the `.env` file is the source of truth.
-
-Voice is the only subsystem that bypasses this helper.
-
-## Goal
-
-Voice ASR and TTS resolve `DASHSCOPE_API_KEY` via `env_value(instance_dir, "DASHSCOPE_API_KEY")`, identical to how the Telegram channel resolves `TELEGRAM_BOT_TOKEN`. Process env still wins when set (no behavior change for shells that export the key), but `.env` works as a fallback when it isn't.
-
-After this change, voice works in:
-- cron-spawned gateway (no exported user env)
-- gateway started via `env -i HOME=… PATH=…`
-- gateway started from any shell, with or without the key exported
-
-## Non-goals
-
-- Changing how the supervisor spawns children. Supervisor stays as-is.
-- Reworking `env_value()` ordering. The cross-instance leak documented in `memory/L1/HOT.md` (CRITICAL env-leak: cross-instance bot impersonation) is a separate, higher-priority spec.
-- Caching/refresh strategy for `.env`. `env_values()` already caches by mtime.
+- `<instance>/.env` wins when a safe secret/provider key is present there.
+- Process env is only a fallback when the key is absent from the instance `.env`.
+- Two instances running under the same Linux user must resolve their own `.env` values, not whichever token happened to be exported by the launching shell.
+- Runtime-control variables from `.env` are ignored when building subprocess envs. Examples include `PATH`, `HOME`, `PYTHONPATH`, `RUNTIME_MODE`, `SCREEN_NAME`, `SESSION_ID`, `JC_*`, `CODEX_*`, and `WORKER_*`.
 
 ## Design
 
-### Public surface change
+`lib/gateway/config.py` owns the boundary:
 
-Both top-level entry points gain an `instance_dir: Path` keyword argument. Existing callers update to pass it.
+- `env_value(instance_dir, name)` reads the instance `.env` first for allowed keys, then falls back to `os.environ`.
+- `safe_instance_env_values(instance_dir)` filters `.env` to keys that are allowed to cross into subprocesses.
+- `merge_instance_env(instance_dir, base=None)` copies the base/process env and overlays only safe instance `.env` keys.
+- `apply_instance_env(instance_dir)` mutates the current process with only safe instance `.env` keys for CLI paths that still call legacy helpers.
 
-```python
-# lib/voice/asr.py
-def transcribe(
-    audio_path: Path,
-    *,
-    instance_dir: Path,
-    model: str = DEFAULT_MODEL,
-    prompt: str = DEFAULT_PROMPT,
-    url: str = URL_INTL,
-    timeout_s: float = 120.0,
-) -> str:
-    ...
-    api_key = env_value(instance_dir, "DASHSCOPE_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing DASHSCOPE_API_KEY in env or instance .env")
-    ...
-```
+Voice ASR/TTS entry points now take `instance_dir` as a required keyword argument:
 
 ```python
-# lib/voice/synth.py
-def synthesize(
-    text: str,
-    out_path: Path,
-    *,
-    instance_dir: Path,
-    voice_id: str,
-    target_model: str,
-    ws_url: str = WS_URL_INTL,
-) -> Path:
-    ...
-
-def _synthesize_pcm(
-    text: str,
-    *,
-    instance_dir: Path,
-    voice_id: str,
-    target_model: str,
-    ws_url: str,
-    pcm_path: Path,
-    timeout_s: float = 120.0,
-) -> None:
-    ...
-    api_key = env_value(instance_dir, "DASHSCOPE_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing DASHSCOPE_API_KEY in env or instance .env")
-    dashscope.api_key = api_key
-    ...
+transcribe(audio_path, *, instance_dir=instance_dir)
+synthesize(text, out_path, *, instance_dir=instance_dir, voice_id=..., target_model=...)
 ```
 
-### Import wiring
+Gateway voice and Telegram-media callers pass the active instance through to those functions.
 
-`voice/asr.py` and `voice/synth.py` currently sit under `lib/voice/` and the gateway imports them via `import_module("voice.asr")` / `import_module("voice.synth")`. They will import `env_value` from `gateway.config`:
+Runtime subprocess launchers use `merge_instance_env()` before setting their explicit runtime-control variables:
 
-```python
-from gateway.config import env_value
-```
+- gateway brain adapters
+- heartbeat adapters, pre-fetch scripts, and Telegram delivery
+- background worker adapters
+- Python watchdog v2 child daemons and alert delivery
 
-Both `voice` and `gateway` already coexist on the install's `sys.path` (see `lib/gateway/channels/voice.py:83` and `:122`), so no packaging change needed.
-
-### Caller updates
-
-Two call sites in `lib/gateway/channels/voice.py`:
-
-```python
-# _asr (line 86)
-return str(mod.transcribe(audio_path, instance_dir=self.instance_dir))
-
-# _synthesize (line 123)
-result = synth.synthesize(
-    text,
-    out_path,
-    instance_dir=self.instance_dir,
-    voice_id=str(voice_id),
-    target_model=str(target_model),
-)
-```
-
-One call site in `lib/gateway/channels/telegram_media.py:59`:
-
-```python
-mod = import_module("voice.asr")
-return str(mod.transcribe(audio_path, instance_dir=instance_dir))
-```
-
-(`telegram_media`'s caller already has `instance_dir` available; threading it through is mechanical.)
+The legacy bash watchdog keeps its allowlisted `.env` parser. It may import secret/provider keys such as `TELEGRAM_BOT_TOKEN` and `DASHSCOPE_API_KEY`, but it ignores runtime-control keys like `PATH`, `RUNTIME_MODE`, and `SCREEN_NAME`.
 
 ## Files touched
 
 | File | Change |
 |---|---|
-| `lib/voice/asr.py` | add `instance_dir` kw arg to `transcribe`; replace `os.environ.get(...)` with `env_value(instance_dir, ...)`; import `env_value` |
-| `lib/voice/synth.py` | add `instance_dir` kw arg to `synthesize` + `_synthesize_pcm`; replace `os.environ.get(...)` with `env_value(...)`; import `env_value` |
-| `lib/gateway/channels/voice.py` | pass `self.instance_dir` to `transcribe` and `synthesize` |
-| `lib/gateway/channels/telegram_media.py` | pass `instance_dir` to `transcribe` |
-| `tests/voice/test_asr.py` (if exists) | update fixtures |
-| `tests/voice/test_synth.py` (if exists) | update fixtures |
+| `lib/gateway/config.py` | instance-first `env_value()`, safe env filter, merge/apply helpers |
+| `lib/voice/asr.py` | require `instance_dir`; resolve `DASHSCOPE_API_KEY` through `env_value()` |
+| `lib/voice/synth.py` | require `instance_dir`; resolve `DASHSCOPE_API_KEY` through `env_value()` |
+| `lib/gateway/channels/voice.py` | pass channel instance to ASR/TTS |
+| `lib/gateway/channels/telegram.py` | pass channel instance through Telegram audio transcription |
+| `lib/gateway/channels/telegram_media.py` | require `instance_dir` for voice-note ASR |
+| `bin/jc-voice` | apply safe instance env for CLI operations |
+| `lib/gateway/brains/base.py` | launch adapters with safe instance env |
+| `lib/heartbeat/runner.py` | launch pre-fetch, adapters, and sender with safe instance env |
+| `bin/jc-workers` | launch worker adapters with safe instance env |
+| `lib/watchdog/supervisor.py` | launch supervised children and alerts with safe instance env |
+| `lib/watchdog/watchdog.sh` | restore allowlisted bash `.env` loading |
 
 ## Backwards compatibility
 
-`instance_dir` is a required kw arg. Any external caller (none known in-tree) breaks at call site with a clear `TypeError: transcribe() missing 1 required keyword-only argument: 'instance_dir'`. Acceptable — voice is internal.
+`voice.asr.transcribe()` and `voice.synth.synthesize()` now require a keyword-only `instance_dir`. In-tree callers have been updated. Out-of-tree callers fail at call time with a clear missing-argument error and should pass the target instance directory.
 
-No `.env` schema change. No config file change. No migration script.
+No `.env` schema change is required.
 
 ## Test plan
 
-1. **Unit**
-   - `transcribe()` with `instance_dir` pointing at a tmpdir containing `.env` with `DASHSCOPE_API_KEY=test` → key found.
-   - Same with `os.environ["DASHSCOPE_API_KEY"]` set to a different value → process env wins.
-   - Neither set → `RuntimeError("Missing DASHSCOPE_API_KEY ...")`.
-   - Mirror for `synthesize()`.
+Automated coverage:
 
-2. **Integration (manual smoke)**
-   - Start Marco's gateway with `env -i HOME=… PATH=…` (no `DASHSCOPE_API_KEY` exported).
-   - Send a Telegram voice note.
-   - Verify `state/gateway/gateway.log` shows ASR success, not `voice asr error: Missing DASHSCOPE_API_KEY`.
-   - Verify reply comes back as voice.
+- `tests/gateway/test_config_env.py`: instance `.env` wins over process env; process fallback still works; two instances under the same user resolve separate tokens; runtime-control keys are filtered from env merges.
+- `tests/voice/test_env_lookup.py`: ASR/TTS use `DASHSCOPE_API_KEY` from the target instance even when the process env has a different value.
+- `tests/test_send_telegram.py`: canonical Telegram sender prefers instance token/chat, while explicit chat override still wins.
+- `tests/watchdog/test_supervisor.py`: Python watchdog v2 child launch receives safe instance secrets but not runtime-control keys from `.env`.
+- `tests/gateway/test_channels.py`: voice/Telegram call sites pass `instance_dir`.
 
-3. **Regression**
-   - Start a gateway from a shell that exports `DASHSCOPE_API_KEY=…`.
-   - Voice flow still works (process env path unchanged).
+Manual smoke:
 
-## Rollout
-
-1. Land on `feat/voice-env-value`.
-2. PR against `main`.
-3. After merge, fleet upgrade: `git pull && ./install.sh` per instance, watchdog restarts gateway naturally on next tick.
-4. Update `memory/L1/HOT.md` "Known nuisances" — strike the voice/DASHSCOPE workaround entry.
-
-## Open questions
-
-- Is there any external (out-of-tree) caller of `voice.asr.transcribe` or `voice.synth.synthesize`? (Grep on rachel_zane returns no in-tree callers other than the four enumerated above. Worth a final ripgrep across all instance dirs before merging.)
+1. Start one gateway with `env -i HOME=... PATH=... jc-gateway --instance-dir <instance> start`.
+2. Send a Telegram voice note.
+3. Verify ASR succeeds without an exported `DASHSCOPE_API_KEY`.
+4. Start a second instance under the same user with different Telegram/DashScope keys and verify it uses its own `.env`.

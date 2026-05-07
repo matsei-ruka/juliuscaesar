@@ -60,6 +60,16 @@ load_env_file() {
         value="${line#*=}"
         key="${key#"${key%%[![:space:]]*}"}"
         key="${key%"${key##*[![:space:]]}"}"
+        case "$key" in
+            TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|TELEGRAM_CHAT_IDS) ;;
+            SLACK_APP_TOKEN|SLACK_BOT_TOKEN|DISCORD_BOT_TOKEN) ;;
+            DASHSCOPE_API_KEY|OPENROUTER_API_KEY|BRAVE_API_KEY|TAVILY_API_KEY) ;;
+            FIRECRAWL_API_KEY|BROWSER_USE_API_KEY) ;;
+            COMPANY_ENDPOINT|COMPANY_API_KEY|COMPANY_ENROLLMENT_TOKEN) ;;
+            IMAP_HOST|IMAP_PORT|IMAP_USER|IMAP_PASSWORD) ;;
+            SMTP_HOST|SMTP_PORT|SMTP_USER|SMTP_PASSWORD) ;;
+            *) continue ;;
+        esac
         value="${value#"${value%%[![:space:]]*}"}"
         if [[ "$value" == \'* && "$value" == *\' ]]; then
             value="${value:1:${#value}-2}"
