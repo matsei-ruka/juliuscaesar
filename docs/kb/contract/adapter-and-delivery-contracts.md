@@ -17,7 +17,7 @@ code_anchors:
     symbol: "codex exec"
   - path: lib/gateway/brains/dispatch.py
     symbol: "_BRAIN_REGISTRY"
-last_verified: 2026-05-06
+last_verified: 2026-05-07
 verified_by: Matsei Ruka
 related:
   - subsystem/heartbeat-runner.md
@@ -31,6 +31,11 @@ Adapters are executable shell scripts under `lib/heartbeat/adapters/`. Both hear
 The gateway uses Python wrappers under `lib/gateway/brains/` (one per brain). They share the shell-adapter contract above for subprocess brains (`claude`, `codex`, `gemini`, `opencode`, `aider`). The `codex_api` wrapper is the lone exception — it calls the OpenAI Responses API directly using the local Codex CLI's OAuth token rather than launching a subprocess.
 
 Delivery for heartbeat still uses `lib/heartbeat/lib/send_telegram.sh`. Gateway delivery uses direct channel clients for Telegram, Slack Socket Mode, and Discord. Both gateway and heartbeat parse adapter stdout through `parse_brain_output` before delivery.
+
+Gateway may append the optional `reply_footer` diagnostic line after parsing
+and before normal channel delivery. That footer is not part of the adapter
+stdout contract and is skipped when the parsed output or push marker says the
+brain already delivered its own message.
 
 ## Adapter contract
 
@@ -97,6 +102,8 @@ It refuses empty bodies, disables web previews, and prints the resulting `messag
 - Scheduled and gateway `claude -p` runs must not use `--channels`; Telegram/Slack are owned by the gateway runtime.
 - Gateway and heartbeat delivery must never relay the structured JSON envelope
   itself to user channels.
+- Gateway reply footers are delivery presentation only; adapters should never
+  emit them themselves.
 - Heartbeat destinations are Telegram-only in 0.1.x.
 - Workers share adapter behavior with heartbeat but manage their own lifecycle state; in gateway-configured instances their terminal notifications enqueue delivery events.
 

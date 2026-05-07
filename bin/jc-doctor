@@ -541,6 +541,7 @@ except Exception as exc:
     print(f"ERROR:{exc}")
     raise SystemExit(0)
 print(f"BRAIN:{cfg.default_brain}")
+print(f"REPLY_FOOTER:{'enabled' if cfg.reply_footer.enabled else 'disabled'}")
 for name, ch in cfg.channels.items():
     print(f"CHANNEL:{name}:{'enabled' if ch.enabled else 'disabled'}")
 if cfg.default_brain not in SUPPORTED_BRAINS:
@@ -565,6 +566,7 @@ PY
     while IFS= read -r line; do
         case "$line" in
             BRAIN:*) ok "gateway default brain: ${line#BRAIN:}" ;;
+            REPLY_FOOTER:*) info "gateway reply footer: ${line#REPLY_FOOTER:}" ;;
             CHANNEL:*) info "gateway ${line#CHANNEL:}" ;;
             TRIAGE_BACKEND:*) info "gateway triage backend: ${line#TRIAGE_BACKEND:}" ;;
             TRIAGE_PROTOCOL:*) info "gateway triage protocol: ${line#TRIAGE_PROTOCOL:}" ;;

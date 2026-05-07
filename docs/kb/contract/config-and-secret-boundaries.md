@@ -49,7 +49,7 @@ Common keys:
 ## Config files
 
 - `<instance>/heartbeat/tasks.yaml`: scheduled task definitions, defaults, destinations.
-- `<instance>/ops/gateway.yaml`: non-secret gateway runtime config, including enabled channels, env-var names, default brain, retries, leases, and timeouts.
+- `<instance>/ops/gateway.yaml`: non-secret gateway runtime config, including enabled channels, env-var names, default brain, retries, leases, timeouts, triage routing, and the opt-in reply footer.
 - `<instance>/ops/watchdog.conf`: runtime mode, state/log name, and legacy Claude fallback settings.
 - `<instance>/voice/references/voice.json`: voice id and target model after enrollment.
 - `<instance>/CLAUDE.md`: imports L1 memory and describes how sessions load context.
@@ -87,6 +87,8 @@ Common keys:
 - Runtime scripts must not `source` `.env`. Bash consumers use an allowlisted key parser so values such as `$(...)` remain data, not shell code.
 - `watchdog.conf` is sourced by bash, so it must stay shell-compatible.
 - `gateway.yaml` is parsed as data and must not contain secrets.
+- `reply_footer` is diagnostic presentation config only. It must not contain
+  secrets, and it is disabled by default.
 - `jc doctor` supports both `--instance-dir <path>` and `--instance-dir=<path>`.
 - `jc doctor` should use the JuliusCaesar venv Python for installed framework dependency checks so bash shims and diagnostics agree.
 

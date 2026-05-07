@@ -7,10 +7,11 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import capabilities, overrides, process_sessions, queue, router, sessions, transcripts
+from . import capabilities, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
 from .brain_output import (
     RECOVERED_ENVELOPE_ERROR,
     parse_brain_output,
@@ -83,6 +84,20 @@ def decode_meta(event: queue.Event) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _seconds_since(ts: str) -> float | None:
+    try:
+        received = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, datetime.now(timezone.utc).timestamp() - received.timestamp())
+
+
+def _elapsed_seconds(event: queue.Event, monotonic_start: float | None) -> float | None:
+    if monotonic_start is not None:
+        return max(0.0, time.monotonic() - monotonic_start)
+    return _seconds_since(event.received_at)
 
 
 class GatewayRuntime:
@@ -516,6 +531,7 @@ class GatewayRuntime:
             conn.close()
 
     def process_event(self, event: queue.Event) -> str:
+        monotonic_start = time.monotonic()
         meta = decode_meta(event)
         if meta.get("deliver_only"):
             response = event.content
@@ -611,6 +627,7 @@ class GatewayRuntime:
             )
 
         meta.setdefault("delivery_channel", channel)
+        response_text = parsed.message
         if parsed.push_message_sent or pushed_via_marker:
             reason = (
                 "canonical sender marker detected"
@@ -624,10 +641,19 @@ class GatewayRuntime:
             if parsed.message:
                 self._log_outbound_transcript(event, parsed.message, meta, channel)
         elif parsed.message:
+            footer = reply_footer.render_footer(
+                self.config.reply_footer,
+                brain=brain,
+                model=model,
+                session_id=result.session_id,
+                elapsed_seconds=_elapsed_seconds(event, monotonic_start),
+            )
+            message_out = parsed.message + ("\n\n" + footer if footer else "")
+            response_text = message_out
             if meta.get("was_voice"):
                 self._render_voice_reply(parsed.message, meta)
-            self._deliver_response(channel, parsed.message, meta)
-            self._log_outbound_transcript(event, parsed.message, meta, channel)
+            self._deliver_response(channel, message_out, meta)
+            self._log_outbound_transcript(event, message_out, meta, channel)
         else:
             self.log(
                 f"dispatch silent id={event.id} brain={brain} — "
@@ -639,7 +665,7 @@ class GatewayRuntime:
                 self._company_reporter.on_conversation(event, parsed.message, meta_with_brain)
             except Exception as exc:  # noqa: BLE001
                 self.log(f"company on_conversation error: {exc}", kind="company_error")
-        return parsed.message
+        return response_text
 
     def _deliver_response(
         self,

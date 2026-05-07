@@ -85,6 +85,17 @@ class TriageConfig:
 
 
 @dataclass(frozen=True)
+class ReplyFooterConfig:
+    enabled: bool = False
+    emoji: str = "⚙️"
+    show_model: bool = True
+    show_session: bool = True
+    show_elapsed: bool = True
+    session_chars: int = 8
+    separator: str = " · "
+
+
+@dataclass(frozen=True)
 class BrainOverrideConfig:
     bin: str | None = None
     sandbox: str | None = None
@@ -118,6 +129,7 @@ class GatewayConfig:
     adapter_timeout_seconds: int = 300
     channels: dict[str, ChannelConfig] = field(default_factory=dict)
     triage: TriageConfig = field(default_factory=TriageConfig)
+    reply_footer: ReplyFooterConfig = field(default_factory=ReplyFooterConfig)
     brains: dict[str, BrainOverrideConfig] = field(default_factory=dict)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     codex_auth: CodexAuthConfig = field(default_factory=CodexAuthConfig)
@@ -347,6 +359,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "default_fallback_brain",
         "sticky_brain_idle_timeout_seconds",
         "triage_routing",
+        "reply_footer",
         "channels",
         "brains",
         "reliability",
@@ -495,6 +508,45 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             errors.append("triage_max_tokens: must be a positive integer <= 4096")
         if protocol == "anthropic" and triage_max_tokens is None:
             errors.append("triage_max_tokens: required when triage_protocol is anthropic")
+
+    reply_footer = data.get("reply_footer")
+    if reply_footer is not None:
+        if not isinstance(reply_footer, dict):
+            errors.append("reply_footer: must be a mapping")
+        else:
+            allowed_reply_footer = {
+                "enabled",
+                "emoji",
+                "show_model",
+                "show_session",
+                "show_elapsed",
+                "session_chars",
+                "separator",
+            }
+            for key in reply_footer:
+                if key not in allowed_reply_footer:
+                    errors.append(f"reply_footer.{key}: unknown field")
+            for key in ("enabled", "show_model", "show_session", "show_elapsed"):
+                value = reply_footer.get(key)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"reply_footer.{key}: must be boolean")
+            emoji = reply_footer.get("emoji")
+            if emoji is not None and (
+                not isinstance(emoji, str) or not emoji or len(emoji) > 8
+            ):
+                errors.append("reply_footer.emoji: must be a non-empty string <= 8 chars")
+            separator = reply_footer.get("separator")
+            if separator is not None and (
+                not isinstance(separator, str) or not separator or len(separator) > 8
+            ):
+                errors.append("reply_footer.separator: must be a non-empty string <= 8 chars")
+            session_chars = reply_footer.get("session_chars")
+            if session_chars is not None and (
+                not _is_int_like(session_chars)
+                or int(session_chars) < 3
+                or int(session_chars) > 64
+            ):
+                errors.append("reply_footer.session_chars: must be an integer between 3 and 64")
     if data.get("triage_confidence_threshold") is not None:
         threshold = data["triage_confidence_threshold"]
         if not _is_number_like(threshold) or not 0 <= float(threshold) <= 1:
@@ -828,6 +880,19 @@ def _load_brains(data: dict[str, Any]) -> dict[str, BrainOverrideConfig]:
     return out
 
 
+def _load_reply_footer(data: dict[str, Any]) -> ReplyFooterConfig:
+    raw = data.get("reply_footer") if isinstance(data.get("reply_footer"), dict) else {}
+    return ReplyFooterConfig(
+        enabled=bool(raw.get("enabled", DEFAULT_CONFIG.reply_footer.enabled)),
+        emoji=str(raw.get("emoji", DEFAULT_CONFIG.reply_footer.emoji)),
+        show_model=bool(raw.get("show_model", DEFAULT_CONFIG.reply_footer.show_model)),
+        show_session=bool(raw.get("show_session", DEFAULT_CONFIG.reply_footer.show_session)),
+        show_elapsed=bool(raw.get("show_elapsed", DEFAULT_CONFIG.reply_footer.show_elapsed)),
+        session_chars=int(raw.get("session_chars", DEFAULT_CONFIG.reply_footer.session_chars)),
+        separator=str(raw.get("separator", DEFAULT_CONFIG.reply_footer.separator)),
+    )
+
+
 def _load_codex_auth(data: dict[str, Any]) -> CodexAuthConfig:
     raw = data.get("codex_auth") if isinstance(data.get("codex_auth"), dict) else {}
     return CodexAuthConfig(
@@ -943,6 +1008,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         ),
         channels=channels,
         triage=_load_triage(data),
+        reply_footer=_load_reply_footer(data),
         brains=_load_brains(data),
         reliability=_load_reliability(data),
         codex_auth=_load_codex_auth(data),
@@ -971,6 +1037,13 @@ triage: {triage_backend}
 triage_confidence_threshold: 0.7
 default_fallback_brain: claude:sonnet-4-6
 sticky_brain_idle_timeout_seconds: 0
+reply_footer:
+  enabled: false
+  emoji: "⚙️"
+  show_model: true
+  show_session: true
+  show_elapsed: true
+  session_chars: 8
 triage_routing:
   smalltalk: claude:haiku-4-5
   quick: claude:sonnet-4-6

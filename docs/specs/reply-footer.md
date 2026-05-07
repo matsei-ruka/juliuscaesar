@@ -1,9 +1,9 @@
 # Spec: Optional reply footer (model · session · elapsed)
 
-**Status:** Draft
+**Status:** Implemented
 **Date:** 2026-05-07
-**Branch base:** `main`
-**Owner:** tbd
+**Branch base:** `feat/triage-protocol-pluggable`
+**Owner:** Matsei Ruka
 
 ## Goal
 
@@ -262,11 +262,10 @@ Config validation:
 
 ## Rollout plan
 
-**Phase 1 — Land helper + runtime hook + tests.** Default off. No template
-change. No doctor change.
+**Phase 1 — Land helper + runtime hook + tests.** Default off.
 
 **Phase 2 — Doctor surface.** `jc doctor` reports whether `reply_footer` is
-enabled.
+enabled. Implemented in v1.
 
 **Phase 3 — Optional template knob.** `jc setup` could offer
 `reply_footer.enabled: true` for new instances during a debugging-friendly
@@ -293,22 +292,22 @@ onboarding flow. Off by default.
 
 ## Definition of done
 
-- [ ] `ReplyFooterConfig` added to `GatewayConfig`; default `enabled=false`.
-- [ ] `lib/gateway/reply_footer.py` ships with `render_footer()` and unit
+- [x] `ReplyFooterConfig` added to `GatewayConfig`; default `enabled=false`.
+- [x] `lib/gateway/reply_footer.py` ships with `render_footer()` and unit
       tests covering all branches above.
-- [ ] `runtime._dispatch_inbound()` captures `monotonic_start` and appends
+- [x] `runtime.process_event()` captures `monotonic_start` and appends
       the footer in the text-reply branch only; voice / push-marker /
       slash / inline-override paths are unchanged in observable behavior
       when footer is enabled and disabled.
-- [ ] Transcript log includes the footer.
-- [ ] Config validation rejects malformed `reply_footer` blocks.
-- [ ] `jc doctor` reports footer state (Phase 2; not blocking Phase 1).
-- [ ] Targeted tests green:
+- [x] Transcript log includes the footer.
+- [x] Config validation rejects malformed `reply_footer` blocks.
+- [x] `jc doctor` reports footer state.
+- [x] Targeted tests green:
 
 ```bash
-pytest \
+.venv/bin/python -m pytest \
   tests/gateway/test_reply_footer.py \
-  tests/gateway/test_runtime.py
+  tests/gateway/test_reply_footer_runtime.py
 ```
 
 ## Discrepancies with prompt

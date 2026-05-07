@@ -42,6 +42,8 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
   through `triage_routing` plus `default_fallback_brain`.
 - `lib/gateway/recovery/`: failure classifier + per-handler recovery (e.g. session-drop on `--resume <expired-uuid>`).
 - `lib/gateway/sessions.py` + `lib/gateway/process_sessions.py`: per-`(channel, conversation_id, brain)` session map and live-process tracking.
+- `lib/gateway/reply_footer.py`: optional operator footer for normal text
+  replies when `reply_footer.enabled=true`.
 - `lib/gateway/transcripts.py`: per-conversation chat transcripts (read by `bin/jc-transcripts`).
 - `lib/gateway/chats.py`: Telegram chat directory + auth status (read by `bin/jc-chats`).
 - `lib/gateway/format/escaper.py`: Telegram MarkdownV2 rewriter.
@@ -109,6 +111,9 @@ ages, lifecycle event counts, and the last email event.
 - Triage classifiers do not own brain choice. The gateway maps classifier
   classes to configured brain specs before passing a `TriageHint` to the
   router.
+- Reply footers are opt-in and attach only to normal gateway text delivery.
+  They do not alter voice TTS, slash/inline responses, or push-marker
+  deliveries where the brain already sent its own message.
 - `state/` is ignored by newly initialized instances.
 - Slack Socket Mode requires the optional `websocket-client` Python package.
 

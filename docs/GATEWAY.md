@@ -36,6 +36,7 @@ OUTBOUND CHANNELS  ◄───────────────────�
 | Channels  | `lib/gateway/channels/`               | Per-channel modules                      |
 | Brains    | `lib/gateway/brains/`                 | Per-brain Python wrappers                |
 | Triage    | `lib/gateway/triage/`                 | api_classifier / openrouter / ollama / claude-channel / codex_api |
+| Reply footer | `lib/gateway/reply_footer.py`       | Opt-in operator context line on replies  |
 | Context   | `lib/gateway/context.py`              | L1 memory preamble loader                |
 | Logging   | `lib/gateway/logging_setup.py`        | Rotating JSON logs                       |
 | Metrics   | `state/gateway/triage-metrics.db`     | Class counts, confidence, fallback rate  |
@@ -71,6 +72,9 @@ jc gateway metrics --hours 24
 7. `GatewayRuntime` delivers through a live channel instance when one is
    available. Discord requires the live `discord.py` client; stateless
    `registry.deliver()` remains a fallback for transports such as Telegram.
+8. If `reply_footer.enabled=true`, normal text replies get one extra
+   operator line with brain/model, session id, and elapsed time. Voice TTS
+   stays bare, and push-marker deliveries are not modified.
 
 ## Reliability
 
