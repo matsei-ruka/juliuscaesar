@@ -11,8 +11,8 @@ code_anchors:
     symbol: "exec claude"
   - path: lib/heartbeat/adapters/aider.sh
     symbol: "exec aider"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-07
+verified_by: Matsei Ruka
 related:
   - contract/adapter-and-delivery-contracts.md
   - subsystem/gateway-queue.md
@@ -20,7 +20,7 @@ related:
 
 ## Summary
 
-The gateway supports six brains. Five shell out via `lib/heartbeat/adapters/<name>.sh`; one (`codex_api`) calls the OpenAI Responses API directly via the local Codex CLI's OAuth token. Each brain has a Python wrapper under `lib/gateway/brains/<name>.py` that the dispatcher (`dispatch.py:_BRAIN_REGISTRY`) routes to. The triage layer consults this matrix when picking a brain — a vision-bearing image event must not be routed to a brain without vision support.
+The gateway supports six brains. Five shell out via `lib/heartbeat/adapters/<name>.sh`; one (`codex_api`) calls the OpenAI Responses API directly via the local Codex CLI's OAuth token. Each brain has a Python wrapper under `lib/gateway/brains/<name>.py` that the dispatcher (`dispatch.py:_BRAIN_REGISTRY`) routes to. Triage classifiers no longer name brains directly; the gateway maps triage classes to supported brain specs from config, then still enforces capability constraints such as image events requiring a vision-capable brain.
 
 ## Matrix
 

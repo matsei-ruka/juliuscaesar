@@ -9,8 +9,8 @@ code_anchors:
     symbol: "def claim_next("
   - path: lib/gateway/runtime.py
     symbol: "class GatewayRuntime:"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-07
+verified_by: Matsei Ruka
 related:
   - subsystem/installation-and-cli-routing.md
   - contract/instance-layout-and-resolution.md
@@ -34,7 +34,7 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
   and writer for `channels.email.senders`.
 - `lib/gateway/brain.py` + `lib/gateway/brains/<name>.py`: per-brain Python wrappers; legacy `brain.py` is the fallback path for brains without a wrapper.
 - `lib/gateway/router.py`: per-event brain selection (default → cron-pinned → triage → sticky → override).
-- `lib/gateway/triage/`: pluggable triage backends — `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and `metrics`.
+- `lib/gateway/triage/`: pluggable triage backends — `claude_channel`, `codex_api`, `ollama`, `openrouter`, plus `cache` and `metrics`. Classifiers return only class and confidence; `GatewayRuntime` maps classes to brains through `triage_routing` plus `default_fallback_brain`.
 - `lib/gateway/recovery/`: failure classifier + per-handler recovery (e.g. session-drop on `--resume <expired-uuid>`).
 - `lib/gateway/sessions.py` + `lib/gateway/process_sessions.py`: per-`(channel, conversation_id, brain)` session map and live-process tracking.
 - `lib/gateway/transcripts.py`: per-conversation chat transcripts (read by `bin/jc-transcripts`).
@@ -101,6 +101,9 @@ ages, lifecycle event counts, and the last email event.
 - No brain invocation or network channel I/O happens inside a SQLite transaction.
 - The queue database is runtime state and belongs under `<instance>/state/`.
 - The daemon performs queue maintenance, channel polling, dispatch, and delivery.
+- Triage classifiers do not own brain choice. The gateway maps classifier
+  classes to configured brain specs before passing a `TriageHint` to the
+  router.
 - `state/` is ignored by newly initialized instances.
 - Slack Socket Mode requires the optional `websocket-client` Python package.
 

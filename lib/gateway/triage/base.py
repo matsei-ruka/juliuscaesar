@@ -28,9 +28,7 @@ PROMPT_PATH = PromptDir / "prompt.md"
 @dataclass(frozen=True)
 class TriageResult:
     class_: str
-    brain: str
     confidence: float
-    reasoning: str | None = None
     raw: str | None = None
 
     def is_unsafe(self) -> bool:
@@ -66,20 +64,24 @@ def parse_triage_json(raw: str) -> TriageResult | None:
     if not isinstance(data, dict):
         return None
     cls = str(data.get("class") or "").strip()
-    brain = str(data.get("brain") or "").strip()
+    if "confidence" not in data:
+        return None
     try:
-        confidence = float(data.get("confidence", 0.0))
+        confidence = float(data["confidence"])
     except (TypeError, ValueError):
-        confidence = 0.0
-    if not cls or not brain:
+        return None
+    if not cls:
         return None
     return TriageResult(
         class_=cls if cls in CLASSES else "quick",
-        brain=brain,
         confidence=max(0.0, min(1.0, confidence)),
-        reasoning=str(data.get("reasoning") or "") or None,
         raw=blob,
     )
+
+
+def failure_result(reason: str, *, raw: str | None = None) -> TriageResult:
+    preview = f"{reason}: {raw[:400]}" if raw else reason
+    return TriageResult(class_="quick", confidence=0.0, raw=preview[:400])
 
 
 class TriageBackend:
@@ -89,10 +91,9 @@ class TriageBackend:
         raise NotImplementedError
 
 
-_DEFAULT_PROMPT = """You are a triage classifier. You output exactly one JSON
-object on a single line.
+_DEFAULT_PROMPT = """You are a triage classifier. You output exactly one JSON object on a single line.
 
-Schema: {"class":"<class>","brain":"<brain>","confidence":<0..1>}
+Schema: {"class":"<class>","confidence":<0..1>}
 
 Classify this message:
 {message}

@@ -388,26 +388,28 @@ class GatewayRuntime:
         self,
         event: queue.Event,
         sticky: router.StickyHint | None,
-    ) -> router.TriageHint | None:
+    ) -> tuple[router.TriageHint | None, bool]:
         if sticky is not None:
-            return None
+            return None, False
         meta = decode_meta(event)
         if meta.get("brain_override"):
-            return None
+            return None, False
         if event.source == "cron" and meta.get("brain"):
-            return None
+            return None, False
         backend = self._get_triage_backend()
         if backend is None:
-            return None
+            return None, False
         cached = self.triage_cache.get(event.content)
         if cached is not None:
+            hint = None if cached.is_unsafe() else self._triage_to_hint(cached)
             self.log(
                 f"triage cache hit id={event.id} class={cached.class_} "
-                f"brain={cached.brain} conf={cached.confidence:.2f}",
+                f"routed={hint.full_spec() if hint else '-'} "
+                f"conf={cached.confidence:.2f}",
                 event_id=event.id,
                 kind="triage",
             )
-            return self._triage_to_hint(cached)
+            return hint, cached.is_unsafe()
         try:
             result = backend.classify(event.content)
         except Exception as exc:  # noqa: BLE001
@@ -416,22 +418,30 @@ class GatewayRuntime:
                 event_id=event.id,
                 kind="triage_error",
             )
-            return None
+            return None, False
         self.triage_cache.put(event.content, result)
         threshold = self.config.triage.confidence_threshold
         below = result.confidence < threshold
         raw_preview = (result.raw or "")[:120].replace("\n", " ")
-        reasoning = (result.reasoning or "")[:120]
+        hint = None if result.is_unsafe() else self._triage_to_hint(result)
+        if result.is_unsafe():
+            metric_brain = ""
+        elif below and self.config.triage.fallback_brain:
+            metric_brain = self.config.triage.fallback_brain
+        elif hint is not None:
+            metric_brain = hint.full_spec()
+        else:
+            metric_brain = ""
         self.log(
             f"triage id={event.id} backend={backend.name} class={result.class_} "
-            f"brain={result.brain} conf={result.confidence:.2f} "
+            f"routed={hint.full_spec() if hint else '-'} conf={result.confidence:.2f} "
             f"threshold={threshold} below={below} "
-            f"reason={reasoning!r} raw={raw_preview!r}",
+            f"raw={raw_preview!r}",
             event_id=event.id,
             kind="triage",
         )
         try:
-            self.metrics.record(result, fallback=below)
+            self.metrics.record(result, brain=metric_brain, fallback=below)
         except Exception:  # noqa: BLE001
             pass
         if result.is_unsafe():
@@ -440,15 +450,17 @@ class GatewayRuntime:
                 event_id=event.id,
                 kind="triage_unsafe",
             )
-            return None
-        return self._triage_to_hint(result)
+            return None, True
+        return hint, False
 
-    def _triage_to_hint(self, result: TriageResult) -> router.TriageHint:
-        # Honor per-class override map: triage may name claude:opus-4-7-1m but
-        # the user might pin claude:sonnet-4-6 for "code" via triage_routing.
-        spec = self.config.triage.routing.get(result.class_, result.brain)
+    def _triage_to_hint(self, result: TriageResult) -> router.TriageHint | None:
+        spec = self.config.triage.routing.get(result.class_) or self.config.triage.fallback_brain
+        if not spec:
+            return None
         brain, _, model = spec.partition(":")
-        return router.TriageHint(brain=brain or result.brain, model=model or None, confidence=result.confidence)
+        if not brain:
+            return None
+        return router.TriageHint(brain=brain, model=model or None, confidence=result.confidence)
 
     def _resolve_sticky(self, event: queue.Event, channel: str) -> router.StickyHint | None:
         if not event.conversation_id:
@@ -518,7 +530,9 @@ class GatewayRuntime:
             return self._handle_slash(slash, event, meta, channel)
 
         sticky = self._resolve_sticky(event, channel)
-        triage = self._maybe_triage(event, sticky)
+        triage, triage_rejected = self._maybe_triage(event, sticky)
+        if triage_rejected:
+            return "(triage rejected unsafe)"
         selection = router.route(
             event,
             cfg=self.config,

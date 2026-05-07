@@ -34,7 +34,14 @@ class MetricsRecorder:
         )
         return conn
 
-    def record(self, result: TriageResult, *, fallback: bool = False, override: bool = False) -> None:
+    def record(
+        self,
+        result: TriageResult,
+        *,
+        brain: str = "",
+        fallback: bool = False,
+        override: bool = False,
+    ) -> None:
         conn = self._connect()
         try:
             conn.execute(
@@ -43,7 +50,7 @@ class MetricsRecorder:
                 (
                     datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
                     result.class_,
-                    result.brain,
+                    brain,
                     float(result.confidence),
                     "fallback" if fallback else "override" if override else "kept",
                     1 if fallback else 0,

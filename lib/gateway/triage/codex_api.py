@@ -14,7 +14,7 @@ from codex_auth import CodexAuthClient, ResponsesClient, ResponsesError
 from codex_auth.errors import CodexAuthError
 
 from ..config import CodexAuthConfig, TriageConfig
-from .base import TriageBackend, TriageResult, parse_triage_json, render_prompt
+from .base import TriageBackend, TriageResult, failure_result, parse_triage_json, render_prompt
 
 
 # ChatGPT-subscription Responses uses the Codex model catalog; the spec's
@@ -82,10 +82,4 @@ def _model_from_cfg(cfg: TriageConfig) -> str:
 
 
 def _failure(reason: str, *, raw: str | None = None) -> TriageResult:
-    return TriageResult(
-        class_="quick",
-        brain="claude:sonnet-4-6",
-        confidence=0.0,
-        reasoning=reason,
-        raw=(raw or "")[:400] if raw else None,
-    )
+    return failure_result(reason, raw=raw)

@@ -9,8 +9,8 @@ code_anchors:
     symbol: "def route("
   - path: docs/specs/unified-gateway-0.3.0-remaining.md
     symbol: "# Spec: Unified Gateway"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-07
+verified_by: Matsei Ruka
 related:
   - subsystem/gateway-queue.md
   - decision/native-cli-over-api-simulation.md
@@ -50,8 +50,9 @@ Positive:
   simultaneously today. Webhook channels are straightforward to add.
 - Brains are pluggable. Default brain per channel, per-message override
   (`[opus] ...`), sticky-brain per conversation, slash command (`/brain X`).
-- Triage trims cost: smalltalk routes to Haiku, analysis to Opus, with a
-  confidence threshold and graceful fallback.
+- Triage trims cost: classifiers emit class plus confidence, and the gateway
+  maps classes to configured brains such as Haiku or Opus with a confidence
+  threshold and graceful fallback.
 - Worker completions auto-synthesize via `jc-events` — single message UX.
 
 Tradeoffs:

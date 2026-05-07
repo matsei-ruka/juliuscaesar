@@ -23,13 +23,19 @@ from gateway.triage.factory import build_backend  # noqa: E402
 
 class ParseTests(unittest.TestCase):
     def test_parse_clean_json(self):
-        result = parse_triage_json('{"class":"analysis","brain":"claude:opus-4-7-1m","confidence":0.91}')
+        result = parse_triage_json('{"class":"analysis","confidence":0.91}')
         self.assertEqual(result.class_, "analysis")
-        self.assertEqual(result.brain, "claude:opus-4-7-1m")
         self.assertAlmostEqual(result.confidence, 0.91)
 
+    def test_parse_accepts_legacy_brain_but_discards_it(self):
+        result = parse_triage_json(
+            '{"class":"analysis","brain":"claude:opus-4-7-1m","confidence":0.91}'
+        )
+        self.assertEqual(result.class_, "analysis")
+        self.assertFalse(hasattr(result, "brain"))
+
     def test_parse_with_chatter(self):
-        text = "Sure thing!\n  {\"class\":\"smalltalk\",\"brain\":\"claude:haiku-4-5\",\"confidence\":0.95}\n"
+        text = "Sure thing!\n  {\"class\":\"smalltalk\",\"confidence\":0.95}\n"
         result = parse_triage_json(text)
         self.assertIsNotNone(result)
         self.assertEqual(result.class_, "smalltalk")
@@ -39,11 +45,11 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(parse_triage_json('{"class":"smalltalk"}'))
 
     def test_unknown_class_falls_back_to_quick(self):
-        result = parse_triage_json('{"class":"weird","brain":"claude:sonnet-4-6","confidence":0.8}')
+        result = parse_triage_json('{"class":"weird","confidence":0.8}')
         self.assertEqual(result.class_, "quick")
 
     def test_clamps_confidence(self):
-        result = parse_triage_json('{"class":"code","brain":"claude:sonnet-4-6","confidence":2.0}')
+        result = parse_triage_json('{"class":"code","confidence":2.0}')
         self.assertEqual(result.confidence, 1.0)
 
 
@@ -57,20 +63,20 @@ class PromptTests(unittest.TestCase):
 class CacheTests(unittest.TestCase):
     def test_hit_within_ttl(self):
         cache = TriageCache(ttl_seconds=5)
-        result = TriageResult(class_="quick", brain="claude:sonnet-4-6", confidence=0.9)
+        result = TriageResult(class_="quick", confidence=0.9)
         cache.put("hi", result)
         self.assertEqual(cache.get("hi"), result)
 
     def test_miss_after_ttl(self):
         cache = TriageCache(ttl_seconds=0)
-        cache.put("hi", TriageResult("quick", "claude", 0.9))
+        cache.put("hi", TriageResult("quick", 0.9))
         self.assertIsNone(cache.get("hi"))
 
     def test_eviction_on_overflow(self):
         cache = TriageCache(ttl_seconds=60, max_entries=2)
-        cache.put("a", TriageResult("quick", "claude", 0.9))
-        cache.put("b", TriageResult("quick", "claude", 0.9))
-        cache.put("c", TriageResult("quick", "claude", 0.9))
+        cache.put("a", TriageResult("quick", 0.9))
+        cache.put("b", TriageResult("quick", 0.9))
+        cache.put("c", TriageResult("quick", 0.9))
         self.assertIsNone(cache.get("a"))
         self.assertIsNotNone(cache.get("b"))
         self.assertIsNotNone(cache.get("c"))
@@ -92,9 +98,9 @@ class MetricsTests(unittest.TestCase):
     def test_record_and_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             recorder = MetricsRecorder(Path(tmp))
-            recorder.record(TriageResult("smalltalk", "claude:haiku-4-5", 0.95))
-            recorder.record(TriageResult("smalltalk", "claude:haiku-4-5", 0.85))
-            recorder.record(TriageResult("analysis", "claude:opus-4-7-1m", 0.4), fallback=True)
+            recorder.record(TriageResult("smalltalk", 0.95), brain="claude:haiku-4-5")
+            recorder.record(TriageResult("smalltalk", 0.85), brain="claude:haiku-4-5")
+            recorder.record(TriageResult("analysis", 0.4), brain="claude:sonnet-4-6", fallback=True)
             summary = recorder.summary(hours=1)
             classes = {row["class"]: row for row in summary["by_class"]}
             self.assertEqual(classes["smalltalk"]["count"], 2)

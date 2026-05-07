@@ -16,9 +16,9 @@ class _NoneBackend(TriageBackend):
     name = "none"
 
     def classify(self, message: str):  # pragma: no cover - trivial
-        from .base import TriageResult
+        from .base import failure_result
 
-        return TriageResult(class_="quick", brain="", confidence=0.0, reasoning="triage disabled")
+        return failure_result("triage disabled")
 
 
 def build_backend(

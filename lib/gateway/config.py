@@ -25,6 +25,15 @@ SUPPORTED_TRIAGE_BACKENDS = (
 REJECTED_CHANNELS = {"web": "web channel removed in 0.3.0; use `jc gateway enqueue` for local testing"}
 CODEX_SANDBOX_VALUES = {"read-only", "workspace-write", "yolo", "danger", "danger-full-access"}
 CODEX_YOLO_SANDBOX_VALUES = {"yolo", "danger", "danger-full-access"}
+DEFAULT_TRIAGE_ROUTING = {
+    "smalltalk": "claude:haiku-4-5",
+    "quick": "claude:sonnet-4-6",
+    "analysis": "claude:opus-4-7-1m",
+    "code": "claude:sonnet-4-6",
+    "image": "claude:sonnet-4-6",
+    "voice": "claude:sonnet-4-6",
+    "system": "claude:haiku-4-5",
+}
 
 
 @dataclass(frozen=True)
@@ -55,7 +64,7 @@ class TriageConfig:
     fallback_brain: str = "claude:sonnet-4-6"
     cache_ttl_seconds: int = 30
     sticky_idle_seconds: int = 0
-    routing: dict[str, str] = field(default_factory=dict)
+    routing: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TRIAGE_ROUTING))
     ollama_model: str = "phi3:mini"
     ollama_host: str = "http://localhost:11434"
     ollama_timeout_seconds: int = 5
@@ -427,6 +436,9 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
     if isinstance(data.get("triage_routing"), dict):
         for key, value in data["triage_routing"].items():
             _validate_brain_spec(errors, f"triage_routing.{key}", value)
+    if isinstance(triage_raw, dict) and isinstance(triage_raw.get("routing"), dict):
+        for key, value in triage_raw["routing"].items():
+            _validate_brain_spec(errors, f"triage.routing.{key}", value)
 
     channels_raw = data.get("channels")
     if channels_raw is not None:
@@ -685,7 +697,7 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
         raw = {}
 
     routing_raw = data.get("triage_routing") or raw.get("routing") or {}
-    routing: dict[str, str] = {}
+    routing: dict[str, str] = dict(DEFAULT_TRIAGE_ROUTING)
     if isinstance(routing_raw, dict):
         for key, value in routing_raw.items():
             if isinstance(value, str):

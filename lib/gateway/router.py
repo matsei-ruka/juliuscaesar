@@ -44,6 +44,9 @@ class TriageHint:
     model: str | None
     confidence: float
 
+    def full_spec(self) -> str:
+        return f"{self.brain}:{self.model}" if self.model else self.brain
+
 
 def _decode_meta(event: Event) -> dict:
     if not event.meta:

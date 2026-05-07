@@ -1,6 +1,6 @@
 # Spec: Slim triage output — class is enough
 
-**Status:** Draft
+**Status:** Implemented
 **Date:** 2026-05-07
 **Branch base:** `main`
 **Owner:** tbd
@@ -198,9 +198,9 @@ DEFAULT_TRIAGE_ROUTING = {
 }
 ```
 
-Loaded as the default in `_load_triage()`. Operators can override per-class
-by setting `triage_routing.<class>: <spec>` in yaml. Operators can fully
-replace the map by setting `triage_routing: { … }`.
+Loaded as the default in `_load_triage()`. Operator-provided
+`triage_routing.<class>: <spec>` values overlay this map per class, so a
+single override does not erase the rest of the historical defaults.
 
 ### `_failure()` returns
 
@@ -212,8 +212,8 @@ fields are gone. The fallback semantics move:
 
 - Confidence stays `0.0` so the router triggers the existing
   `triage_fallback` branch and uses `default_fallback_brain` from config.
-- `reasoning` text moves into the gateway log line (it was effectively
-  log-only anyway — `runtime.py:424` truncates and prints it).
+- Failure reason text is preserved in `raw`, which the gateway log already
+  previews. It was effectively log-only anyway.
 
 Net behavior: fallback path is unchanged; the operator's
 `default_fallback_brain` is honored consistently instead of each backend
@@ -231,7 +231,7 @@ Call site in `runtime.py:434`:
 
 ```python
 hint = self._triage_to_hint(result)
-self.metrics.record(result, brain=(hint.full_spec() if hint else ""), fallback=below)
+self.metrics.record(result, brain=routed_or_fallback_brain, fallback=below)
 ```
 
 ## Code plan
@@ -275,15 +275,15 @@ Files to add:
 
 - Classifiers that still emit the v1 schema (with `brain`) keep working —
   the parser reads `class` and `confidence`, ignores everything else.
-- Existing instances that **set** `triage_routing` see no behavior change.
+- Existing instances that **set** `triage_routing` keep those class-specific
+  mappings; omitted classes now receive the historical default mapping.
 - Existing instances that **did not set** `triage_routing` and relied on
   the classifier's `brain` get the new `DEFAULT_TRIAGE_ROUTING` as a
   default, which mirrors the historical `prompt.md` defaults. Net behavior
   for normal traffic: identical.
-- Edge case: an operator who customized `prompt.md` so the classifier
-  picked unusual brains will lose that override. The spec ships a one-line
-  `jc doctor` note when `triage_routing` is empty and points operators at
-  yaml.
+- Edge case: an operator who customized `prompt.md` so the classifier picked
+  unusual brains will lose that override. A doctor warning for that rare case
+  remains phase 2.
 
 ## Test plan
 
@@ -340,16 +340,16 @@ back-compat is essentially free.
 
 ## Definition of done
 
-- [ ] `TriageResult` carries only `class_`, `confidence`, `raw`.
-- [ ] `prompt.md` rewritten to v2 schema (no brain catalog).
-- [ ] `parse_triage_json()` accepts v1 and v2 input identically (ignoring
+- [x] `TriageResult` carries only `class_`, `confidence`, `raw`.
+- [x] `prompt.md` rewritten to v2 schema (no brain catalog).
+- [x] `parse_triage_json()` accepts v1 and v2 input identically (ignoring
       v1 extras).
-- [ ] `_triage_to_hint()` sources brain/model exclusively from
+- [x] `_triage_to_hint()` sources brain/model exclusively from
       `triage_routing` + `default_fallback_brain`.
-- [ ] `DEFAULT_TRIAGE_ROUTING` ships as the loader default.
-- [ ] All four real backends + `_NoneBackend` return v2 shape.
-- [ ] `metrics.record()` records the routed brain, not classifier's.
-- [ ] Targeted tests green:
+- [x] `DEFAULT_TRIAGE_ROUTING` ships as the loader default.
+- [x] All four real backends + `_NoneBackend` return v2 shape.
+- [x] `metrics.record()` records the routed/fallback brain, not classifier's.
+- [x] Targeted tests green:
 
 ```bash
 pytest \
@@ -358,7 +358,7 @@ pytest \
   tests/gateway/test_router.py
 ```
 
-- [ ] No behavior change for instances with `triage_routing` set (verified
+- [x] No behavior change for instances with `triage_routing` set (verified
       by snapshot test on `_triage_to_hint`).
 
 ## Discrepancies with prompt

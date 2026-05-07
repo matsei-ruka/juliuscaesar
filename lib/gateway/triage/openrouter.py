@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.error import URLError
 
 from ..config import TriageConfig, env_value
-from .base import TriageBackend, TriageResult, parse_triage_json, render_prompt
+from .base import TriageBackend, TriageResult, failure_result, parse_triage_json, render_prompt
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -73,10 +73,4 @@ class OpenRouterTriage(TriageBackend):
 
 
 def _failure(reason: str, *, raw: str | None = None) -> TriageResult:
-    return TriageResult(
-        class_="quick",
-        brain="claude:sonnet-4-6",
-        confidence=0.0,
-        reasoning=reason,
-        raw=(raw or "")[:400] if raw else None,
-    )
+    return failure_result(reason, raw=raw)
