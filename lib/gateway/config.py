@@ -191,6 +191,41 @@ class ConfigError(ValueError):
 
 
 _ENV_CACHE: dict[Path, tuple[float | None, dict[str, str]]] = {}
+_RESERVED_INSTANCE_ENV_KEYS = {
+    "BASH_ENV",
+    "CLAUDE_ARGS_EXTRA",
+    "CONF_FILE",
+    "ENV",
+    "ENV_FILE",
+    "HOME",
+    "IFS",
+    "INSTANCE_DIR",
+    "LOG_FILE",
+    "LOGNAME",
+    "OLDPWD",
+    "PATH",
+    "PWD",
+    "PYTHONEXECUTABLE",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "RUNTIME_MODE",
+    "SCREEN_NAME",
+    "SESSION_ID",
+    "SHELL",
+    "STATE_FILE",
+    "TMPDIR",
+    "USER",
+    "VIRTUAL_ENV",
+}
+_RESERVED_INSTANCE_ENV_PREFIXES = (
+    "BASH_FUNC_",
+    "CODEX_",
+    "DYLD_",
+    "GATEWAY_",
+    "JC_",
+    "LD_",
+    "WORKER_",
+)
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -231,11 +266,43 @@ def env_values(instance_dir: Path) -> dict[str, str]:
     return dict(values)
 
 
+def is_instance_env_key_allowed(name: str) -> bool:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+        return False
+    marker = name.upper()
+    if marker in _RESERVED_INSTANCE_ENV_KEYS:
+        return False
+    return not any(marker.startswith(prefix) for prefix in _RESERVED_INSTANCE_ENV_PREFIXES)
+
+
+def safe_instance_env_values(instance_dir: Path) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in env_values(instance_dir).items()
+        if is_instance_env_key_allowed(key)
+    }
+
+
 def env_value(instance_dir: Path, name: str) -> str:
     values = env_values(instance_dir)
-    if name in values:
+    if name in values and is_instance_env_key_allowed(name):
         return values[name]
     return os.environ.get(name, "")
+
+
+def merge_instance_env(
+    instance_dir: Path,
+    base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(os.environ if base is None else base)
+    env.update(safe_instance_env_values(instance_dir))
+    return env
+
+
+def apply_instance_env(instance_dir: Path) -> dict[str, str]:
+    applied = safe_instance_env_values(instance_dir)
+    os.environ.update(applied)
+    return applied
 
 
 def redact_value(name: str, value: str) -> str:

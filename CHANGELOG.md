@@ -17,6 +17,8 @@ Hotfix for instance-owned voice credentials and Telegram voice replies.
   misclassified as `smalltalk` and sent to a lightweight model.
 - Brain prompts for transcribed voice events now require same-language,
   spoken-natural replies before the gateway renders optional TTS output.
+- Instance env helpers ignore reserved runtime-control names such as `PATH`,
+  `RUNTIME_MODE`, `JC_*`, and `WORKER_*` when reading or merging `.env` values.
 
 ## 2026.05.06.01
 

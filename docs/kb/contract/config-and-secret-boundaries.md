@@ -86,6 +86,10 @@ Common keys:
   loader (`env_value(instance_dir, KEY)`) so `<instance>/.env` wins over a
   process-level export. This keeps multiple instances under the same Unix user
   isolated while still allowing explicit environment fallback.
+- Instance `.env` values for runtime-control names such as `PATH`,
+  `RUNTIME_MODE`, `JC_*`, `CODEX_*`, and `WORKER_*` are ignored by the
+  instance-aware loader/merge helpers; those values remain under the launcher's
+  control.
 - Pre-shipped web/data skills read their credentials from `.env`; skill files
   must never contain API keys.
 - `jc skills test` may call provider account/search endpoints and records only
