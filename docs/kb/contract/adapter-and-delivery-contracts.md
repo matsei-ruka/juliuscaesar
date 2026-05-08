@@ -68,7 +68,11 @@ The parser is defensive: if a brain emits prose plus a valid envelope, it
 consumes the envelope and never relays the surrounding prose or the JSON itself.
 Legacy plain text is still relayed. Exact silent sentinels (`SILENT`, `SILENCE`,
 `[no-reply]`, etc.) suppress delivery, and cron / jc-events also suppress when
-the last non-empty line is one of those sentinels.
+the last non-empty line is one of those sentinels. The same sentinels are
+suppressed when they appear as the envelope `message` field with
+`push_message_sent: false` — so a brain that wraps `SILENT` in the canonical
+JSON contract still produces a no-op delivery. Audit `message` content on
+envelopes with `push_message_sent: true` is preserved verbatim.
 
 When an adapter subprocess uses the canonical `send_telegram` helper directly,
 the helper writes `JC_PUSH_MARKER_PATH`; gateway, heartbeat, and worker runners
