@@ -8,6 +8,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import brain_spec as _brain_spec
 
@@ -127,6 +128,7 @@ class GatewayConfig:
     lease_seconds: int = 300
     max_retries: int = 3
     adapter_timeout_seconds: int = 300
+    timezone: str = "UTC"
     channels: dict[str, ChannelConfig] = field(default_factory=dict)
     triage: TriageConfig = field(default_factory=TriageConfig)
     reply_footer: ReplyFooterConfig = field(default_factory=ReplyFooterConfig)
@@ -424,6 +426,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "default_brain",
         "default_model",
         "gateway",
+        "timezone",
         "triage",
         "triage_confidence_threshold",
         "default_fallback_brain",
@@ -471,6 +474,18 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             )
     if data.get("default_fallback_brain") is not None:
         _validate_brain_spec(errors, "default_fallback_brain", data["default_fallback_brain"])
+
+    timezone_raw = data.get("timezone")
+    if timezone_raw is not None:
+        if not isinstance(timezone_raw, str) or not timezone_raw.strip():
+            errors.append("timezone: must be a non-empty IANA name string")
+        else:
+            try:
+                ZoneInfo(timezone_raw.strip())
+            except ZoneInfoNotFoundError:
+                errors.append(f"timezone: unknown IANA zone {timezone_raw!r}")
+            except Exception as exc:  # noqa: BLE001 — surface zoneinfo errors verbatim
+                errors.append(f"timezone: invalid {timezone_raw!r} ({exc})")
 
     gateway = data.get("gateway")
     if gateway is not None:
@@ -1067,6 +1082,12 @@ def load_config(instance_dir: Path) -> GatewayConfig:
             raw = {}
         channels[name] = _load_channel(name, raw, defaults)
 
+    timezone_value = data.get("timezone")
+    if isinstance(timezone_value, str) and timezone_value.strip():
+        timezone_str = timezone_value.strip()
+    else:
+        timezone_str = DEFAULT_CONFIG.timezone
+
     return GatewayConfig(
         default_brain=default_brain,
         default_model=default_model,
@@ -1076,6 +1097,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         adapter_timeout_seconds=int(
             gateway.get("adapter_timeout_seconds") or DEFAULT_CONFIG.adapter_timeout_seconds
         ),
+        timezone=timezone_str,
         channels=channels,
         triage=_load_triage(data),
         reply_footer=_load_reply_footer(data),
@@ -1093,11 +1115,14 @@ def render_default_config(
     slack_enabled: bool = False,
     discord_enabled: bool = False,
     triage_backend: str = "none",
+    timezone: str = "UTC",
 ) -> str:
     telegram_chats = f"[{telegram_chat_id}]" if telegram_chat_id else "[]"
     return f"""# JuliusCaesar gateway runtime config. Secrets live in .env.
 default_brain: {default_brain}
 default_model: null
+# IANA name (e.g. Asia/Dubai). Used for time injection into brain prompts and heartbeat templates.
+timezone: {timezone}
 gateway:
   poll_interval_seconds: 1
   lease_seconds: 300

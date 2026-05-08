@@ -296,6 +296,31 @@ echo "── Gateway brain"
 existing_default_brain="$(yaml_value default_brain)"
 default_brain="$(prompt "Default brain (claude|codex|gemini|opencode|aider)" "${existing_default_brain:-claude}")"
 
+# --- timezone -------------------------------------------------------------
+
+echo
+echo "── Operating timezone"
+existing_tz="$(yaml_value timezone)"
+detected_tz="UTC"
+if [[ -f /etc/timezone ]]; then
+    detected_tz="$(tr -d '[:space:]' < /etc/timezone || echo UTC)"
+    [[ -z "$detected_tz" ]] && detected_tz="UTC"
+fi
+tz_default="${existing_tz:-$detected_tz}"
+while :; do
+    operating_tz="$(prompt "Operating timezone (IANA name, e.g. Asia/Dubai)" "$tz_default")"
+    if python3 -c "from zoneinfo import ZoneInfo, ZoneInfoNotFoundError; import sys
+try:
+    ZoneInfo('$operating_tz')
+except ZoneInfoNotFoundError:
+    sys.exit(2)
+" 2>/dev/null; then
+        break
+    fi
+    echo "  unknown IANA zone: $operating_tz" >&2
+    (( USE_DEFAULTS )) && operating_tz="UTC" && break
+done
+
 # --- triage ---------------------------------------------------------------
 
 echo
@@ -377,6 +402,8 @@ cat > "$GATEWAY_YAML" <<YAML
 # JuliusCaesar gateway runtime config. Secrets live in .env.
 default_brain: $default_brain
 default_model: null
+# IANA name (e.g. Asia/Dubai). Used for time injection into brain prompts and heartbeat templates.
+timezone: $operating_tz
 gateway:
   poll_interval_seconds: 1
   lease_seconds: 300

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -239,16 +240,65 @@ def choose_brain(candidates: list[BrainCandidate], *, defaults: bool) -> str:
         print("Choose one of: " + ", ".join(c.name for c in ready), file=sys.stderr)
 
 
-def write_gateway_config(target: Path, brain: str, telegram_token: str, chat_id: str) -> None:
+def write_gateway_config(
+    target: Path,
+    brain: str,
+    telegram_token: str,
+    chat_id: str,
+    tz: str = "UTC",
+) -> None:
     text = render_default_config(
         default_brain=brain,
         telegram_enabled=bool(telegram_token),
         telegram_chat_id=chat_id,
         slack_enabled=False,
+        timezone=tz,
     )
     path = target / "ops" / "gateway.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, text)
+
+
+def detect_system_timezone() -> str:
+    """Best-effort guess at the host's IANA timezone, fallback UTC."""
+    candidate = ""
+    etc = Path("/etc/timezone")
+    if etc.exists():
+        try:
+            candidate = etc.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            candidate = ""
+    if not candidate:
+        link = Path("/etc/localtime")
+        try:
+            resolved = link.resolve()
+            parts = resolved.parts
+            if "zoneinfo" in parts:
+                idx = parts.index("zoneinfo")
+                candidate = "/".join(parts[idx + 1 :])
+        except OSError:
+            candidate = ""
+    if not candidate:
+        return "UTC"
+    try:
+        ZoneInfo(candidate)
+    except ZoneInfoNotFoundError:
+        return "UTC"
+    return candidate
+
+
+def prompt_timezone(default: str, *, defaults: bool) -> str:
+    while True:
+        value = prompt("Operating timezone (IANA name, e.g. Asia/Dubai)", default, defaults=defaults)
+        candidate = value.strip() or "UTC"
+        try:
+            ZoneInfo(candidate)
+        except ZoneInfoNotFoundError:
+            print(f"Unknown IANA zone {candidate!r}. Try e.g. Asia/Dubai, Europe/Rome, UTC.", file=sys.stderr)
+            if defaults:
+                return "UTC"
+            continue
+        return candidate
 
 
 def ensure_memory_bootstrap(target: Path, brain: str, *, force: bool) -> None:
@@ -456,6 +506,10 @@ def main(argv: list[str] | None = None) -> int:
     candidates = detect_brains()
     brain = choose_brain(candidates, defaults=args.defaults)
 
+    detected_tz = detect_system_timezone()
+    print(f"\n==> Operating timezone (detected: {detected_tz})")
+    tz = prompt_timezone(detected_tz, defaults=args.defaults)
+
     env = read_env(target / ".env")
     telegram_token = prompt(
         "Telegram bot token for the first channel",
@@ -479,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
 
     updates = {"TELEGRAM_BOT_TOKEN": telegram_token, "TELEGRAM_CHAT_ID": chat_id}
     write_env(target, updates)
-    write_gateway_config(target, brain, telegram_token, chat_id)
+    write_gateway_config(target, brain, telegram_token, chat_id, tz=tz)
     ensure_memory_bootstrap(target, brain, force=args.force or not existing)
     write_watchdog_conf(target, force=args.force)
     (target / "state" / "setup").mkdir(parents=True, exist_ok=True)

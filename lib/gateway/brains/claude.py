@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..context import render_clock_inline
+from ..queue import Event
 from .base import Brain, newest_jsonl_stem, parse_iso
 
 
@@ -23,3 +25,12 @@ class ClaudeBrain(Brain):
             return None
         slug = str(self.instance_dir).replace("/", "-").replace("_", "-")
         return newest_jsonl_stem(Path.home() / ".claude" / "projects" / slug, t0)
+
+    def _user_message_body(self, event: Event) -> str:
+        # Claude auto-loads CLAUDE.md and resumes via session id, so we
+        # cannot inject the dynamic clock into the preamble. Prefix the
+        # user message with a single-line clock so each turn sees fresh
+        # "now" without polluting the cached CLAUDE.md view.
+        clock_line = render_clock_inline(self._timezone())
+        body = event.content or ""
+        return f"{clock_line}\n{body}" if body else clock_line
