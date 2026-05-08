@@ -22,8 +22,8 @@ from typing import Callable, Iterable
 
 from .. import chats as chats_module
 from .. import transcripts as transcripts_module
-from ..config import BrainOverrideConfig, GatewayConfig
-from ..context import render_preamble
+from ..config import BrainOverrideConfig, GatewayConfig, load_config_cached
+from ..context import render_clock, render_clock_inline, render_preamble
 from ..queue import Event
 
 
@@ -130,6 +130,9 @@ class Brain:
         meta = self._meta(event)
         meta_text = json.dumps(meta, indent=2, sort_keys=True) if meta else "{}"
         preamble = render_preamble(self.instance_dir) if self.needs_l1_preamble else ""
+        if self.needs_l1_preamble:
+            clock_block = render_clock(self._timezone())
+            preamble = f"{clock_block}\n\n{preamble}" if preamble else clock_block
         if self.needs_l1_preamble and event.source == "telegram":
             chats_section = self._render_known_chats_section()
             if chats_section:
@@ -166,11 +169,21 @@ Your reply is only the text the user reads.
 {voice_instruction}
 # User message
 
-{event.content}
+{self._user_message_body(event)}
 
 ---
 """
         return body
+
+    def _user_message_body(self, event: Event) -> str:
+        """Return the user message content as it appears in the prompt.
+
+        Subclasses that auto-load CLAUDE.md (and therefore skip the L1
+        preamble) override this to prefix the message with a single-line
+        clock so the LLM still sees fresh "now" each turn without
+        invalidating CLAUDE.md cache.
+        """
+        return event.content
 
     def _render_known_chats_section(self, limit: int = 20) -> str:
         """Build the `## Known Telegram chats` block from the chats table.
@@ -408,6 +421,19 @@ Your reply is only the text the user reads.
             "Use for continuity; do not echo verbatim.\n\n"
             f"{body}"
         )
+
+    def _timezone(self) -> str:
+        """Return the configured IANA timezone, falling back to UTC.
+
+        Loaded via the mtime-cached config getter, so this is a hashtable
+        hit on the hot path. Errors fall through to UTC — the validator
+        guarantees the value is a real zone, but the heartbeat path may
+        reach this with a malformed yaml during dev.
+        """
+        try:
+            return load_config_cached(self.instance_dir).timezone or "UTC"
+        except Exception:  # noqa: BLE001
+            return "UTC"
 
     def _meta(self, event: Event) -> dict:
         if not event.meta:

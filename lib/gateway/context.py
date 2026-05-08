@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 _CACHE: dict[Path, "_CachedPreamble"] = {}
@@ -133,3 +135,38 @@ def render_preamble(instance_dir: Path) -> str:
 def clear_cache() -> None:
     with _CACHE_LOCK:
         _CACHE.clear()
+
+
+def render_clock(tz_name: str) -> str:
+    """Return a fresh clock block for the configured timezone.
+
+    Evaluated each call — must NOT be cached. Brain prompts inject this so
+    the LLM reasons about "now" in the user's local zone, not UTC.
+    """
+
+    name = (tz_name or "UTC").strip() or "UTC"
+    now = datetime.now(ZoneInfo(name))
+    iso = now.isoformat(timespec="seconds")
+    raw_offset = now.strftime("%z")  # e.g. "+0400" or "-0500"
+    if raw_offset:
+        pretty_offset = f"UTC{raw_offset[:3]}:{raw_offset[3:]}"
+    else:
+        pretty_offset = "UTC"
+    return (
+        "# Current time\n"
+        f"{now.strftime('%Y-%m-%d %H:%M')} {name} "
+        f"({pretty_offset}, ISO 8601: {iso})"
+    )
+
+
+def render_clock_inline(tz_name: str) -> str:
+    """One-line clock prefix for brains that auto-load CLAUDE.md.
+
+    Compact form: `[Current time: 2026-05-08 18:30 Asia/Dubai (UTC+04:00)]`.
+    """
+
+    name = (tz_name or "UTC").strip() or "UTC"
+    now = datetime.now(ZoneInfo(name))
+    raw_offset = now.strftime("%z")
+    pretty_offset = f"UTC{raw_offset[:3]}:{raw_offset[3:]}" if raw_offset else "UTC"
+    return f"[Current time: {now.strftime('%Y-%m-%d %H:%M')} {name} ({pretty_offset})]"

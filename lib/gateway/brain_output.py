@@ -101,6 +101,8 @@ def parse_brain_output(raw: str | None, *, event_source: str | None = None) -> B
             parse_error=f"'message' must be string, got {type(msg).__name__}",
         )
 
+    if not flag and _is_silent_token(msg):
+        return BrainOutput(push_message_sent=False, message="")
     return BrainOutput(push_message_sent=flag, message=msg)
 
 
@@ -132,8 +134,15 @@ def _parse_embedded_contract(text: str) -> BrainOutput | None:
     parse_error = None
     if prefix or suffix:
         parse_error = RECOVERED_ENVELOPE_ERROR
+    flag = bool(obj["push_message_sent"])
+    if not flag and isinstance(msg, str) and _is_silent_token(msg):
+        return BrainOutput(
+            push_message_sent=False,
+            message="",
+            parse_error=parse_error,
+        )
     return BrainOutput(
-        push_message_sent=bool(obj["push_message_sent"]),
+        push_message_sent=flag,
         message=msg,
         parse_error=parse_error,
     )

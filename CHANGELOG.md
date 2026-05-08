@@ -24,6 +24,16 @@ Patch release for email sender-policy ergonomics.
   promotion to `trusted` or `blocklist` changes the current reply behavior.
 - Existing pending inbound messages from earlier releases remain supported and
   drainable through `jc email pending ...` and `jc email senders ...`.
+- `parse_brain_output` now treats a silent sentinel (`SILENT`, `SILENCE`,
+  `[SILENT]`, `[NO-REPLY]`, `[NO_REPLY]`, `[SKIP]`, `NO_REPLY`, `NO-REPLY`)
+  appearing inside the envelope `message` field as an explicit no-op when
+  `push_message_sent` is false. Previously only raw or trailing-line sentinels
+  were suppressed, so a brain that wrapped the sentinel in the canonical JSON
+  envelope (`{"push_message_sent": false, "message": "SILENT"}`) caused the
+  literal token to be relayed to users. Audit messages on `push_message_sent=true`
+  envelopes are unchanged.
+- The embedded-envelope recovery path applies the same suppression so brains
+  that emit prose plus an envelope cannot leak sentinels either.
 
 ## 2026.05.07.01
 

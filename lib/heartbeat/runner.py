@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import load_dotenv
@@ -400,6 +401,22 @@ class FileLock:
                 self.fh = None
 
 
+def _resolve_instance_timezone(instance_dir: Path) -> str:
+    """Read the instance's configured timezone from gateway.yaml.
+
+    Falls back to UTC on missing/malformed config — heartbeat must not
+    crash if yaml is mid-edit. We import lazily because the heartbeat
+    runner is also used from contexts where the gateway package is fine
+    but an early import-time failure would obscure the real error.
+    """
+    try:
+        from gateway.config import load_config_cached  # noqa: WPS433
+
+        return load_config_cached(instance_dir).timezone or "UTC"
+    except Exception:  # noqa: BLE001
+        return "UTC"
+
+
 def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
     """Execute one task. Returns process exit code (0 = success or silent skip)."""
     instance_dir = instance_dir.resolve()
@@ -408,7 +425,13 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
     state.mkdir(parents=True, exist_ok=True)
     log_path = state / "run.log"
 
-    ts = dt.datetime.now()
+    tz_name = _resolve_instance_timezone(instance_dir)
+    try:
+        tz_info = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz_info = ZoneInfo("UTC")
+        tz_name = "UTC"
+    ts = dt.datetime.now(tz_info)
     ts_tag = ts.strftime("%Y%m%dT%H%M%S")
 
     # Source instance .env (secrets like TELEGRAM_BOT_TOKEN, DASHSCOPE_API_KEY)
@@ -498,7 +521,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
             "bundle_path": str(bundle_path) if bundle_path else "",
             "date": ts.strftime("%Y-%m-%d"),
             "time": ts.strftime("%H:%M"),
-            "timezone": os.environ.get("TZ", "UTC"),
+            "timezone": tz_name,
         }
         task_prompt = render_prompt_template(prompt_tpl, subs)
 

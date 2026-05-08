@@ -157,6 +157,68 @@ def test_missing_message_defaults_empty_when_flag_present():
     assert out.parse_error is None
 
 
+def test_envelope_silent_message_is_suppressed():
+    raw = '{"push_message_sent": false, "message": "SILENT"}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == ""
+    assert out.parse_error is None
+
+
+def test_envelope_bracketed_silent_message_is_suppressed():
+    raw = '{"push_message_sent": false, "message": "[SILENT]"}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == ""
+
+
+def test_envelope_no_reply_message_is_suppressed():
+    raw = '{"push_message_sent": false, "message": "[NO-REPLY]"}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == ""
+
+
+def test_envelope_silent_with_whitespace_is_suppressed():
+    raw = '{"push_message_sent": false, "message": "  SILENT  "}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == ""
+
+
+def test_envelope_silent_lowercase_is_suppressed():
+    raw = '{"push_message_sent": false, "message": "silent"}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == ""
+
+
+def test_push_true_with_silent_audit_message_preserves_message():
+    raw = '{"push_message_sent": true, "message": "SILENT"}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is True
+    assert out.message == "SILENT"
+    assert out.parse_error is None
+
+
+def test_envelope_silent_message_with_surrounding_prose_is_suppressed():
+    raw = (
+        "Drafting calendar brief.\n\n"
+        '{"push_message_sent": false, "message": "SILENT"}'
+    )
+    out = parse_brain_output(raw, event_source="cron")
+    assert out.push_message_sent is False
+    assert out.message == ""
+    assert out.parse_error == "recovered JSON envelope with surrounding stdout"
+
+
+def test_envelope_non_silent_message_unchanged():
+    raw = '{"push_message_sent": false, "message": "Real content."}'
+    out = parse_brain_output(raw)
+    assert out.push_message_sent is False
+    assert out.message == "Real content."
+
+
 def test_trailing_silent_without_internal_source_falls_back_to_raw():
     raw = "Sent. Message ID 447. 3 decisions locked.\n\nSILENT"
     out = parse_brain_output(raw)
