@@ -134,6 +134,17 @@ class Brain:
             chats_section = self._render_known_chats_section()
             if chats_section:
                 preamble = f"{preamble}\n\n{chats_section}" if preamble else chats_section
+        voice_instruction = ""
+        if meta.get("was_voice"):
+            voice_instruction = """
+# Voice reply requirements
+
+The user sent a voice/audio message that was transcribed before dispatch.
+Reply in the same language as the transcribed user message. Keep the answer
+natural when spoken aloud, because the gateway may synthesize it as a voice
+reply. Do not mention transcription unless the user asks about it.
+
+"""
         body = f"""{preamble}
 
 ---
@@ -152,6 +163,7 @@ Your reply is only the text the user reads.
 - metadata:
 {meta_text}
 
+{voice_instruction}
 # User message
 
 {event.content}

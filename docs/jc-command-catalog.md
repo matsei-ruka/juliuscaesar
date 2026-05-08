@@ -1,7 +1,7 @@
 # JC Command Catalog
 
 Status: Inventory draft
-Date: 2026-05-06
+Date: 2026-05-07
 
 ## Purpose
 
@@ -22,7 +22,7 @@ Sources checked:
 `jc` is a Bash router. It accepts optional global `--instance-dir <path>` or
 `--instance-dir=<path>`, then dispatches `jc <name>` to `jc-<name>` on `PATH`.
 
-Router version: `2026.05.06.01`.
+Router version: `2026.05.07.01`.
 
 Routed public subcommands:
 

@@ -63,3 +63,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-07] update | subsystem/gateway-queue.md + decision/why-unified-gateway.md + contract/brain-capabilities.md - documented slim triage output and config-owned class-to-brain routing
 ## [2026-05-07] update | subsystem/gateway-queue.md + contract/config-and-secret-boundaries.md + decision/native-cli-over-api-simulation.md - documented api_classifier triage protocols and direct-provider config
 ## [2026-05-07] update | subsystem/gateway-queue.md + contract/config-and-secret-boundaries.md + contract/adapter-and-delivery-contracts.md - documented opt-in gateway reply footer boundaries
+## [2026-05-08] update | subsystem/voice-dashscope.md + subsystem/channel-voice.md + subsystem/channel-telegram.md + subsystem/gateway-queue.md + contract/config-and-secret-boundaries.md + subsystem/installation-and-cli-routing.md — documented instance-owned voice env, voice routing, and 2026.05.07.01 version

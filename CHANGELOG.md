@@ -3,6 +3,21 @@
 All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 (`YYYY.MM.DD`). Newest first.
 
+## 2026.05.07.01
+
+Hotfix for instance-owned voice credentials and Telegram voice replies.
+
+- Voice ASR/TTS helpers now read `DASHSCOPE_API_KEY` through the instance
+  `.env` loader, so clean-env gateway and cron launches keep per-instance
+  credentials isolated instead of depending on exported shell variables.
+- `jc-voice` now passes the resolved instance directory into transcription and
+  synthesis helpers, preserving the same `.env` behavior for CLI smoke tests.
+- Telegram voice events now bypass text-content triage and route through the
+  configured `voice` class. This prevents short voice checks from being
+  misclassified as `smalltalk` and sent to a lightweight model.
+- Brain prompts for transcribed voice events now require same-language,
+  spoken-natural replies before the gateway renders optional TTS output.
+
 ## 2026.05.06.01
 
 Skill management for pre-shipped agent tools.

@@ -13,7 +13,9 @@ code_anchors:
     symbol: "def write_env_keys(instance: Path, updates: dict[str, str]) -> None:"
   - path: lib/heartbeat/runner.py
     symbol: "load_dotenv(str(env_file))"
-last_verified: 2026-05-07
+  - path: lib/gateway/config.py
+    symbol: "def env_value(instance_dir: Path, name: str) -> str:"
+last_verified: 2026-05-08
 verified_by: Matsei Ruka
 related:
   - contract/instance-layout-and-resolution.md
@@ -80,6 +82,10 @@ Common keys:
 - Telegram `getMe` validation is only possible when a token is present.
 - Slack `auth.test` validation is only possible when both Slack tokens are present.
 - Voice calls fail fast when `DASHSCOPE_API_KEY` is missing.
+- Python runtime consumers that need secrets should use the instance-aware
+  loader (`env_value(instance_dir, KEY)`) so `<instance>/.env` wins over a
+  process-level export. This keeps multiple instances under the same Unix user
+  isolated while still allowing explicit environment fallback.
 - Pre-shipped web/data skills read their credentials from `.env`; skill files
   must never contain API keys.
 - `jc skills test` may call provider account/search endpoints and records only

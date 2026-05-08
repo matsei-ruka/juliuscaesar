@@ -11,8 +11,8 @@ code_anchors:
     symbol: "def transcribe("
   - path: lib/voice/enroll.py
     symbol: "def enroll("
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-08
+verified_by: Matsei Ruka
 related:
   - contract/config-and-secret-boundaries.md
 ---
@@ -21,7 +21,7 @@ related:
 
 Voice support wraps DashScope Qwen APIs for three operations: enroll a cloned voice, synthesize speech as Telegram-compatible OGG/Opus, and transcribe audio through qwen2.5-omni.
 
-The CLI handles instance resolution and `.env` loading. Library functions take explicit parameters and read `DASHSCOPE_API_KEY` from the environment.
+The CLI handles instance resolution and `.env` loading. Library functions take `instance_dir` explicitly and read `DASHSCOPE_API_KEY` through `gateway.config.env_value()`, preferring the instance `.env` before falling back to the process environment.
 
 ## CLI surface
 
@@ -47,9 +47,10 @@ The CLI handles instance resolution and `.env` loading. Library functions take e
 
 ## Invariants
 
-- `DASHSCOPE_API_KEY` is required for all voice operations.
+- `DASHSCOPE_API_KEY` is required for all voice operations and should live in the instance `.env` so separate instances under the same Unix user do not share credentials accidentally.
 - `ffmpeg` is required for synthesis.
 - Missing `voice.json` blocks `speak` and tells the user to enroll first.
+- Gateway/CLI ASR and TTS calls must pass the resolved instance directory into the voice helpers.
 
 ## Open questions / known stale
 

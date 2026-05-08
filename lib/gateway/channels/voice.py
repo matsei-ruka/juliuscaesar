@@ -83,7 +83,7 @@ class VoiceChannel:
             mod = import_module("voice.asr")
             if not hasattr(mod, "transcribe"):
                 return ""
-            return str(mod.transcribe(audio_path))
+            return str(mod.transcribe(audio_path, instance_dir=self.instance_dir))
         return ""
 
     def _synthesize(self, text: str, meta: dict[str, Any]) -> str | None:
@@ -123,6 +123,7 @@ class VoiceChannel:
         result = synth.synthesize(
             text,
             out_path,
+            instance_dir=self.instance_dir,
             voice_id=str(voice_id),
             target_model=str(target_model),
         )

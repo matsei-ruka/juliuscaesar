@@ -217,7 +217,7 @@ def _drive_telegram(
     telegram_media.http_json = fake_http_json
     telegram_media.urllib.request.urlopen = lambda *_a, **_k: FakeResp(urlopen_payload)
     if transcript is not None:
-        telegram_module._transcribe_audio = lambda _path: transcript
+        telegram_module._transcribe_audio = lambda _path, *, instance_dir: transcript
     try:
         thread = threading.Thread(
             target=channel.run, args=(enqueue, should_stop), daemon=True

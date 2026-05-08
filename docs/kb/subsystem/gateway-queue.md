@@ -111,6 +111,9 @@ ages, lifecycle event counts, and the last email event.
 - Triage classifiers do not own brain choice. The gateway maps classifier
   classes to configured brain specs before passing a `TriageHint` to the
   router.
+- Voice/audio events marked with `meta.was_voice` bypass text classifier calls
+  and are treated as class `voice`; routing still comes from
+  `triage_routing.voice` / fallback brain.
 - Reply footers are opt-in and attach only to normal gateway text delivery.
   They do not alter voice TTS, slash/inline responses, or push-marker
   deliveries where the brain already sent its own message.

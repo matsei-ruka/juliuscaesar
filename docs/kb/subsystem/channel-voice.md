@@ -5,8 +5,8 @@ status: active
 code_anchors:
   - path: lib/gateway/channels/voice.py
     symbol: "class VoiceChannel:"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-08
+verified_by: Matsei Ruka
 related:
   - subsystem/gateway-queue.md
   - subsystem/voice-dashscope.md
@@ -35,9 +35,11 @@ channels:
     tts_provider: dashscope
 ```
 
-`DASHSCOPE_API_KEY` must be set in `<instance>/.env`.
+`DASHSCOPE_API_KEY` must be set in `<instance>/.env`. Voice helpers read it through the instance-aware env loader, not from a globally exported shell variable.
 
 ## Invariants
 
 - Voice never owns a transport — disabling the paired channel disables voice.
 - Failed ASR/TTS log and continue with text-only fallback.
+- TTS output requires `<instance>/voice/references/voice.json`; without it,
+  outbound voice replies fall back to text.

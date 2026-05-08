@@ -87,6 +87,7 @@ def cmd_speak(args: argparse.Namespace, instance: Path) -> int:
     path = synthesize(
         args.text,
         out,
+        instance_dir=instance,
         voice_id=v["voice"],
         target_model=v["target_model"],
     )
@@ -96,7 +97,7 @@ def cmd_speak(args: argparse.Namespace, instance: Path) -> int:
 
 def cmd_transcribe(args: argparse.Namespace, instance: Path) -> int:
     load_instance_env(instance)
-    text = transcribe(Path(args.audio))
+    text = transcribe(Path(args.audio), instance_dir=instance)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
     print(text)

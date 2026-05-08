@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from gateway.brains.base import Brain  # noqa: E402
 from gateway.queue import Event  # noqa: E402
 
 
-def _make_event(source: str = "telegram") -> Event:
+def _make_event(source: str = "telegram", meta: dict | None = None) -> Event:
     return Event(
         id=1,
         source=source,
@@ -23,7 +24,7 @@ def _make_event(source: str = "telegram") -> Event:
         user_id="u",
         conversation_id="c",
         content="hello",
-        meta=None,
+        meta=json.dumps(meta) if meta else None,
         status="running",
         received_at="2026-04-26T00:00:00Z",
         available_at="2026-04-26T00:00:00Z",
@@ -122,6 +123,18 @@ class ChatPreambleTests(unittest.TestCase):
             brain.needs_l1_preamble = False
             prompt = brain.prompt_for_event(_make_event())
             self.assertNotIn("## Known Telegram chats", prompt)
+
+    def test_voice_event_includes_same_language_spoken_reply_instruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _stub_instance(tmp)
+            brain = Brain(instance)
+            brain.name = "test"
+
+            prompt = brain.prompt_for_event(_make_event(meta={"was_voice": True}))
+
+            self.assertIn("# Voice reply requirements", prompt)
+            self.assertIn("Reply in the same language", prompt)
+            self.assertIn("natural when spoken aloud", prompt)
 
 
 if __name__ == "__main__":

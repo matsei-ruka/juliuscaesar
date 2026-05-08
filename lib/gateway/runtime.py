@@ -411,6 +411,19 @@ class GatewayRuntime:
             return None, False
         if event.source == "cron" and meta.get("brain"):
             return None, False
+        if meta.get("was_voice"):
+            result = TriageResult(class_="voice", confidence=1.0, raw="voice attachment")
+            hint = self._triage_to_hint(result)
+            self.log(
+                f"triage voice override id={event.id} routed={hint.full_spec() if hint else '-'}",
+                event_id=event.id,
+                kind="triage",
+            )
+            try:
+                self.metrics.record(result, brain=hint.full_spec() if hint else "", fallback=False)
+            except Exception:  # noqa: BLE001
+                pass
+            return hint, False
         backend = self._get_triage_backend()
         if backend is None:
             return None, False

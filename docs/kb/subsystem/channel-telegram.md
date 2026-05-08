@@ -17,8 +17,8 @@ code_anchors:
     symbol: "def parse_slash_command"
   - path: lib/gateway/chats.py
     symbol: "def upsert_chat"
-last_verified: 2026-05-01
-verified_by: l.mattei
+last_verified: 2026-05-08
+verified_by: Matsei Ruka
 related:
   - subsystem/gateway-queue.md
 ---
@@ -78,7 +78,7 @@ Two separate prompt paths, both ending in a `chat_auth:{allow|deny}:{chat_id}` i
 
 ## Media
 
-- voice / audio / video_note → `_ingest_audio_attachment` → `_transcribe_audio` (DashScope). On success, `meta.was_voice = True` so downstream renders a voice reply.
+- voice / audio / video_note → `_ingest_audio_attachment` → `_transcribe_audio` (DashScope with the current instance dir). On success, `meta.was_voice = True` so downstream routes through the configured `voice` triage class and attempts a voice reply.
 - photo → `_ingest_photo`. Empty-text + photo gets `[image]` placeholder.
 - document → `_ingest_document`. Empty-text + document gets `[document: {file_name}]` placeholder.
 
@@ -99,6 +99,8 @@ Two separate prompt paths, both ending in a `chat_auth:{allow|deny}:{chat_id}` i
 ## Invariants
 
 - Bot token reads from `<instance>/.env` via `cfg.token_env`; never logged.
+- Audio transcription reads `DASHSCOPE_API_KEY` from the same instance `.env`,
+  so Telegram voice ingestion works from clean-env daemon launches.
 - Default-deny: an unknown chat is silently dropped. Authority is config files only.
 - Blocklist beats allowlist. A re-added group must be re-approved.
 - The poll loop swallows exceptions as `info`-level logs and sleeps 5s. Hard errors do not crash the daemon; they need explicit log review.

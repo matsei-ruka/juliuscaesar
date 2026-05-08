@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -30,7 +31,7 @@ def _runtime_with_triage(cfg: TriageConfig):
     return types.SimpleNamespace(config=GatewayConfig(triage=cfg))
 
 
-def _event(content: str = "bad request") -> Event:
+def _event(content: str = "bad request", meta: dict | None = None) -> Event:
     return Event(
         id=1,
         source="telegram",
@@ -38,7 +39,7 @@ def _event(content: str = "bad request") -> Event:
         user_id="u1",
         conversation_id="c1",
         content=content,
-        meta=None,
+        meta=json.dumps(meta) if meta else None,
         status="queued",
         received_at="2026-05-07T00:00:00Z",
         available_at="2026-05-07T00:00:00Z",
@@ -192,6 +193,35 @@ class SlimTriageContractTests(unittest.TestCase):
 
             self.assertEqual(response, "(triage rejected unsafe)")
             invoke.assert_not_called()
+
+    def test_voice_event_bypasses_classifier_and_uses_voice_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "ops").mkdir()
+            (instance / "ops" / "gateway.yaml").write_text(
+                "triage: openrouter\n"
+                "triage_routing:\n"
+                "  voice: claude:sonnet\n",
+                encoding="utf-8",
+            )
+            runtime = GatewayRuntime(
+                instance,
+                log_path=instance / "state" / "gateway" / "gateway.log",
+                stop_requested=lambda: False,
+            )
+            event = _event("Hello Ada", meta={"was_voice": True})
+
+            class Classifier:
+                def classify(self, _message):
+                    raise AssertionError("voice events should not call triage backend")
+
+            runtime._get_triage_backend = lambda: Classifier()
+
+            hint, should_reject = runtime._maybe_triage(event, None)
+
+            self.assertFalse(should_reject)
+            self.assertIsNotNone(hint)
+            self.assertEqual(hint.full_spec(), "claude:sonnet")
 
 
 if __name__ == "__main__":

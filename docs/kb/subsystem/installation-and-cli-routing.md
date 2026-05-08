@@ -9,7 +9,7 @@ code_anchors:
     symbol: "case \"$SUB\" in"
   - path: bin/jc-skills
     symbol: "PRE_SHIPPED"
-last_verified: 2026-05-06
+last_verified: 2026-05-08
 verified_by: Matsei Ruka
 related:
   - contract/instance-layout-and-resolution.md
@@ -75,4 +75,4 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap still lists public distribution via npm, brew, or curl as future work.
-- 2026-05-06: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.05.06.01`) used by `jc update` to compare against released framework versions.
+- 2026-05-08: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.05.07.01`) used by `jc update` to compare against released framework versions.

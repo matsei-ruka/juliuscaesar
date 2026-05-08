@@ -232,7 +232,10 @@ def env_values(instance_dir: Path) -> dict[str, str]:
 
 
 def env_value(instance_dir: Path, name: str) -> str:
-    return os.environ.get(name) or env_values(instance_dir).get(name, "")
+    values = env_values(instance_dir)
+    if name in values:
+        return values[name]
+    return os.environ.get(name, "")
 
 
 def redact_value(name: str, value: str) -> str:
