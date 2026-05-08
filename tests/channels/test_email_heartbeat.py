@@ -53,7 +53,8 @@ class TestPollCli(unittest.TestCase):
                     - mario@scovai.com
                   blocklist:
                     - spam@x.com
-                notify_on_unknown: false
+                approvals:
+                  notify_on_external: false
             """
         ).strip()
 

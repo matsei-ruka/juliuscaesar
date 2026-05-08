@@ -470,6 +470,24 @@ def _parse_iso(ts: str) -> Optional[float]:
         return None
 
 
+def _parse_opencode_time(value: object) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        # Current OpenCode emits Unix epoch milliseconds in `created`/`updated`.
+        return float(value) / 1000
+    if isinstance(value, str):
+        return _parse_iso(value)
+    return None
+
+
+def _opencode_session_time(session: dict) -> Optional[float]:
+    values = [
+        _parse_opencode_time(session.get(key))
+        for key in ("created_at", "started_at", "start", "created", "updated")
+    ]
+    values = [value for value in values if value is not None]
+    return max(values) if values else None
+
+
 def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional[str]:
     """Best-effort capture of the brain-native session id created during this run.
 
@@ -549,7 +567,7 @@ def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional
             try:
                 proc = subprocess.run(
                     ["opencode", "session", "list", "--format", "json"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, cwd=str(instance),
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return None
@@ -565,8 +583,10 @@ def _capture_session_id(brain: str, instance: Path, started_at: str) -> Optional
             for s in sessions:
                 if not isinstance(s, dict):
                     continue
-                ts = s.get("created_at") or s.get("started_at") or s.get("start")
-                st = _parse_iso(ts) if isinstance(ts, str) else None
+                directory = s.get("directory")
+                if isinstance(directory, str) and directory != str(instance):
+                    continue
+                st = _opencode_session_time(s)
                 if st is None:
                     continue
                 if st < t0:

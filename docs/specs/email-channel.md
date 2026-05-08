@@ -8,8 +8,9 @@ Branch: `feat/email-channel`
 
 Make email a first-class JuliusCaesar gateway channel for corporate operators.
 The channel receives mail through IMAP, routes accepted messages through the
-gateway, and sends replies through SMTP. Unknown inbound senders and external
-outbound replies are handled through explicit operator workflows.
+gateway, and sends replies through SMTP. Missing sender-policy entries are
+handled as external senders at runtime: the assistant may read and draft a
+response, but outbound email still requires explicit operator approval.
 
 This spec replaces the split `email-channel` and `email-draft-approval` drafts.
 It defines one lifecycle from inbox fetch to outbound reply.
@@ -55,14 +56,16 @@ Resolution order:
 2. `trusted` -> enqueue inbound message and auto-send the assistant reply.
 3. `external` -> enqueue inbound message, but store the outbound reply as a
    draft for operator approval.
-4. unknown -> persist pending inbound message, notify the operator, wait for an
-   approve/deny decision.
+4. missing from all lists -> runtime `external` behavior without writing to
+   config automatically.
 
 Migration:
 
 - Existing `senders.allowed` entries become `senders.trusted`.
 - Existing `senders.blocklist` is preserved.
-- `senders.external` starts empty unless the operator configures it.
+- `senders.external` starts empty unless the operator configures it. Missing
+  entries still behave as external at runtime; durable membership is decided
+  only when the operator or agent explicitly updates sender policy.
 - The loader may accept `allowed` as a backward-compatible alias, but writers
   should emit only the three-tier format.
 
@@ -73,19 +76,26 @@ IMAP fetch
   -> parse + sanitize
   -> persist local record
   -> classify sender tier
-  -> trusted/external: enqueue gateway event
-  -> unknown: persist pending and notify operator
+  -> trusted/external/default-external: enqueue gateway event
   -> blocklist: record drop and stop
   -> advance UID watermark only after durable local handling succeeds
 ```
 
 The UID watermark must never advance merely because a message was fetched. It
-advances only after the message is either enqueued, persisted as pending,
-recorded as blocked, or recorded as a permanent parse failure. This prevents
-unknown-sender messages from disappearing when the operator ignores the first
-notification.
+advances only after the message is either enqueued, recorded as blocked, or
+recorded as a permanent parse failure. Since missing sender entries are
+default-external, they are enqueued durably instead of waiting in pending
+approval state.
 
-Pending inbound messages live in local state and are drained after approval:
+Valid external/default-external inbound messages also emit a best-effort
+operator notification so the main chat can decide whether to move the sender to
+`trusted`, leave it `external`, or add it to `blocklist`. This notification is
+not an approval gate: the email event is still durably enqueued. Empty or
+malformed sender identities are permanent rejects and must not be treated as
+external.
+
+Pending inbound messages from older releases live in local state and remain
+drainable after approval:
 
 ```text
 state/channels/email/pending/<safe_sender_key>/<message_uid>.json
@@ -102,7 +112,7 @@ When the gateway produces an assistant response for an email event:
 1. Resolve the original sender tier from current config.
 2. For `trusted`, send via SMTP immediately.
 3. For `external`, persist a draft and notify the operator.
-4. For unknown or blocklisted senders, do not send. Record the skipped send.
+4. For blocklisted senders, do not send. Record the skipped send.
 
 External sender draft flow:
 
@@ -209,7 +219,7 @@ channels:
       blocklist: []
     approvals:
       telegram_chat_id: ${TELEGRAM_CHAT_ID}
-      notify_on_unknown: true
+      notify_on_external: true
       notify_on_draft: true
     state:
       last_uid_file: state/channels/email/last_uid
@@ -281,7 +291,7 @@ For the first corporate pilot, sender identity confidence may be policy-based:
 - trusted senders are trusted only within a controlled mailbox/provider setup;
 - the channel records available authentication headers for audit;
 - if provider authentication results are absent or fail, the message should be
-  treated as `external` or `unknown`, not `trusted`.
+  treated as `external`, not `trusted`.
 
 Future hardening can add strict DKIM/SPF/DMARC policy, but the current product
 contract is simpler: do not pretend the `From` header alone is verified.
@@ -294,7 +304,7 @@ Every lifecycle transition should produce a structured log entry:
 - parsed
 - persisted
 - enqueued
-- pending
+- pending (legacy inbound state only)
 - approved
 - denied
 - drafted
@@ -307,7 +317,7 @@ Every lifecycle transition should produce a structured log entry:
 Counters needed for corporate pilot:
 
 - fetched messages
-- pending inbound messages
+- legacy pending inbound messages
 - approved senders
 - denied senders
 - drafts pending
@@ -324,17 +334,22 @@ Required tests:
 
 - sender tier resolution, including blocklist precedence;
 - old `allowed` config migrates to `trusted`;
-- unknown sender persists pending before UID advances;
-- approving pending sender drains local pending store into gateway queue;
-- denied pending sender is removed without enqueue;
+- missing sender policy entry dispatches with `sender_tier: external`;
+- missing sender policy entry does not auto-write to `senders.external`;
+- malformed sender identity is rejected before enqueue;
+- invalid adapter sender status is rejected before enqueue;
+- external/default-external inbound sends an operator notification without
+  creating pending state;
+- legacy pending sender drain still enqueues or drops local pending state;
 - raw sender addresses are not used as filesystem path segments;
 - external sender response creates a draft and does not SMTP-send;
 - trusted sender response SMTP-sends immediately;
+- sender promotion to trusted is honored at reply-send time;
 - draft approve sends once and marks final state;
 - draft approve failure marks `failed` and records a lifecycle event;
 - draft reject never sends;
 - draft edit requires a later approve;
-- Telegram notification failure does not lose pending/draft state;
+- Telegram notification failure does not lose external inbound or draft state;
 - `jc email doctor` reports missing credentials and stale pending/draft items.
 - Company `gateway.snapshot` includes email pending/draft/lifecycle metrics
   when the channel is enabled or local email state exists.
@@ -347,8 +362,8 @@ Pilot readiness:
 2. Run `jc email test-imap`.
 3. Run `jc email test-smtp`.
 4. Send a trusted-sender email and verify auto-reply.
-5. Send an unknown-sender email and verify pending approval.
-6. Promote one external sender and verify draft approval.
+5. Send an unlisted-sender email and verify it behaves as external.
+6. Promote one external/default-external sender and verify draft approval.
 7. Confirm logs, `jc email doctor`, and Company snapshot counters match the
    observed flow.
 
@@ -368,7 +383,8 @@ Email is pilot-ready when:
 
 - the consolidated lifecycle is implemented;
 - setup and doctor commands make misconfiguration obvious;
-- UID state cannot lose unknown messages;
+- UID state cannot lose default-external messages;
+- missing sender policy entries default to external behavior without YAML churn;
 - external outbound drafts cannot send without approval;
 - operator decisions are durable and auditable;
 - focused email tests pass;

@@ -117,7 +117,7 @@ class EmailChannelAdapter:
                 "in_reply_to": msg.in_reply_to,
                 "references": msg.references,
                 "text": prompt_text,
-                "status": status,  # 'trusted', 'external', 'blocked', 'unknown'
+                "status": status,  # 'trusted', 'external', 'blocked'
                 "metadata": {
                     "uid": msg.uid,
                     "date": msg.date,

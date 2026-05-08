@@ -80,7 +80,7 @@ forgot to set `push_message_sent=true`.
 - `claude.sh`: runs `claude -p`, subscription-authenticated, no Telegram channel binding.
 - `codex.sh`: runs `codex exec` or `codex exec resume`; sandbox controlled by `CODEX_SANDBOX`.
 - `gemini.sh`: runs `gemini -p ""`; access mode controlled by `GEMINI_YOLO`.
-- `opencode.sh`: runs `opencode run`; truncates very large prompts to avoid argv limits.
+- `opencode.sh`: runs `opencode run`; truncates very large prompts to avoid argv limits. The gateway and worker wrappers capture OpenCode sessions from the instance cwd and accept numeric millisecond `created` / `updated` timestamps. For LM Studio-backed opencode, `No models loaded` and context-window configuration errors are treated as actionable adapter configuration failures rather than retryable gateway outages.
 - `aider.sh`: runs `aider`; resume via per-id history file under `AIDER_HISTORY_DIR`.
 - `minimax.sh`: stub on disk; **not registered** in `_BRAIN_REGISTRY`. Do not advertise as supported.
 

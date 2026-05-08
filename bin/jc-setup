@@ -195,7 +195,7 @@ def detect_brain(name: str) -> BrainCandidate:
         "claude": [["claude", "auth", "status"], ["claude", "whoami"], ["claude", "--version"]],
         "codex": [["codex", "auth", "status"], ["codex", "--version"]],
         "gemini": [["gemini", "auth", "status"], ["gemini", "--version"]],
-        "opencode": [["opencode", "auth", "status"], ["opencode", "--version"]],
+        "opencode": [["opencode", "auth", "list"], ["opencode", "--version"]],
         "aider": [["aider", "--version"]],
     }[name]
     last = ""

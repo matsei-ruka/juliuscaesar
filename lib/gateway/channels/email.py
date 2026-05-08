@@ -2,8 +2,8 @@
 
 Polls IMAP via `lib.channels.email.EmailChannelAdapter`, dispatches inbound
 messages through `email_dispatcher.dispatch_messages` (trusted/external →
-enqueue, unknown → Telegram notify + pending, blocked → silent drop), and sends
-or drafts outbound responses using meta supplied by the runtime.
+enqueue, external → operator notification, blocked → silent drop), and sends or
+drafts outbound responses using current sender policy plus runtime meta.
 
 The internal poller can be disabled by setting `imap.poll_interval: 0` in
 gateway.yaml — typical deployments drive polling externally via the
@@ -24,6 +24,13 @@ from .base import EnqueueFn, LogFn
 from . import email_dispatcher
 
 
+def _normalize_sender(sender: Any) -> str | None:
+    normalized = str(sender or "").lower().strip()
+    if not normalized or "@" not in normalized or any(ch.isspace() for ch in normalized):
+        return None
+    return normalized
+
+
 def _load_email_config(instance_dir: Path) -> dict[str, Any]:
     """Read the raw `channels.email` block from `ops/gateway.yaml`."""
     path = instance_dir / "ops" / "gateway.yaml"
@@ -38,6 +45,36 @@ def _load_email_config(instance_dir: Path) -> dict[str, Any]:
     channels = data.get("channels") or {}
     email_cfg = channels.get("email") or {}
     return email_cfg if isinstance(email_cfg, dict) else {}
+
+
+def _sender_tier_from_config(email_cfg: dict[str, Any], sender: Any, fallback: Any = None) -> str:
+    """Resolve the current sender tier, with blocklist taking precedence."""
+    normalized = _normalize_sender(sender)
+    if normalized is None:
+        return "blocked"
+    senders_cfg = email_cfg.get("senders") if isinstance(email_cfg.get("senders"), dict) else {}
+
+    def sender_set(name: str) -> set[str]:
+        values = senders_cfg.get(name, [])
+        if not isinstance(values, list):
+            return set()
+        return {
+            item
+            for raw in values
+            if (item := _normalize_sender(raw))
+        }
+
+    if normalized in sender_set("blocklist"):
+        return "blocked"
+    if normalized in sender_set("trusted") or normalized in sender_set("allowed"):
+        return "trusted"
+    if normalized in sender_set("external"):
+        return "external"
+
+    fallback_text = str(fallback or "").lower().strip()
+    if fallback_text == "blocked":
+        return "blocked"
+    return "external"
 
 
 def _load_env(instance_dir: Path) -> dict[str, str]:
@@ -151,11 +188,17 @@ class EmailChannel:
             self.log("email send skipped — no recipient in meta")
             return None
         cfg_raw = _load_email_config(self.instance_dir)
-        if meta.get("sender_tier") == "external":
+        sender_tier = _sender_tier_from_config(cfg_raw, recipient, meta.get("sender_tier"))
+        if sender_tier == "blocked":
+            self.log(f"email send skipped — sender is blocked recipient={recipient}")
+            return None
+        if sender_tier == "external":
+            draft_meta = dict(meta)
+            draft_meta["sender_tier"] = sender_tier
             draft_id = email_dispatcher.enqueue_draft(
                 self.instance_dir,
                 response=response,
-                meta=meta,
+                meta=draft_meta,
                 cfg=cfg_raw,
                 log=self.log,
             )

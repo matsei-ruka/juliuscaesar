@@ -13,6 +13,13 @@ import yaml
 __all__ = ["SenderAuthorizer", "update_sender_list"]
 
 
+def _normalize_sender(sender_email: str | None) -> str | None:
+    sender = str(sender_email or "").lower().strip()
+    if not sender or "@" not in sender or any(ch.isspace() for ch in sender):
+        return None
+    return sender
+
+
 def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> None:
     """Update sender policy list in gateway.yaml (atomic, idempotent).
 
@@ -32,7 +39,9 @@ def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> 
     if not isinstance(senders_list, list):
         senders_list = []
 
-    sender = sender_email.lower().strip()
+    sender = _normalize_sender(sender_email)
+    if sender is None:
+        return
     if sender not in senders_list:
         senders_list.append(sender)
         senders_cfg[list_name] = sorted(senders_list)
@@ -99,35 +108,48 @@ class SenderAuthorizer:
 
             trusted = senders_cfg.get("trusted", [])
             if isinstance(trusted, list):
-                self.trusted = {s.lower() for s in trusted if s}
+                self.trusted = {
+                    normalized for s in trusted if (normalized := _normalize_sender(s))
+                }
 
             # Backward compatibility for Phase 1-3 configs.
             allowed = senders_cfg.get("allowed", [])
             if isinstance(allowed, list):
-                self.trusted |= {s.lower() for s in allowed if s}
+                self.trusted |= {
+                    normalized for s in allowed if (normalized := _normalize_sender(s))
+                }
 
             external = senders_cfg.get("external", [])
             if isinstance(external, list):
-                self.external = {s.lower() for s in external if s}
+                self.external = {
+                    normalized for s in external if (normalized := _normalize_sender(s))
+                }
 
             blocked = senders_cfg.get("blocklist", [])
             if isinstance(blocked, list):
-                self.blocked = {s.lower() for s in blocked if s}
+                self.blocked = {
+                    normalized for s in blocked if (normalized := _normalize_sender(s))
+                }
         except Exception:
             # YAML parse error; keep stale config
             pass
 
     def check(self, sender_email: str) -> str:
-        """Classify sender: 'trusted' | 'external' | 'blocked' | 'unknown'.
+        """Classify sender: 'trusted' | 'external' | 'blocked'.
 
         Hot-reloads config on mtime change (~5s polling).
+
+        Missing valid senders are runtime-external by default. Empty or malformed
+        sender identities are blocked because they cannot be promoted safely.
         """
         now = time.time()
         if now - self.last_check >= self.check_interval:
             self._reload()
             self.last_check = now
 
-        sender = sender_email.lower().strip()
+        sender = _normalize_sender(sender_email)
+        if sender is None:
+            return "blocked"
 
         if sender in self.blocked:
             return "blocked"
@@ -135,4 +157,4 @@ class SenderAuthorizer:
             return "trusted"
         if sender in self.external:
             return "external"
-        return "unknown"
+        return "external"

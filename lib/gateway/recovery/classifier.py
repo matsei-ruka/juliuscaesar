@@ -74,7 +74,7 @@ _REGEX_RULES: list[tuple[ClassificationKind, re.Pattern[str], float]] = [
     (
         "bad_input",
         re.compile(
-            r"(image exceeds maximum size|invalid base64|payload too large|unsupported file type|mime type mismatch|schema validation|dangerously-skip-permissions cannot be used with root/sudo)",
+            r"(image exceeds maximum size|invalid base64|payload too large|unsupported file type|mime type mismatch|schema validation|dangerously-skip-permissions cannot be used with root/sudo|no models loaded|greater than the context length)",
             re.IGNORECASE,
         ),
         0.92,

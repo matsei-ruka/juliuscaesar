@@ -29,7 +29,7 @@ channels:
         - client@example.com
       blocklist: []
     approvals:
-      notify_on_unknown: true
+      notify_on_external: true
       notify_on_draft: true
       telegram_chat_id: null
 

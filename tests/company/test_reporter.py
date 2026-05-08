@@ -316,13 +316,13 @@ class TickTests(unittest.TestCase):
                         "metadata": {"uid": "10", "date": "2026-05-01T10:00:00Z"},
                     }
                 ],
-                cfg={"notify_on_unknown": False},
+                cfg={"approvals": {"notify_on_external": False}},
             )
 
             snapshot = build_snapshot(instance)
             email_metrics = snapshot["channel_metrics"]["email"]
-            self.assertEqual(email_metrics["pending"], 1)
-            self.assertEqual(email_metrics["event_counts_recent"]["inbound_pending"], 1)
+            self.assertEqual(email_metrics["pending"], 0)
+            self.assertEqual(email_metrics["event_counts_recent"]["inbound_dispatched"], 1)
 
     def test_tick_buffers_to_outbox_on_post_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

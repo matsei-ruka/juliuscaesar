@@ -3,6 +3,28 @@
 All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 (`YYYY.MM.DD`). Newest first.
 
+## 2026.05.08.01
+
+Patch release for email sender-policy ergonomics.
+
+- Unlisted email senders now default to runtime `external` behavior instead of
+  creating pending inbound approval items. The assistant can process the email,
+  but outbound replies still become approval drafts unless the sender is
+  explicitly trusted.
+- Sender policy names remain unchanged: `trusted`, `external`, and
+  `blocklist`. Missing senders are not auto-written into `senders.external`;
+  durable sender classification still happens only when the operator or agent
+  explicitly updates policy.
+- External/default-external inbound messages now send a best-effort operator
+  notification without creating a pending approval gate, so the main chat can
+  promote the sender to `trusted` or move it to `blocklist`.
+- Empty/malformed sender identities and invalid adapter status values are
+  rejected before enqueue instead of silently becoming external.
+- Outbound email replies re-resolve the current sender policy at send time, so
+  promotion to `trusted` or `blocklist` changes the current reply behavior.
+- Existing pending inbound messages from earlier releases remain supported and
+  drainable through `jc email pending ...` and `jc email senders ...`.
+
 ## 2026.05.07.01
 
 Hotfix for instance-owned voice credentials and Telegram voice replies.

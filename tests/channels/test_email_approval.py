@@ -41,30 +41,26 @@ def _run(args: list[str], instance: Path) -> tuple[int, str, str]:
 
 
 def _seed_pending(instance: Path, sender: str, uids: list[str]) -> None:
-    """Drop pending messages for `sender` directly via the dispatcher."""
-    msgs = [
-        {
-            "channel": "email",
-            "channel_id": f"uid_{u}",
-            "conversation_id": f"email_{sender.lower()}",
-            "user_id": f"email_{sender.lower()}",
-            "sender": sender,
-            "sender_name": sender.split("@")[0],
-            "subject": "Subject",
-            "message_id": f"<{u}@x.com>",
-            "in_reply_to": None,
-            "references": [],
-            "text": f"body {u}",
-            "status": "unknown",
-            "metadata": {"uid": u},
-        }
-        for u in uids
-    ]
-    email_dispatcher.dispatch_messages(
-        instance_dir=instance,
-        messages=msgs,
-        cfg={"notify_on_unknown": False},
-    )
+    """Drop legacy pending messages for `sender` directly into state."""
+    for u in uids:
+        email_dispatcher._write_pending(
+            instance,
+            {
+                "channel": "email",
+                "channel_id": f"uid_{u}",
+                "conversation_id": f"email_{sender.lower()}",
+                "user_id": f"email_{sender.lower()}",
+                "sender": sender,
+                "sender_name": sender.split("@")[0],
+                "subject": "Subject",
+                "message_id": f"<{u}@x.com>",
+                "in_reply_to": None,
+                "references": [],
+                "text": f"body {u}",
+                "status": "unknown",
+                "metadata": {"uid": u},
+            },
+        )
 
 
 def _read_email_senders(instance: Path) -> tuple[set[str], set[str], set[str]]:

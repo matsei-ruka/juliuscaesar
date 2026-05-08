@@ -3,12 +3,11 @@
 
 Routes EmailChannelAdapter outputs:
   - status='trusted'  → enqueue to gateway queue (source='email')
-  - status='external' → enqueue to gateway queue (outbound reply drafts)
-  - status='unknown'  → notify Telegram + persist message JSON to
-                        `state/channels/email/pending/<uid>.json`
+  - status='external' → notify operator + enqueue (outbound reply drafts)
+  - status='unknown'  → legacy input; treated as external at runtime
   - status='blocked'  → silent drop
 
-Pending messages are drained when an operator runs
+Pending messages from older versions are still drainable when an operator runs
 `jc email senders trust <addr>`, `external <addr>`, or `block <addr>`.
 
 Also exposes a `poll` CLI entrypoint:
@@ -58,6 +57,13 @@ class DispatchResult:
     handled_uids: list[str] = field(default_factory=list)
 
 
+def _normalize_sender(sender: Any) -> str | None:
+    normalized = str(sender or "").lower().strip()
+    if not normalized or "@" not in normalized or any(ch.isspace() for ch in normalized):
+        return None
+    return normalized
+
+
 def _sender_key(sender: str) -> str:
     """Return a filesystem-safe stable key for a normalized email address."""
     normalized = (sender or "unknown").lower().strip()
@@ -70,7 +76,7 @@ def _message_uid(msg: dict[str, Any]) -> str:
 
 
 def pending_dir(instance_dir: Path) -> Path:
-    """Where unknown-sender messages are persisted while awaiting approval."""
+    """Where legacy pending inbound messages are persisted for manual drain."""
     return email_state.pending_dir(instance_dir)
 
 
@@ -80,7 +86,7 @@ def drafts_dir(instance_dir: Path) -> Path:
 
 
 def _write_pending(instance_dir: Path, msg: dict[str, Any]) -> Path:
-    """Persist `msg` under `<sender>/<uid>.json` so drain_pending can find it."""
+    """Persist legacy `msg` under `<sender>/<uid>.json` for drain_pending."""
     sender = (msg.get("sender") or "unknown").lower().strip()
     uid = _message_uid(msg)
     path = pending_dir(instance_dir) / _sender_key(sender) / f"{uid}.json"
@@ -104,8 +110,20 @@ def _meta_for_event(msg: dict[str, Any]) -> dict[str, Any]:
         "email_references": msg.get("references") or [],
         "email_uid": str(msg.get("metadata", {}).get("uid", "")),
         "channel_id": msg.get("channel_id"),
-        "sender_tier": "trusted" if msg.get("status") == "allowed" else msg.get("status"),
+        "sender_tier": _effective_status(msg.get("status")),
     }
+
+
+def _effective_status(status: Any) -> str:
+    """Normalize legacy sender status values for runtime behavior."""
+    text = str(status or "external").lower().strip()
+    if text == "allowed":
+        return "trusted"
+    if text == "unknown":
+        return "external"
+    if text in {"trusted", "external", "blocked"}:
+        return text
+    raise ValueError(f"invalid email sender status: {status!r}")
 
 
 def _enqueue_message(
@@ -182,7 +200,7 @@ def _send_telegram_notify(
     return proc.stdout.strip() or None
 
 
-def _format_unknown_notification(msg: dict[str, Any]) -> str:
+def _format_external_notification(msg: dict[str, Any]) -> str:
     sender = msg.get("sender") or "(unknown)"
     name = msg.get("sender_name") or sender
     subject = msg.get("subject") or "(no subject)"
@@ -190,7 +208,7 @@ def _format_unknown_notification(msg: dict[str, Any]) -> str:
     if len(msg.get("text") or "") > 200:
         preview += "…"
     return (
-        f"📧 New email from unknown sender\n\n"
+        f"📧 External email received\n\n"
         f"**From:** {name} `{sender}`\n"
         f"**Subject:** {subject}\n\n"
         f"_{preview}_\n\n"
@@ -202,13 +220,11 @@ def _format_unknown_notification(msg: dict[str, Any]) -> str:
 
 def _approval_cfg(cfg: dict[str, Any]) -> tuple[bool, str | None, bool]:
     approvals = cfg.get("approvals") if isinstance(cfg.get("approvals"), dict) else {}
-    notify_on_unknown = bool(
-        approvals.get("notify_on_unknown", cfg.get("notify_on_unknown", True))
-    )
+    notify_on_external = bool(approvals.get("notify_on_external", True))
     notify_on_draft = bool(approvals.get("notify_on_draft", True))
     notify_chat_id = approvals.get("telegram_chat_id", cfg.get("telegram_chat_id"))
     notify_chat_id = str(notify_chat_id) if notify_chat_id else None
-    return notify_on_unknown, notify_chat_id, notify_on_draft
+    return notify_on_external, notify_chat_id, notify_on_draft
 
 
 _EMAIL_CALLBACK_PREFIX = "jcemail:"
@@ -322,7 +338,7 @@ def enqueue_draft(
     )
     log(f"email draft queued draft_id={draft_id} sender={sender} path={path}")
 
-    _notify_on_unknown, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
+    _notify_on_external, notify_chat_id, notify_on_draft = _approval_cfg(cfg)
     if notify_on_draft:
         _send_draft_with_buttons(
             instance_dir,
@@ -343,20 +359,49 @@ def dispatch_messages(
 ) -> DispatchResult:
     """Route `messages` according to their `status` field.
 
-    `cfg` is the raw `channels.email` block from gateway.yaml. Used for
-    `notify_on_unknown` and `telegram_chat_id`.
+    Unknown/missing sender policy is external by default and does not write
+    pending state. External inbound mail still notifies the operator so sender
+    policy can be promoted to trusted or blocklist from the main chat.
     """
     if log is None:
         log = lambda _msg: None  # noqa: E731
     cfg = cfg or {}
-    notify_on_unknown, notify_chat_id, _notify_on_draft = _approval_cfg(cfg)
-
+    notify_on_external, notify_chat_id, _notify_on_draft = _approval_cfg(cfg)
     result = DispatchResult()
     for msg in messages:
-        status = msg.get("status", "unknown")
-        sender = msg.get("sender", "(unknown)")
         uid = _message_uid(msg)
-        if status in {"allowed", "trusted", "external"}:
+        sender = msg.get("sender", "(unknown)")
+        normalized_sender = _normalize_sender(sender)
+        if normalized_sender is None:
+            result.blocked += 1
+            result.handled_uids.append(uid)
+            email_state.record_event(
+                instance_dir,
+                "inbound_rejected",
+                uid=uid,
+                sender=sender,
+                reason="invalid_sender",
+            )
+            log(f"email rejected invalid sender uid={msg.get('channel_id')} sender={sender!r}")
+            continue
+        try:
+            status = _effective_status(msg.get("status"))
+        except ValueError as exc:
+            result.blocked += 1
+            result.handled_uids.append(uid)
+            email_state.record_event(
+                instance_dir,
+                "inbound_rejected",
+                uid=uid,
+                sender=normalized_sender,
+                reason="invalid_status",
+                status=str(msg.get("status")),
+                error=str(exc),
+            )
+            log(f"email rejected invalid status sender={normalized_sender}: {exc}")
+            continue
+        sender = msg.get("sender", "(unknown)")
+        if status in {"trusted", "external"}:
             try:
                 _enqueue_message(instance_dir=instance_dir, msg=msg, enqueue=enqueue)
                 result.dispatched += 1
@@ -365,16 +410,23 @@ def dispatch_messages(
                     instance_dir,
                     "inbound_dispatched",
                     uid=uid,
-                    sender=sender,
+                    sender=normalized_sender,
                     status=status,
                 )
                 log(f"email dispatched uid={msg.get('channel_id')} sender={sender}")
+                if status == "external" and notify_on_external:
+                    _send_telegram_notify(
+                        instance_dir,
+                        _format_external_notification(msg),
+                        chat_id_override=notify_chat_id,
+                        log=log,
+                    )
             except Exception as exc:  # noqa: BLE001
                 email_state.record_event(
                     instance_dir,
                     "inbound_dispatch_failed",
                     uid=uid,
-                    sender=sender,
+                    sender=normalized_sender,
                     status=status,
                     error=str(exc),
                 )
@@ -384,36 +436,6 @@ def dispatch_messages(
             result.handled_uids.append(uid)
             email_state.record_event(instance_dir, "inbound_blocked", uid=uid, sender=sender)
             log(f"email dropped (blocked) sender={sender}")
-        else:  # unknown
-            try:
-                path = _write_pending(instance_dir, msg)
-                result.pending += 1
-                result.handled_uids.append(uid)
-                email_state.record_event(
-                    instance_dir,
-                    "inbound_pending",
-                    uid=uid,
-                    sender=sender,
-                    path=str(path),
-                )
-                log(f"email pending sender={sender} path={path}")
-            except OSError as exc:
-                email_state.record_event(
-                    instance_dir,
-                    "inbound_pending_failed",
-                    uid=uid,
-                    sender=sender,
-                    error=str(exc),
-                )
-                log(f"email pending write failed sender={sender}: {exc}")
-                continue
-            if notify_on_unknown:
-                _send_telegram_notify(
-                    instance_dir,
-                    _format_unknown_notification(msg),
-                    chat_id_override=notify_chat_id,
-                    log=log,
-                )
     return result
 
 

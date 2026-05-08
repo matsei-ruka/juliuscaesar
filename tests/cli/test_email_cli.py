@@ -32,26 +32,30 @@ def _run(args: list[str], instance: Path, *, stdin: str | None = None) -> subpro
 
 
 def _seed_pending(instance: Path, sender: str, uid: str = "10") -> None:
-    email_dispatcher.dispatch_messages(
-        instance_dir=instance,
-        messages=[
-            {
-                "channel": "email",
-                "channel_id": f"uid_{uid}",
-                "conversation_id": f"email_{sender.lower()}",
-                "user_id": f"email_{sender.lower()}",
-                "sender": sender,
-                "sender_name": sender.split("@")[0],
-                "subject": "Question",
-                "message_id": f"<{uid}@x.com>",
-                "in_reply_to": None,
-                "references": [],
-                "text": f"body {uid}",
-                "status": "unknown",
-                "metadata": {"uid": uid, "date": "2026-05-01T10:00:00Z"},
-            }
-        ],
-        cfg={"notify_on_unknown": False},
+    path = email_dispatcher._write_pending(
+        instance,
+        {
+            "channel": "email",
+            "channel_id": f"uid_{uid}",
+            "conversation_id": f"email_{sender.lower()}",
+            "user_id": f"email_{sender.lower()}",
+            "sender": sender,
+            "sender_name": sender.split("@")[0],
+            "subject": "Question",
+            "message_id": f"<{uid}@x.com>",
+            "in_reply_to": None,
+            "references": [],
+            "text": f"body {uid}",
+            "status": "unknown",
+            "metadata": {"uid": uid, "date": "2026-05-01T10:00:00Z"},
+        },
+    )
+    email_state.record_event(
+        instance,
+        "inbound_pending",
+        uid=uid,
+        sender=sender,
+        path=str(path),
     )
 
 

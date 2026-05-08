@@ -165,3 +165,41 @@ def test_setup_idempotent(fresh_instance: Path) -> None:
     assert (l1 / "HOT.md").read_text(encoding="utf-8") == snapshot["hot"]
     assert env_path.read_text(encoding="utf-8") == snapshot["env"]
     assert gateway.read_text(encoding="utf-8") == snapshot["gateway"]
+
+
+def test_setup_detects_modern_opencode_auth_list(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    opencode = fake_bin / "opencode"
+    opencode.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1 $2\" == \"auth list\" ]]; then\n"
+        "  echo 'LMStudio api'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"$1\" == \"--version\" ]]; then\n"
+        "  echo '1.14.29'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    opencode.chmod(0o755)
+
+    target = tmp_path / "instance"
+    env_extra = {
+        "JC_SETUP_ASSUME_BRAINS": "",
+        "JC_SETUP_SKIP_AI_PROMPT": "1",
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+    }
+    result = _run_setup(
+        target,
+        "--defaults",
+        "--no-start",
+        "--no-watchdog",
+        "--no-wait",
+        env_extra=env_extra,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "default_brain: opencode" in (target / "ops" / "gateway.yaml").read_text(encoding="utf-8")

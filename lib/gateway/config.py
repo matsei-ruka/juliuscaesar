@@ -658,9 +658,10 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "imap",
                 "smtp",
                 "senders",
+                "approvals",
                 "state",
                 "body_limit",
-                "notify_on_unknown",
+                "notify_on_unknown",  # Legacy no-op; accepted so old configs still load.
                 "telegram_chat_id",
             }
             for raw_key, raw_value in channels_raw.items():

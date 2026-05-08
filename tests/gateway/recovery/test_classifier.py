@@ -81,6 +81,20 @@ class RegexPrefilterTests(unittest.TestCase):
         self.assertEqual(c.kind, "bad_input")
         self.assertIn("root/sudo", c.extracted.get("reason", ""))
 
+    def test_opencode_lmstudio_no_models_loaded_classifies_bad_input(self):
+        stderr = "Error: No models loaded. Please load a model in the developer page or use the 'lms load' command."
+        c = classifier.regex_prefilter(stderr)
+        self.assertIsNotNone(c)
+        self.assertEqual(c.kind, "bad_input")
+        self.assertIn("No models loaded", c.extracted.get("reason", ""))
+
+    def test_opencode_lmstudio_context_too_small_classifies_bad_input(self):
+        stderr = "The number of tokens to keep from the initial prompt is greater than the context length."
+        c = classifier.regex_prefilter(stderr)
+        self.assertIsNotNone(c)
+        self.assertEqual(c.kind, "bad_input")
+        self.assertIn("context length", c.extracted.get("reason", ""))
+
     def test_unknown_returns_none(self):
         c = classifier.regex_prefilter("something weird and unmatched happened here")
         self.assertIsNone(c)

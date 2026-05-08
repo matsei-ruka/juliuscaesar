@@ -1,4 +1,4 @@
-"""Tests for the email dispatcher: routing logic + pending drain."""
+"""Tests for the email dispatcher: routing logic + legacy pending drain."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class TestDispatchAllowed(unittest.TestCase):
                 _make_msg("101", "filippo@scovai.com", "trusted"),
             ]
             result = email_dispatcher.dispatch_messages(
-                instance_dir=instance, messages=messages, cfg={"notify_on_unknown": False}
+                instance_dir=instance, messages=messages
             )
             self.assertEqual(result.dispatched, 2)
             self.assertEqual(result.pending, 0)
@@ -89,14 +89,16 @@ class TestDispatchAllowed(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            result = email_dispatcher.dispatch_messages(
-                instance_dir=instance,
-                messages=[_make_msg("2", "client@example.com", "external")],
-                enqueue=fake_enqueue,
-            )
+            with patch.object(email_dispatcher, "_send_telegram_notify") as notify:
+                result = email_dispatcher.dispatch_messages(
+                    instance_dir=instance,
+                    messages=[_make_msg("2", "client@example.com", "external")],
+                    enqueue=fake_enqueue,
+                )
         self.assertEqual(result.dispatched, 1)
         self.assertEqual(result.handled_uids, ["2"])
         self.assertEqual(captured[0]["meta"]["sender_tier"], "external")
+        notify.assert_called_once()
 
 
 class TestDispatchBlocked(unittest.TestCase):
@@ -117,72 +119,109 @@ class TestDispatchBlocked(unittest.TestCase):
 
 
 class TestDispatchUnknown(unittest.TestCase):
-    def test_unknown_persists_pending_and_notifies(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            with patch.object(
-                email_dispatcher, "_send_telegram_notify", return_value="42"
-            ) as notify:
-                result = email_dispatcher.dispatch_messages(
-                    instance_dir=instance,
-                    messages=[_make_msg("300", "newguy@corp.com", "unknown")],
-                    cfg={"notify_on_unknown": True, "telegram_chat_id": "999"},
-                )
-            self.assertEqual(result.pending, 1)
-            notify.assert_called_once()
-            args, kwargs = notify.call_args
-            self.assertEqual(kwargs.get("chat_id_override"), "999")
-            self.assertIn("newguy@corp.com", args[1])
+    def test_legacy_unknown_dispatches_as_external_and_notifies_operator(self):
+        captured = []
 
-            pdir = email_dispatcher.pending_dir(instance) / email_dispatcher._sender_key(
-                "newguy@corp.com"
-            )
-            self.assertTrue(pdir.is_dir())
-            files = list(pdir.glob("*.json"))
-            self.assertEqual(len(files), 1)
-            saved = json.loads(files[0].read_text())
-            self.assertEqual(saved["sender"], "newguy@corp.com")
+        def fake_enqueue(**kwargs):
+            captured.append(kwargs)
 
-    def test_unknown_skips_notification_when_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             with patch.object(email_dispatcher, "_send_telegram_notify") as notify:
-                email_dispatcher.dispatch_messages(
+                result = email_dispatcher.dispatch_messages(
                     instance_dir=instance,
-                    messages=[_make_msg("301", "newguy@corp.com", "unknown")],
-                    cfg={"notify_on_unknown": False},
+                    messages=[_make_msg("300", "newguy@corp.com", "unknown")],
+                    enqueue=fake_enqueue,
+                    cfg={"approvals": {"telegram_chat_id": "999"}},
                 )
-            notify.assert_not_called()
+            self.assertEqual(result.dispatched, 1)
+            self.assertEqual(result.pending, 0)
+            self.assertEqual(result.handled_uids, ["300"])
+            notify.assert_called_once()
+            self.assertIn("External email received", notify.call_args.args[1])
+            self.assertEqual(notify.call_args.kwargs["chat_id_override"], "999")
+            self.assertEqual(captured[0]["meta"]["sender_tier"], "external")
+            self.assertFalse(email_dispatcher.pending_dir(instance).exists())
 
-    def test_unknown_sender_uses_safe_path_key(self):
+    def test_external_notification_can_be_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
+            with patch.object(email_dispatcher, "_send_telegram_notify") as notify:
+                result = email_dispatcher.dispatch_messages(
+                    instance_dir=instance,
+                    messages=[_make_msg("301", "newguy@corp.com", "external")],
+                    cfg={"approvals": {"notify_on_external": False}},
+                )
+            self.assertEqual(result.dispatched, 1)
+            notify.assert_not_called()
+
+    def test_unknown_sender_does_not_write_sender_policy_or_pending_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "ops").mkdir(parents=True)
+            cfg_path = instance / "ops" / "gateway.yaml"
+            cfg_path.write_text(
+                "channels:\n  email:\n    senders:\n      trusted: []\n      external: []\n",
+                encoding="utf-8",
+            )
             sender = 'weird/name+tag"@corp.com'
             email_dispatcher.dispatch_messages(
                 instance_dir=instance,
                 messages=[_make_msg("302", sender, "unknown")],
-                cfg={"notify_on_unknown": False},
+                cfg={"approvals": {"notify_on_external": False}},
             )
-            raw_path = email_dispatcher.pending_dir(instance) / sender
-            safe_path = email_dispatcher.pending_dir(instance) / email_dispatcher._sender_key(
-                sender
+            self.assertFalse(email_dispatcher.pending_dir(instance).exists())
+            self.assertEqual(
+                cfg_path.read_text(encoding="utf-8"),
+                "channels:\n  email:\n    senders:\n      trusted: []\n      external: []\n",
             )
-            self.assertFalse(raw_path.exists())
-            self.assertTrue(safe_path.is_dir())
+
+    def test_invalid_sender_is_rejected_without_enqueue(self):
+        captured = []
+
+        def fake_enqueue(**kwargs):
+            captured.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            result = email_dispatcher.dispatch_messages(
+                instance_dir=instance,
+                messages=[_make_msg("303", "", "external")],
+                enqueue=fake_enqueue,
+            )
+            self.assertEqual(result.dispatched, 0)
+            self.assertEqual(result.blocked, 1)
+            self.assertEqual(result.handled_uids, ["303"])
+            self.assertEqual(captured, [])
+
+    def test_invalid_status_is_rejected_without_enqueue(self):
+        captured = []
+
+        def fake_enqueue(**kwargs):
+            captured.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            result = email_dispatcher.dispatch_messages(
+                instance_dir=instance,
+                messages=[_make_msg("304", "client@example.com", "denied")],
+                enqueue=fake_enqueue,
+            )
+            self.assertEqual(result.dispatched, 0)
+            self.assertEqual(result.blocked, 1)
+            self.assertEqual(result.handled_uids, ["304"])
+            self.assertEqual(captured, [])
 
 
 class TestDrainPending(unittest.TestCase):
+    def _seed_pending(self, instance: Path, sender: str, *uids: str) -> None:
+        for uid in uids:
+            email_dispatcher._write_pending(instance, _make_msg(uid, sender, "unknown"))
+
     def test_drain_approve_enqueues_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            email_dispatcher.dispatch_messages(
-                instance_dir=instance,
-                messages=[
-                    _make_msg("400", "alice@x.com", "unknown"),
-                    _make_msg("401", "alice@x.com", "unknown"),
-                ],
-                cfg={"notify_on_unknown": False},
-            )
+            self._seed_pending(instance, "alice@x.com", "400", "401")
             count = email_dispatcher.drain_pending(instance, "alice@x.com", action="approve")
             self.assertEqual(count, 2)
 
@@ -201,11 +240,7 @@ class TestDrainPending(unittest.TestCase):
     def test_drain_deny_drops_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            email_dispatcher.dispatch_messages(
-                instance_dir=instance,
-                messages=[_make_msg("500", "bad@x.com", "unknown")],
-                cfg={"notify_on_unknown": False},
-            )
+            self._seed_pending(instance, "bad@x.com", "500")
             count = email_dispatcher.drain_pending(instance, "bad@x.com", action="deny")
             self.assertEqual(count, 1)
             conn = queue_module.connect(instance)

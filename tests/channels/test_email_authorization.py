@@ -33,7 +33,9 @@ channels:
         assert auth.check("client@example.com") == "external"
         assert auth.check("blocked@example.com") == "blocked"
         assert auth.check("both@example.com") == "blocked"
-        assert auth.check("new@example.com") == "unknown"
+        assert auth.check("new@example.com") == "external"
+        assert auth.check("") == "blocked"
+        assert auth.check("not-an-email") == "blocked"
 
 
 def test_legacy_allowed_is_treated_as_trusted() -> None:
@@ -49,3 +51,22 @@ channels:
         )
         auth = SenderAuthorizer(cfg, check_interval=0)
         assert auth.check("legacy@example.com") == "trusted"
+
+
+def test_sender_lists_are_trimmed_and_invalid_updates_are_ignored() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        instance = Path(tmp)
+        cfg = _write_config(
+            instance,
+            """
+channels:
+  email:
+    senders:
+      trusted: [" trusted@example.com "]
+      external: ["", "not-an-email"]
+      blocklist: []
+""",
+        )
+        auth = SenderAuthorizer(cfg, check_interval=0)
+        assert auth.check("trusted@example.com") == "trusted"
+        assert auth.check("not-an-email") == "blocked"

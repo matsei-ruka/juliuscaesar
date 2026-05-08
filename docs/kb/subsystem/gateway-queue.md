@@ -9,7 +9,7 @@ code_anchors:
     symbol: "def claim_next("
   - path: lib/gateway/runtime.py
     symbol: "class GatewayRuntime:"
-last_verified: 2026-05-07
+last_verified: 2026-05-08
 verified_by: Matsei Ruka
 related:
   - subsystem/installation-and-cli-routing.md
@@ -32,6 +32,9 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
   JSONL lifecycle events.
 - `lib/gateway/channels/email_policy.py`: canonical email sender policy reader
   and writer for `channels.email.senders`.
+- Email sender policy keeps the three durable tiers `trusted`, `external`, and
+  `blocklist`. Missing senders behave as runtime `external` without being
+  auto-written to YAML; legacy pending inbound state remains drainable.
 - `lib/gateway/brain.py` + `lib/gateway/brains/<name>.py`: per-brain Python wrappers; legacy `brain.py` is the fallback path for brains without a wrapper.
 - `lib/gateway/router.py`: per-event brain selection (default → cron-pinned → triage → sticky → override).
 - `lib/gateway/triage/`: pluggable triage backends — `api_classifier`,

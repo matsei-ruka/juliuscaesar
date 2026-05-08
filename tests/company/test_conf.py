@@ -177,6 +177,24 @@ class GatewayYamlValidatorTests(unittest.TestCase):
         }
         _validate_raw_config(data)
 
+    def test_email_approval_fields_pass(self):
+        from gateway.config import _validate_raw_config
+
+        data = {
+            "channels": {
+                "email": {
+                    "enabled": True,
+                    "senders": {"trusted": [], "external": [], "blocklist": []},
+                    "approvals": {
+                        "notify_on_external": True,
+                        "notify_on_draft": True,
+                        "telegram_chat_id": None,
+                    },
+                }
+            }
+        }
+        _validate_raw_config(data)
+
 
 if __name__ == "__main__":
     unittest.main()

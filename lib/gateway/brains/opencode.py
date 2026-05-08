@@ -8,6 +8,24 @@ import subprocess
 from .base import Brain, parse_iso
 
 
+def _parse_opencode_time(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        # Current OpenCode emits Unix epoch milliseconds in `created`/`updated`.
+        return float(value) / 1000
+    if isinstance(value, str):
+        return parse_iso(value)
+    return None
+
+
+def _opencode_session_time(session: dict) -> float | None:
+    values = [
+        _parse_opencode_time(session.get(key))
+        for key in ("created_at", "started_at", "start", "created", "updated")
+    ]
+    values = [value for value in values if value is not None]
+    return max(values) if values else None
+
+
 class OpencodeBrain(Brain):
     name = "opencode"
 
@@ -21,6 +39,7 @@ class OpencodeBrain(Brain):
                 capture_output=True,
                 text=True,
                 timeout=5,
+                cwd=str(self.instance_dir),
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return None
@@ -36,10 +55,10 @@ class OpencodeBrain(Brain):
         for session in sessions:
             if not isinstance(session, dict):
                 continue
-            ts = session.get("created_at") or session.get("started_at") or session.get("start")
-            if not isinstance(ts, str):
+            directory = session.get("directory")
+            if isinstance(directory, str) and directory != str(self.instance_dir):
                 continue
-            st = parse_iso(ts)
+            st = _opencode_session_time(session)
             if st is None or st < t0:
                 continue
             delta = st - t0

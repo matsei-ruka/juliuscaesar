@@ -50,7 +50,7 @@ Session capture is best-effort and brain-specific:
 - Claude scans `~/.claude/projects/<instance-slug>/*.jsonl`.
 - Gemini parses `gemini --list-sessions`.
 - Codex scans `~/.codex` session stores.
-- OpenCode parses `opencode session list --format json`.
+- OpenCode parses `opencode session list --format json` from the instance cwd, filters sessions to the instance directory, and accepts current numeric millisecond `created` / `updated` timestamps for resume capture.
 
 ## Invariants
 
