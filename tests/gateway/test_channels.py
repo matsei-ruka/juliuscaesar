@@ -1076,6 +1076,176 @@ class TelegramSendParseModeTests(unittest.TestCase):
                 telegram_outbound.http_json = orig
 
 
+class TelegramReplyThreadingTests(unittest.TestCase):
+    """`reply_to_message_id` is set when the inbound `message_id` is in meta."""
+
+    def _make_channel(self, instance: Path):
+        cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+        channel = TelegramChannel(instance, cfg, _silent_log)
+        channel.token = "test-token"
+        return channel
+
+    def _patch_http(self, captured: list[dict[str, Any]], result_id: int = 4242):
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            captured.append({"url": url, "data": data})
+            return {"ok": True, "result": {"message_id": result_id}}
+
+        return fake_http_json
+
+    def test_send_text_sets_reply_to_when_message_id_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            captured: list[dict[str, Any]] = []
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = self._patch_http(captured)
+            try:
+                channel.send(
+                    "hi",
+                    {"chat_id": "28547271", "message_id": 1234},
+                )
+            finally:
+                telegram_outbound.http_json = orig
+        self.assertEqual(len(captured), 1)
+        payload = captured[0]["data"]
+        self.assertEqual(payload["reply_to_message_id"], 1234)
+        self.assertTrue(payload["allow_sending_without_reply"])
+
+    def test_send_text_omits_reply_to_when_message_id_absent(self):
+        # Proactive sends (cron, jc_event-originated) carry no inbound id.
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            captured: list[dict[str, Any]] = []
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = self._patch_http(captured)
+            try:
+                channel.send("hi", {"chat_id": "28547271"})
+            finally:
+                telegram_outbound.http_json = orig
+        payload = captured[0]["data"]
+        self.assertNotIn("reply_to_message_id", payload)
+        self.assertNotIn("allow_sending_without_reply", payload)
+
+    def test_send_text_fallback_carries_reply_to(self):
+        # Parse-error retry must thread the same way as the primary path.
+        original = "weird **stuff"
+        calls: list[dict[str, Any]] = []
+
+        def fake_http_json(url, *, data=None, timeout=15, **_):
+            calls.append(data)
+            if data.get("parse_mode") == "MarkdownV2":
+                return {
+                    "ok": False,
+                    "description": "Bad Request: can't parse entities",
+                }
+            return {"ok": True, "result": {"message_id": 5555}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            channel = self._make_channel(instance)
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = fake_http_json
+            try:
+                channel.send(
+                    original,
+                    {"chat_id": "28547271", "message_id": 9090},
+                )
+            finally:
+                telegram_outbound.http_json = orig
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["reply_to_message_id"], 9090)
+        self.assertTrue(calls[1]["allow_sending_without_reply"])
+        self.assertNotIn("parse_mode", calls[1])
+
+    def test_send_voice_multipart_includes_reply_to_when_message_id_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ogg = instance / "out.ogg"
+            ogg.write_bytes(b"OggS\x00\x00fakeopus")
+            channel = self._make_channel(instance)
+            captured: dict[str, Any] = {}
+
+            class FakeResp:
+                def __init__(self, payload: bytes):
+                    self._buf = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self, n=-1):
+                    if n is None or n < 0:
+                        out, self._buf = self._buf, b""
+                        return out
+                    out, self._buf = self._buf[:n], self._buf[n:]
+                    return out
+
+            def fake_urlopen(req, timeout=30):
+                captured["body"] = req.data
+                return FakeResp(
+                    json.dumps({"ok": True, "result": {"message_id": 7}}).encode("utf-8")
+                )
+
+            orig_urlopen = telegram_outbound.urllib.request.urlopen
+            telegram_outbound.urllib.request.urlopen = fake_urlopen
+            try:
+                channel.send_voice(
+                    str(ogg),
+                    {"chat_id": "28547271", "message_id": 4321},
+                )
+            finally:
+                telegram_outbound.urllib.request.urlopen = orig_urlopen
+            body = captured["body"]
+            self.assertIn(b'name="reply_to_message_id"', body)
+            self.assertIn(b"4321", body)
+            self.assertIn(b'name="allow_sending_without_reply"', body)
+            self.assertIn(b"true", body)
+
+    def test_send_voice_multipart_omits_reply_to_when_message_id_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ogg = instance / "out.ogg"
+            ogg.write_bytes(b"OggS\x00\x00fakeopus")
+            channel = self._make_channel(instance)
+            captured: dict[str, Any] = {}
+
+            class FakeResp:
+                def __init__(self, payload: bytes):
+                    self._buf = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self, n=-1):
+                    if n is None or n < 0:
+                        out, self._buf = self._buf, b""
+                        return out
+                    out, self._buf = self._buf[:n], self._buf[n:]
+                    return out
+
+            def fake_urlopen(req, timeout=30):
+                captured["body"] = req.data
+                return FakeResp(
+                    json.dumps({"ok": True, "result": {"message_id": 8}}).encode("utf-8")
+                )
+
+            orig_urlopen = telegram_outbound.urllib.request.urlopen
+            telegram_outbound.urllib.request.urlopen = fake_urlopen
+            try:
+                channel.send_voice(str(ogg), {"chat_id": "28547271"})
+            finally:
+                telegram_outbound.urllib.request.urlopen = orig_urlopen
+            body = captured["body"]
+            self.assertNotIn(b'name="reply_to_message_id"', body)
+            self.assertNotIn(b'name="allow_sending_without_reply"', body)
+
+
 class ConfigWebRejectionTests(unittest.TestCase):
     def test_web_channel_rejected_with_helpful_error(self):
         with tempfile.TemporaryDirectory() as tmp:

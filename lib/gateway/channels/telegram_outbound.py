@@ -58,6 +58,11 @@ def send_text(
     }
     if meta.get("message_thread_id"):
         payload["message_thread_id"] = meta["message_thread_id"]
+    if meta.get("message_id"):
+        # Native reply threading. `allow_sending_without_reply` keeps the send
+        # working if the original was deleted between ingest and response.
+        payload["reply_to_message_id"] = meta["message_id"]
+        payload["allow_sending_without_reply"] = True
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         data = http_json(url, data=payload, timeout=15)
@@ -88,6 +93,9 @@ def send_text(
         }
         if meta.get("message_thread_id"):
             fallback["message_thread_id"] = meta["message_thread_id"]
+        if meta.get("message_id"):
+            fallback["reply_to_message_id"] = meta["message_id"]
+            fallback["allow_sending_without_reply"] = True
         data = http_json(url, data=fallback, timeout=15)
     if not data.get("ok"):
         raise RuntimeError(f"telegram send failed: {data}")
@@ -120,6 +128,9 @@ def send_voice(
     fields: list[tuple[str, str]] = [("chat_id", chat_id)]
     if meta.get("message_thread_id"):
         fields.append(("message_thread_id", str(meta["message_thread_id"])))
+    if meta.get("message_id"):
+        fields.append(("reply_to_message_id", str(meta["message_id"])))
+        fields.append(("allow_sending_without_reply", "true"))
     files: list[tuple[str, str, bytes, str]] = [
         ("voice", path.name, path.read_bytes(), "audio/ogg"),
     ]
