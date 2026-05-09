@@ -23,7 +23,7 @@ from typing import Callable, Iterable
 from .. import chats as chats_module
 from .. import transcripts as transcripts_module
 from ..config import BrainOverrideConfig, GatewayConfig, load_config_cached
-from ..context import render_clock, render_clock_inline, render_preamble
+from ..context import render_clock, render_preamble, render_voice_anchor
 from ..queue import Event
 
 
@@ -183,7 +183,11 @@ Your reply is only the text the user reads.
         clock so the LLM still sees fresh "now" each turn without
         invalidating CLAUDE.md cache.
         """
-        return event.content
+        anchor = render_voice_anchor(self.instance_dir)
+        body = event.content or ""
+        if anchor:
+            return f"[Voice: {anchor}]\n{body}" if body else f"[Voice: {anchor}]"
+        return body
 
     def _render_known_chats_section(self, limit: int = 20) -> str:
         """Build the `## Known Telegram chats` block from the chats table.

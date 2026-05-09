@@ -14,6 +14,7 @@ across the L1 directory, so we do not re-read on every event.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,8 +25,10 @@ from zoneinfo import ZoneInfo
 _CACHE: dict[Path, "_CachedPreamble"] = {}
 _CACHE_LOCK = threading.Lock()
 
-L1_FILES = ("IDENTITY.md", "USER.md", "RULES.md", "HOT.md", "CHATS.md")
+L1_FILES = ("IDENTITY.md", "STYLE.md", "USER.md", "RULES.md", "HOT.md", "CHATS.md")
 MAX_BYTES_PER_FILE = 8000
+_VOICE_ANCHOR_LINE_RE = re.compile(r"^>\s*(.+)$", re.MULTILINE)
+_SECTION_RE_TEMPLATE = r"^#{{1,6}}\s+{heading}\s*$"
 
 
 _ROLE_PREAMBLE = (
@@ -96,6 +99,65 @@ def _fingerprint(l1_dir: Path) -> float:
     return latest
 
 
+def _style_path(instance_dir: Path) -> Path:
+    return _l1_dir(instance_dir) / "STYLE.md"
+
+
+def _extract_section(text: str, heading: str) -> str:
+    pattern = re.compile(
+        _SECTION_RE_TEMPLATE.format(heading=re.escape(heading)),
+        re.MULTILINE | re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return ""
+    start = match.end()
+    next_heading = re.search(r"^#{1,6}\s+", text[start:], re.MULTILINE)
+    end = start + next_heading.start() if next_heading else len(text)
+    return text[start:end].strip()
+
+
+def render_voice_anchor(instance_dir: Path) -> str:
+    """Return STYLE.md's one-line voice anchor, or "" when unavailable."""
+
+    path = _style_path(instance_dir)
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    section = _extract_section(text, "Voice anchor")
+    if not section:
+        return ""
+    matches = _VOICE_ANCHOR_LINE_RE.findall(section)
+    if not matches:
+        return ""
+    anchor = matches[-1].strip()
+    return anchor if len(anchor) <= 300 else ""
+
+
+def caveman_enabled(instance_dir: Path) -> bool:
+    """STYLE.md controls whether framework caveman guidance is injected.
+
+    Missing STYLE.md or missing flag keeps caveman off. It is opt-in.
+    """
+
+    path = _style_path(instance_dir)
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    section = _extract_section(text, "Caveman")
+    search_text = section or text
+    match = re.search(r"^caveman:\s*(\w+)", search_text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return False
+    return match.group(1).lower() == "enabled"
+
+
 def render_preamble(instance_dir: Path) -> str:
     """Return concatenated L1 memory + L2/framework/caveman guidance."""
 
@@ -117,16 +179,16 @@ def render_preamble(instance_dir: Path) -> str:
             continue
         sections.append(f"## {name}\n{body[:MAX_BYTES_PER_FILE]}")
     memory_block = "\n\n".join(sections) if sections else "(No L1 memory files found.)"
-    text = "\n\n".join(
-        [
-            _ROLE_PREAMBLE,
-            "# Instance memory",
-            memory_block,
-            _L2_GUIDANCE,
-            _FRAMEWORK_HINTS,
-            _CAVEMAN,
-        ]
-    )
+    parts = [
+        _ROLE_PREAMBLE,
+        "# Instance memory",
+        memory_block,
+        _L2_GUIDANCE,
+        _FRAMEWORK_HINTS,
+    ]
+    if caveman_enabled(instance_dir):
+        parts.append(_CAVEMAN)
+    text = "\n\n".join(parts)
     with _CACHE_LOCK:
         _CACHE[instance_dir] = _CachedPreamble(text=text, fingerprint=fingerprint)
     return text

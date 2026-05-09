@@ -439,7 +439,10 @@ class GatewayRuntime:
             )
             if cached.is_unsafe():
                 self._log_unsafe_verdict(event, hint)
-            return hint, cached.is_unsafe() and hint is None
+                return hint, hint is None
+            if self.config.pin_to_default_brain:
+                return None, False
+            return hint, False
         try:
             result = backend.classify(event.content)
         except Exception as exc:  # noqa: BLE001
@@ -480,6 +483,8 @@ class GatewayRuntime:
         if result.is_unsafe():
             self._log_unsafe_verdict(event, hint)
             return hint, hint is None
+        if self.config.pin_to_default_brain:
+            return None, False
         return hint, False
 
     def _triage_unsafe_fallback_hint(self, result: TriageResult) -> router.TriageHint | None:
@@ -604,7 +609,11 @@ class GatewayRuntime:
             and triage.full_spec() == self.config.triage.unsafe_fallback_brain
         ):
             raise ValueError("openrouter brain is only supported for triage_unsafe_fallback_brain")
-        if meta.get("image_path") and not capabilities.supports_images(brain):
+        if (
+            meta.get("image_path")
+            and not self.config.pin_to_default_brain
+            and not capabilities.supports_images(brain)
+        ):
             vision_brain = self._select_vision_brain()
             if vision_brain and vision_brain != brain:
                 self.log(

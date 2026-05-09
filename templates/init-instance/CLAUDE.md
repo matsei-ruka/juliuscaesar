@@ -10,6 +10,7 @@ with concrete first-run context. If this instance was created with low-level
 `jc init`, edit those files before starting the live assistant.
 
 @memory/L1/IDENTITY.md
+@memory/L1/STYLE.md
 @memory/L1/USER.md
 @memory/L1/RULES.md
 @memory/L1/HOT.md
@@ -62,7 +63,12 @@ jc workers list
 jc watchdog status
 ```
 
-## Token efficiency (caveman mode)
+## Token efficiency
+
+`memory/L1/STYLE.md` is authoritative for caveman mode. If it says
+`caveman: disabled`, do not use caveman compression. If it says
+`caveman: enabled`, use the rules below. If it omits the flag, keep
+caveman off.
 
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
 

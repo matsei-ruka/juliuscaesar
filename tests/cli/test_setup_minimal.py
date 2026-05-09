@@ -128,6 +128,16 @@ def test_setup_preships_web_skills(fresh_instance: Path) -> None:
         assert f"name: {name}" in skill.read_text(encoding="utf-8")
 
 
+def test_setup_preships_style_file(fresh_instance: Path) -> None:
+    style = fresh_instance / "memory" / "L1" / "STYLE.md"
+
+    assert style.exists()
+    text = style.read_text(encoding="utf-8")
+    assert "# Voice anchor" in text
+    assert "## Anti-mirror" in text
+    assert "caveman: disabled" in text
+
+
 def test_setup_no_mission_prompt(tmp_path: Path) -> None:
     target = tmp_path / "instance"
     # Plenty of empty newlines to satisfy any remaining prompts; --no-start /

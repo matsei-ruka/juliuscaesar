@@ -556,6 +556,7 @@ cat > "$candidate_gateway" <<YAML
 # JuliusCaesar gateway runtime config. Secrets live in .env.
 default_brain: $default_brain
 default_model: null
+pin_to_default_brain: false
 # IANA name (e.g. Asia/Dubai). Used for time injection into brain prompts and heartbeat templates.
 timezone: $operating_tz
 gateway:

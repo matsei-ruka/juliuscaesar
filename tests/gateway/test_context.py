@@ -4,7 +4,7 @@ Covers docs/specs/codex-main-brain-hardening.md §Phase 2 acceptance:
 
 - Preamble includes CHATS.md when present.
 - Preamble includes L2 memory command guidance.
-- Preamble includes token-efficiency / caveman instructions.
+- Preamble includes token-efficiency / caveman instructions only when STYLE opts in.
 - Updating any L1 file (including CHATS.md) invalidates the cache.
 - Render is resilient when CHATS.md (or any L1 file) is missing.
 """
@@ -59,9 +59,22 @@ class PreambleContentTests(unittest.TestCase):
             self.assertIn("jc memory read", text)
             self.assertIn("jc transcripts", text)
 
-    def test_preamble_includes_caveman_instructions(self):
+    def test_preamble_omits_caveman_instructions_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            text = context.render_preamble(instance)
+            self.assertNotIn("caveman", text.lower())
+            self.assertNotIn("/caveman", text)
+
+    def test_preamble_includes_caveman_instructions_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(
+                tmp,
+                {
+                    "IDENTITY.md": "id",
+                    "STYLE.md": "# Voice anchor\n\n> voice\n\n## Caveman\n\ncaveman: enabled\n",
+                },
+            )
             text = context.render_preamble(instance)
             self.assertIn("caveman", text.lower())
             self.assertIn("/caveman", text)

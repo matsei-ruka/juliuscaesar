@@ -99,6 +99,13 @@ def route(
             )
             return BrainSelection(brain=brain, model=model, reason="cron_pinned")
 
+    if cfg.pin_to_default_brain:
+        return BrainSelection(
+            brain=cfg.default_brain,
+            model=cfg.default_model,
+            reason="default_pinned",
+        )
+
     if sticky is not None and sticky.brain:
         return BrainSelection(brain=sticky.brain, model=sticky.model, reason="sticky")
 
