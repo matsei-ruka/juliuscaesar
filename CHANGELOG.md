@@ -3,6 +3,26 @@
 All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 (`YYYY.MM.DD`). Newest first.
 
+## 2026.05.09.01
+
+Release bundle for the pending gateway and operator-config PRs.
+
+- `jc-upgrade` now rewrites `ops/gateway.yaml` through a non-destructive merge:
+  prompted framework-owned fields are updated, while operator-owned blocks such
+  as `reply_footer`, `reliability`, `brains`, email config, blocked chat IDs,
+  explicit disabled channels, nested triage config, and `default_model` survive.
+- Unsafe triage verdicts can now route through `triage_unsafe_fallback_brain`
+  instead of silently dropping the message. The new OpenRouter brain is limited
+  to that unsafe-fallback path and is rejected for normal overrides/defaults.
+- Persona tone anchoring adds `memory/L1/STYLE.md`, loads it after IDENTITY,
+  injects the `[Voice: ...]` anchor every turn, and lets instances opt into
+  `pin_to_default_brain` when triage model swaps would damage tone.
+- Caveman mode is now off by default. `STYLE.md` ships with
+  `caveman: disabled`; only an explicit `caveman: enabled` injects caveman
+  compression guidance.
+- Integrated safety fix: `pin_to_default_brain` suppresses normal model swaps
+  and vision auto-routing, but it does not suppress the unsafe fallback brain.
+
 ## 2026.05.08.01
 
 Patch release for email sender-policy ergonomics.
