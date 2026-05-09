@@ -133,6 +133,91 @@ channels:
     assert backups, "upgrade should leave a rollback backup"
 
 
+def test_upgrade_defaults_preserve_default_model_and_disabled_telegram(tmp_path: Path) -> None:
+    instance = _write_instance(
+        tmp_path,
+        """
+default_brain: claude
+default_model: sonnet-4-6
+timezone: Asia/Dubai
+triage: none
+channels:
+  telegram:
+    enabled: false
+    token_env: TELEGRAM_BOT_TOKEN
+    chat_ids: ["111"]
+""".lstrip(),
+    )
+
+    result = _run_upgrade(instance)
+    assert result.returncode == 0, result.stderr
+
+    data = yaml.safe_load((instance / "ops" / "gateway.yaml").read_text(encoding="utf-8"))
+
+    assert data["default_brain"] == "claude"
+    assert data["default_model"] == "sonnet-4-6"
+    assert data["channels"]["telegram"]["enabled"] is False
+
+
+def test_upgrade_clears_default_model_when_default_brain_embeds_model(tmp_path: Path) -> None:
+    instance = _write_instance(
+        tmp_path,
+        """
+default_brain: claude:sonnet-4-6
+default_model: haiku-4-5
+timezone: Asia/Dubai
+triage: none
+channels:
+  telegram:
+    enabled: false
+""".lstrip(),
+    )
+
+    result = _run_upgrade(instance)
+    assert result.returncode == 0, result.stderr
+
+    data = yaml.safe_load((instance / "ops" / "gateway.yaml").read_text(encoding="utf-8"))
+
+    assert data["default_brain"] == "claude:sonnet-4-6"
+    assert data["default_model"] is None
+
+
+def test_upgrade_defaults_preserve_nested_triage_config(tmp_path: Path) -> None:
+    instance = _write_instance(
+        tmp_path,
+        """
+default_brain: claude
+timezone: Asia/Dubai
+triage:
+  backend: api_classifier
+  protocol: openai_compat
+  base_url: https://router.example.test/v1
+  api_key_env: ROUTER_API_KEY
+  model: x-ai/grok-4.1-fast
+  timeout_seconds: 11
+  routing:
+    smalltalk: opencode:deepseek/deepseek-v4-flash
+    quick: opencode:deepseek/deepseek-v4-flash
+    analysis: opencode:deepseek/deepseek-v4-pro
+channels:
+  telegram:
+    enabled: false
+""".lstrip(),
+    )
+
+    result = _run_upgrade(instance)
+    assert result.returncode == 0, result.stderr
+
+    data = yaml.safe_load((instance / "ops" / "gateway.yaml").read_text(encoding="utf-8"))
+
+    assert data["triage"]["backend"] == "api_classifier"
+    assert data["triage"]["base_url"] == "https://router.example.test/v1"
+    assert data["triage"]["model"] == "x-ai/grok-4.1-fast"
+    assert data["triage"]["routing"]["quick"] == "opencode:deepseek/deepseek-v4-flash"
+    assert "triage_routing" not in data
+    assert "openrouter_model" not in data
+
+
 def test_upgrade_validation_failure_leaves_gateway_yaml_unchanged(tmp_path: Path) -> None:
     original = """
 default_brain: definitely-not-a-brain

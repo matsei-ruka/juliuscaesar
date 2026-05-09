@@ -260,7 +260,6 @@ import yaml
 
 OWNED_TOP = {
     "default_brain",
-    "default_model",
     "timezone",
     "triage",
     "triage_confidence_threshold",
@@ -295,6 +294,8 @@ def deep_merge_channel(existing_child, computed_child, *, preserve_chat_ids: boo
         return copy.deepcopy(existing_child)
     merged = copy.deepcopy(existing_child)
     for key, value in computed_child.items():
+        if key == "enabled" and existing_child.get("enabled") is False:
+            continue
         if key == "chat_ids" and existing_child.get("chat_ids"):
             lossy_existing_list = (
                 isinstance(value, list)
@@ -310,9 +311,36 @@ def deep_merge_channel(existing_child, computed_child, *, preserve_chat_ids: boo
 def merge(existing: dict, computed: dict, *, use_defaults: bool) -> dict:
     merged = copy.deepcopy(existing)
 
+    if use_defaults and isinstance(existing.get("triage"), dict):
+        computed = copy.deepcopy(computed)
+        for key in {
+            "triage",
+            "triage_confidence_threshold",
+            "default_fallback_brain",
+            "sticky_brain_idle_timeout_seconds",
+            "triage_routing",
+            "openrouter_model",
+            "openrouter_api_key_env",
+            "openrouter_timeout_seconds",
+            "ollama_model",
+            "ollama_host",
+            "ollama_timeout_seconds",
+            "claude_triage_port",
+            "claude_triage_screen",
+            "claude_triage_model",
+        }:
+            computed.pop(key, None)
+
     for key in OWNED_TOP:
         if key in computed:
             merged[key] = copy.deepcopy(computed[key])
+
+    if "default_model" in computed:
+        computed_default_brain = computed.get("default_brain")
+        if isinstance(computed_default_brain, str) and ":" in computed_default_brain:
+            merged["default_model"] = copy.deepcopy(computed["default_model"])
+        elif "default_model" not in merged:
+            merged["default_model"] = copy.deepcopy(computed["default_model"])
 
     if "gateway" not in merged and "gateway" in computed:
         merged["gateway"] = copy.deepcopy(computed["gateway"])
