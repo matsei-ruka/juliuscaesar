@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..context import render_clock_inline
+from ..context import render_clock_inline, render_voice_anchor
 from ..queue import Event
 from .base import Brain, newest_jsonl_stem, parse_iso
 
@@ -32,5 +32,11 @@ class ClaudeBrain(Brain):
         # user message with a single-line clock so each turn sees fresh
         # "now" without polluting the cached CLAUDE.md view.
         clock_line = render_clock_inline(self._timezone())
+        anchor = render_voice_anchor(self.instance_dir)
         body = event.content or ""
-        return f"{clock_line}\n{body}" if body else clock_line
+        parts = [clock_line]
+        if anchor:
+            parts.append(f"[Voice: {anchor}]")
+        if body:
+            parts.append(body)
+        return "\n".join(parts)

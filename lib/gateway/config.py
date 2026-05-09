@@ -124,6 +124,7 @@ class CodexAuthConfig:
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
+    pin_to_default_brain: bool = False
     poll_interval_seconds: float = 1.0
     lease_seconds: int = 300
     max_retries: int = 3
@@ -425,6 +426,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
     allowed_top = {
         "default_brain",
         "default_model",
+        "pin_to_default_brain",
         "gateway",
         "timezone",
         "triage",
@@ -474,6 +476,10 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             )
     if data.get("default_fallback_brain") is not None:
         _validate_brain_spec(errors, "default_fallback_brain", data["default_fallback_brain"])
+    if data.get("pin_to_default_brain") is not None and not isinstance(
+        data["pin_to_default_brain"], bool
+    ):
+        errors.append("pin_to_default_brain: must be boolean")
 
     timezone_raw = data.get("timezone")
     if timezone_raw is not None:
@@ -1092,6 +1098,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
     return GatewayConfig(
         default_brain=default_brain,
         default_model=default_model,
+        pin_to_default_brain=bool(data.get("pin_to_default_brain", False)),
         poll_interval_seconds=float(gateway.get("poll_interval_seconds") or DEFAULT_CONFIG.poll_interval_seconds),
         lease_seconds=int(gateway.get("lease_seconds") or DEFAULT_CONFIG.lease_seconds),
         max_retries=int(gateway.get("max_retries") or DEFAULT_CONFIG.max_retries),
@@ -1122,6 +1129,7 @@ def render_default_config(
     return f"""# JuliusCaesar gateway runtime config. Secrets live in .env.
 default_brain: {default_brain}
 default_model: null
+pin_to_default_brain: false
 # IANA name (e.g. Asia/Dubai). Used for time injection into brain prompts and heartbeat templates.
 timezone: {timezone}
 gateway:

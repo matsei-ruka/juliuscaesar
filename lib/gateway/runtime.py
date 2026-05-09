@@ -437,6 +437,8 @@ class GatewayRuntime:
                 event_id=event.id,
                 kind="triage",
             )
+            if self.config.pin_to_default_brain and not cached.is_unsafe():
+                return None, False
             return hint, cached.is_unsafe()
         try:
             result = backend.classify(event.content)
@@ -479,6 +481,8 @@ class GatewayRuntime:
                 kind="triage_unsafe",
             )
             return None, True
+        if self.config.pin_to_default_brain:
+            return None, False
         return hint, False
 
     def _triage_to_hint(self, result: TriageResult) -> router.TriageHint | None:
