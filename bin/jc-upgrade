@@ -86,6 +86,8 @@ if [[ -z "$INSTANCE_DIR" || ! -d "$INSTANCE_DIR" ]]; then
     exit 1
 fi
 INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ENV_FILE="$INSTANCE_DIR/.env"
 GATEWAY_YAML="$INSTANCE_DIR/ops/gateway.yaml"
@@ -236,6 +238,156 @@ bool_str() {
         yes|true|1|on) printf 'true' ;;
         *) printf 'false' ;;
     esac
+}
+
+merge_gateway_yaml() {
+    # merge_gateway_yaml <existing> <computed> <output> <instance_dir> <use_defaults>
+    #
+    # `computed` is the modern template generated from prompt answers. Existing
+    # operator-owned config survives unless this upgrade flow explicitly owns
+    # that field. The merged result is validated before the caller replaces
+    # gateway.yaml.
+    local existing="$1" computed="$2" output="$3" instance="$4" use_defaults="$5"
+    PYTHONPATH="$REPO_ROOT/lib:${PYTHONPATH:-}" "${PYTHON:-python3}" - "$existing" "$computed" "$output" "$instance" "$use_defaults" <<'PY'
+from __future__ import annotations
+
+import copy
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+OWNED_TOP = {
+    "default_brain",
+    "timezone",
+    "triage",
+    "triage_confidence_threshold",
+    "default_fallback_brain",
+    "sticky_brain_idle_timeout_seconds",
+    "triage_routing",
+    "openrouter_model",
+    "openrouter_api_key_env",
+    "openrouter_timeout_seconds",
+    "ollama_model",
+    "ollama_host",
+    "ollama_timeout_seconds",
+    "claude_triage_port",
+    "claude_triage_screen",
+    "claude_triage_model",
+}
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.exists() or path.stat().st_size == 0:
+        return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        raise SystemExit(f"gateway yaml must be a mapping: {path}")
+    return loaded
+
+
+def deep_merge_channel(existing_child, computed_child, *, preserve_chat_ids: bool) -> dict:
+    if not isinstance(existing_child, dict):
+        existing_child = {}
+    if not isinstance(computed_child, dict):
+        return copy.deepcopy(existing_child)
+    merged = copy.deepcopy(existing_child)
+    for key, value in computed_child.items():
+        if key == "enabled" and existing_child.get("enabled") is False:
+            continue
+        if key == "chat_ids" and existing_child.get("chat_ids"):
+            lossy_existing_list = (
+                isinstance(value, list)
+                and len(value) == 1
+                and any(marker in str(value[0]) for marker in ('"', ","))
+            )
+            if preserve_chat_ids or lossy_existing_list:
+                continue
+        merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def merge(existing: dict, computed: dict, *, use_defaults: bool) -> dict:
+    merged = copy.deepcopy(existing)
+
+    if use_defaults and isinstance(existing.get("triage"), dict):
+        computed = copy.deepcopy(computed)
+        for key in {
+            "triage",
+            "triage_confidence_threshold",
+            "default_fallback_brain",
+            "sticky_brain_idle_timeout_seconds",
+            "triage_routing",
+            "openrouter_model",
+            "openrouter_api_key_env",
+            "openrouter_timeout_seconds",
+            "ollama_model",
+            "ollama_host",
+            "ollama_timeout_seconds",
+            "claude_triage_port",
+            "claude_triage_screen",
+            "claude_triage_model",
+        }:
+            computed.pop(key, None)
+
+    for key in OWNED_TOP:
+        if key in computed:
+            merged[key] = copy.deepcopy(computed[key])
+
+    if "default_model" in computed:
+        computed_default_brain = computed.get("default_brain")
+        if isinstance(computed_default_brain, str) and ":" in computed_default_brain:
+            merged["default_model"] = copy.deepcopy(computed["default_model"])
+        elif "default_model" not in merged:
+            merged["default_model"] = copy.deepcopy(computed["default_model"])
+
+    if "gateway" not in merged and "gateway" in computed:
+        merged["gateway"] = copy.deepcopy(computed["gateway"])
+
+    computed_channels = computed.get("channels")
+    if isinstance(computed_channels, dict):
+        existing_channels = merged.get("channels")
+        if not isinstance(existing_channels, dict):
+            existing_channels = {}
+        merged_channels = copy.deepcopy(existing_channels)
+        for name, payload in computed_channels.items():
+            merged_channels[name] = deep_merge_channel(
+                existing_channels.get(name),
+                payload,
+                preserve_chat_ids=use_defaults and name == "telegram",
+            )
+        merged["channels"] = merged_channels
+
+    return merged
+
+
+existing_path = Path(sys.argv[1])
+computed_path = Path(sys.argv[2])
+output_path = Path(sys.argv[3])
+instance_dir = Path(sys.argv[4])
+use_defaults = sys.argv[5] == "1"
+
+existing = load_yaml(existing_path)
+computed = load_yaml(computed_path)
+merged = merge(existing, computed, use_defaults=use_defaults)
+
+rendered = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+
+with tempfile.TemporaryDirectory(prefix="jc-upgrade-validate-") as tmp:
+    tmp_instance = Path(tmp)
+    tmp_gateway = tmp_instance / "ops" / "gateway.yaml"
+    tmp_gateway.parent.mkdir(parents=True, exist_ok=True)
+    tmp_gateway.write_text(rendered, encoding="utf-8")
+    try:
+        from gateway.config import load_config
+
+        load_config(tmp_instance)
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"merged gateway.yaml failed validation: {exc}") from exc
+
+output_path.write_text(rendered, encoding="utf-8")
+PY
 }
 
 # --- intro -----------------------------------------------------------------
@@ -389,16 +541,18 @@ slack_enabled_str="$(bool_str "$slack_enable")"
 discord_enabled_str="$(bool_str "$discord_enable")"
 voice_enabled_str="$(bool_str "$voice_enable")"
 
-# Backup existing gateway.yaml.
-if [[ -f "$GATEWAY_YAML" ]]; then
-    cp "$GATEWAY_YAML" "$GATEWAY_YAML.bak.$(date +%Y%m%d-%H%M%S)"
-fi
-
 # Telegram chat_ids list — single value when present.
 telegram_chats="[]"
-[[ -n "$telegram_chat" ]] && telegram_chats="[$telegram_chat]"
+if [[ -n "$telegram_chat" ]]; then
+    telegram_chat_yaml="${telegram_chat//\\/\\\\}"
+    telegram_chat_yaml="${telegram_chat_yaml//\"/\\\"}"
+    telegram_chats="[\"$telegram_chat_yaml\"]"
+fi
 
-cat > "$GATEWAY_YAML" <<YAML
+candidate_gateway="$(mktemp "$INSTANCE_DIR/ops/gateway.candidate.XXXXXX")"
+merged_gateway="$(mktemp "$INSTANCE_DIR/ops/gateway.merged.XXXXXX")"
+
+cat > "$candidate_gateway" <<YAML
 # JuliusCaesar gateway runtime config. Secrets live in .env.
 default_brain: $default_brain
 default_model: null
@@ -424,26 +578,26 @@ triage_routing:
 YAML
 
 if [[ "$triage_backend" == "openrouter" ]]; then
-    cat >> "$GATEWAY_YAML" <<YAML
+    cat >> "$candidate_gateway" <<YAML
 openrouter_model: $openrouter_model
 openrouter_api_key_env: OPENROUTER_API_KEY
 openrouter_timeout_seconds: 5
 YAML
 elif [[ "$triage_backend" == "ollama" ]]; then
-    cat >> "$GATEWAY_YAML" <<YAML
+    cat >> "$candidate_gateway" <<YAML
 ollama_model: $ollama_model
 ollama_host: $ollama_host
 ollama_timeout_seconds: 5
 YAML
 elif [[ "$triage_backend" == "claude-channel" ]]; then
-    cat >> "$GATEWAY_YAML" <<YAML
+    cat >> "$candidate_gateway" <<YAML
 claude_triage_port: ${claude_triage_port:-9876}
 claude_triage_screen: jc-triage
 claude_triage_model: claude-haiku-4-5
 YAML
 fi
 
-cat >> "$GATEWAY_YAML" <<YAML
+cat >> "$candidate_gateway" <<YAML
 channels:
   telegram:
     enabled: $telegram_enabled
@@ -470,6 +624,20 @@ channels:
     watch_dir: state/cron
     poll_interval_seconds: 2
 YAML
+
+# Backup existing gateway.yaml before attempting the merge, then replace it
+# only after the merged file passes gateway loader validation.
+if [[ -f "$GATEWAY_YAML" ]]; then
+    cp "$GATEWAY_YAML" "$GATEWAY_YAML.bak.$(date +%Y%m%d-%H%M%S)"
+fi
+
+if ! merge_gateway_yaml "$GATEWAY_YAML" "$candidate_gateway" "$merged_gateway" "$INSTANCE_DIR" "$USE_DEFAULTS"; then
+    rm -f "$candidate_gateway" "$merged_gateway"
+    echo "jc-upgrade: gateway.yaml merge failed; original file left unchanged" >&2
+    exit 1
+fi
+mv "$merged_gateway" "$GATEWAY_YAML"
+rm -f "$candidate_gateway"
 
 # --- watchdog runtime mode -----------------------------------------------
 
