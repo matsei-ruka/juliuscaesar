@@ -99,6 +99,13 @@ def route(
             )
             return BrainSelection(brain=brain, model=model, reason="cron_pinned")
 
+    if (
+        triage is not None
+        and cfg.triage.unsafe_fallback_brain
+        and triage.full_spec() == cfg.triage.unsafe_fallback_brain
+    ):
+        return BrainSelection(brain=triage.brain, model=triage.model, reason="triage")
+
     if cfg.pin_to_default_brain:
         return BrainSelection(
             brain=cfg.default_brain,

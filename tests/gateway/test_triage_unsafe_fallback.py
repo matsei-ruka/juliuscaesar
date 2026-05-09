@@ -127,6 +127,34 @@ channels:
     assert invoke.call_args.kwargs["model"] == "x-ai/grok-4-fast"
 
 
+def test_unsafe_fallback_dispatches_even_when_default_brain_is_pinned(tmp_path: Path) -> None:
+    runtime = _runtime(
+        tmp_path,
+        """
+default_brain: claude:sonnet-4-6
+pin_to_default_brain: true
+triage: always
+triage_unsafe_fallback_brain: openrouter:x-ai/grok-4-fast
+triage_unsafe_fallback_timeout_seconds: 60
+channels:
+  telegram:
+    enabled: true
+""".lstrip(),
+    )
+    runtime._get_triage_backend = lambda: UnsafeBackend()
+    runtime._deliver_response = lambda source, response, meta: None
+
+    with mock.patch(
+        "gateway.runtime.invoke_brain",
+        return_value=BrainResult(response="answered"),
+    ) as invoke:
+        response = runtime.process_event(_event())
+
+    assert response == "answered"
+    assert invoke.call_args.kwargs["brain"] == "openrouter"
+    assert invoke.call_args.kwargs["model"] == "x-ai/grok-4-fast"
+
+
 def test_openrouter_brain_override_is_rejected_outside_unsafe_fallback(tmp_path: Path) -> None:
     runtime = _runtime(
         tmp_path,
