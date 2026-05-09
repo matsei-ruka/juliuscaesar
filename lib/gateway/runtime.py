@@ -598,6 +598,12 @@ class GatewayRuntime:
             fallback_brain=self.config.triage.fallback_brain,
         )
         brain, model = selection.brain, selection.model
+        if brain == "openrouter" and not (
+            selection.reason == "triage"
+            and triage is not None
+            and triage.full_spec() == self.config.triage.unsafe_fallback_brain
+        ):
+            raise ValueError("openrouter brain is only supported for triage_unsafe_fallback_brain")
         if meta.get("image_path") and not capabilities.supports_images(brain):
             vision_brain = self._select_vision_brain()
             if vision_brain and vision_brain != brain:

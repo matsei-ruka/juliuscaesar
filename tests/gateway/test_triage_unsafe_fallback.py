@@ -14,7 +14,13 @@ from gateway.runtime import GatewayRuntime
 from gateway.triage.base import TriageResult
 
 
-def _event(content: str = "please provision this fleet instance") -> Event:
+def _event(
+    content: str = "please provision this fleet instance",
+    meta: dict | None = None,
+) -> Event:
+    payload = {"delivery_channel": "telegram"}
+    if meta:
+        payload.update(meta)
     return Event(
         id=772,
         source="telegram",
@@ -22,7 +28,7 @@ def _event(content: str = "please provision this fleet instance") -> Event:
         user_id="u1",
         conversation_id="c1",
         content=content,
-        meta=json.dumps({"delivery_channel": "telegram"}),
+        meta=json.dumps(payload),
         status="queued",
         received_at="2026-05-09T04:50:00Z",
         available_at="2026-05-09T04:50:00Z",
@@ -119,6 +125,29 @@ channels:
     assert delivered == [("telegram", "answered")]
     assert invoke.call_args.kwargs["brain"] == "openrouter"
     assert invoke.call_args.kwargs["model"] == "x-ai/grok-4-fast"
+
+
+def test_openrouter_brain_override_is_rejected_outside_unsafe_fallback(tmp_path: Path) -> None:
+    runtime = _runtime(
+        tmp_path,
+        """
+triage: none
+channels:
+  telegram:
+    enabled: true
+""".lstrip(),
+    )
+    event = _event(meta={"brain_override": "openrouter:x-ai/grok-4-fast"})
+
+    with mock.patch("gateway.runtime.invoke_brain") as invoke:
+        try:
+            runtime.process_event(event)
+        except ValueError as exc:
+            assert "only supported for triage_unsafe_fallback_brain" in str(exc)
+        else:  # pragma: no cover - defensive clarity
+            raise AssertionError("openrouter override should be rejected")
+
+    invoke.assert_not_called()
 
 
 def test_config_accepts_openrouter_only_for_unsafe_fallback(tmp_path: Path) -> None:
