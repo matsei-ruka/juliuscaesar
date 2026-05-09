@@ -150,7 +150,9 @@ def caveman_enabled(instance_dir: Path) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return True
-    match = re.search(r"^caveman:\s*(\w+)", text, re.MULTILINE | re.IGNORECASE)
+    section = _extract_section(text, "Caveman")
+    search_text = section or text
+    match = re.search(r"^caveman:\s*(\w+)", search_text, re.MULTILINE | re.IGNORECASE)
     if not match:
         return True
     return match.group(1).lower() != "disabled"

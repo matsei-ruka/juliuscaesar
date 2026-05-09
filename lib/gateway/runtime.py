@@ -575,7 +575,11 @@ class GatewayRuntime:
             fallback_brain=self.config.triage.fallback_brain,
         )
         brain, model = selection.brain, selection.model
-        if meta.get("image_path") and not capabilities.supports_images(brain):
+        if (
+            meta.get("image_path")
+            and not self.config.pin_to_default_brain
+            and not capabilities.supports_images(brain)
+        ):
             vision_brain = self._select_vision_brain()
             if vision_brain and vision_brain != brain:
                 self.log(

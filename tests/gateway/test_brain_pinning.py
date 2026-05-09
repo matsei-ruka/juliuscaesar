@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 from gateway import router
+from gateway import queue
+from gateway.brain import BrainResult
 from gateway.config import GatewayConfig
 from gateway.queue import Event
 from gateway.runtime import GatewayRuntime
@@ -31,6 +34,21 @@ def _event() -> Event:
         response=None,
         error=None,
     )
+
+
+def _enqueue(instance: Path, *, meta: dict[str, object]) -> None:
+    conn = queue.connect(instance)
+    try:
+        queue.enqueue(
+            conn,
+            source="telegram",
+            source_message_id="m1",
+            conversation_id="c1",
+            content="look",
+            meta=meta,
+        )
+    finally:
+        conn.close()
 
 
 def _runtime(tmp_path: Path, pin: bool) -> GatewayRuntime:
@@ -118,3 +136,37 @@ def test_pin_to_default_brain_forces_default_route_over_sticky_and_triage() -> N
     assert selection.brain == "claude"
     assert selection.model == "sonnet-4-6"
     assert selection.reason == "default_pinned"
+
+
+def test_pin_to_default_brain_suppresses_vision_auto_route(tmp_path: Path) -> None:
+    instance = tmp_path / "instance"
+    (instance / "ops").mkdir(parents=True)
+    (instance / "memory" / "L1").mkdir(parents=True)
+    (instance / "memory" / "L1" / "IDENTITY.md").write_text("identity", encoding="utf-8")
+    (instance / "ops" / "gateway.yaml").write_text(
+        """
+default_brain: opencode
+default_model: deepseek/deepseek-v4-flash
+pin_to_default_brain: true
+triage: none
+channels:
+  telegram:
+    enabled: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _enqueue(instance, meta={"chat_id": "c1", "image_path": "/tmp/example.png"})
+    runtime = GatewayRuntime(
+        instance,
+        log_path=instance / "state" / "gateway" / "gateway.log",
+        stop_requested=lambda: True,
+    )
+
+    with mock.patch.object(runtime, "_select_vision_brain", return_value="claude"), mock.patch(
+        "gateway.runtime.invoke_brain",
+        return_value=BrainResult("ok", "s1"),
+    ) as invoke, mock.patch("gateway.runtime.deliver_response", return_value="m-out"):
+        assert runtime.dispatch_once()
+
+    assert invoke.call_args.kwargs["brain"] == "opencode"
+    assert invoke.call_args.kwargs["model"] == "deepseek/deepseek-v4-flash"

@@ -49,3 +49,21 @@ def test_caveman_flag_defaults_on_and_honors_disabled(tmp_path: Path) -> None:
 
     _write_style(tmp_path, "# Voice anchor\n\n> voice\n\n## Caveman\n\ncaveman: enabled\n")
     assert context.caveman_enabled(tmp_path) is True
+
+
+def test_caveman_flag_uses_caveman_section_before_other_mentions(tmp_path: Path) -> None:
+    _write_style(
+        tmp_path,
+        """
+# Voice examples
+
+Example text may mention:
+caveman: disabled
+
+## Caveman
+
+caveman: enabled
+""".lstrip(),
+    )
+
+    assert context.caveman_enabled(tmp_path) is True
