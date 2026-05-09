@@ -429,7 +429,7 @@ class GatewayRuntime:
             return None, False
         cached = self.triage_cache.get(event.content)
         if cached is not None:
-            hint = None if cached.is_unsafe() else self._triage_to_hint(cached)
+            hint = self._triage_unsafe_fallback_hint(cached) if cached.is_unsafe() else self._triage_to_hint(cached)
             self.log(
                 f"triage cache hit id={event.id} class={cached.class_} "
                 f"routed={hint.full_spec() if hint else '-'} "
@@ -437,7 +437,9 @@ class GatewayRuntime:
                 event_id=event.id,
                 kind="triage",
             )
-            return hint, cached.is_unsafe()
+            if cached.is_unsafe():
+                self._log_unsafe_verdict(event, hint)
+            return hint, cached.is_unsafe() and hint is None
         try:
             result = backend.classify(event.content)
         except Exception as exc:  # noqa: BLE001
@@ -451,8 +453,11 @@ class GatewayRuntime:
         threshold = self.config.triage.confidence_threshold
         below = result.confidence < threshold
         raw_preview = (result.raw or "")[:120].replace("\n", " ")
-        hint = None if result.is_unsafe() else self._triage_to_hint(result)
-        if result.is_unsafe():
+        hint = self._triage_unsafe_fallback_hint(result) if result.is_unsafe() else self._triage_to_hint(result)
+        unsafe_fallback = result.is_unsafe() and hint is not None
+        if unsafe_fallback:
+            metric_brain = hint.full_spec()
+        elif result.is_unsafe():
             metric_brain = ""
         elif below and self.config.triage.fallback_brain:
             metric_brain = self.config.triage.fallback_brain
@@ -469,17 +474,39 @@ class GatewayRuntime:
             kind="triage",
         )
         try:
-            self.metrics.record(result, brain=metric_brain, fallback=below)
+            self.metrics.record(result, brain=metric_brain, fallback=below or unsafe_fallback)
         except Exception:  # noqa: BLE001
             pass
         if result.is_unsafe():
-            self.log(
-                f"triage rejected event id={event.id} as unsafe",
-                event_id=event.id,
-                kind="triage_unsafe",
-            )
-            return None, True
+            self._log_unsafe_verdict(event, hint)
+            return hint, hint is None
         return hint, False
+
+    def _triage_unsafe_fallback_hint(self, result: TriageResult) -> router.TriageHint | None:
+        spec = self.config.triage.unsafe_fallback_brain.strip()
+        if not spec:
+            return None
+        brain, _, model = spec.partition(":")
+        if not brain:
+            return None
+        return router.TriageHint(brain=brain, model=model or None, confidence=result.confidence)
+
+    def _log_unsafe_verdict(
+        self,
+        event: queue.Event,
+        hint: router.TriageHint | None,
+    ) -> None:
+        self.log(
+            f"triage rejected event id={event.id} as unsafe",
+            event_id=event.id,
+            kind="triage_unsafe",
+        )
+        if hint is not None:
+            self.log(
+                f"triage unsafe-fallback id={event.id} routed={hint.full_spec()}",
+                event_id=event.id,
+                kind="triage_unsafe_fallback",
+            )
 
     def _triage_to_hint(self, result: TriageResult) -> router.TriageHint | None:
         spec = self.config.triage.routing.get(result.class_) or self.config.triage.fallback_brain
@@ -571,6 +598,12 @@ class GatewayRuntime:
             fallback_brain=self.config.triage.fallback_brain,
         )
         brain, model = selection.brain, selection.model
+        if brain == "openrouter" and not (
+            selection.reason == "triage"
+            and triage is not None
+            and triage.full_spec() == self.config.triage.unsafe_fallback_brain
+        ):
+            raise ValueError("openrouter brain is only supported for triage_unsafe_fallback_brain")
         if meta.get("image_path") and not capabilities.supports_images(brain):
             vision_brain = self._select_vision_brain()
             if vision_brain and vision_brain != brain:
