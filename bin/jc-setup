@@ -390,7 +390,7 @@ self-deprecating-humble.
 
 ## Caveman
 
-caveman: enabled
+caveman: disabled
 """,
         "USER.md": f"""---
 slug: USER

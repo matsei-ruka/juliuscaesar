@@ -135,7 +135,7 @@ def test_setup_preships_style_file(fresh_instance: Path) -> None:
     text = style.read_text(encoding="utf-8")
     assert "# Voice anchor" in text
     assert "## Anti-mirror" in text
-    assert "caveman: enabled" in text
+    assert "caveman: disabled" in text
 
 
 def test_setup_no_mission_prompt(tmp_path: Path) -> None:

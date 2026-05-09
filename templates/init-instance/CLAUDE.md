@@ -67,7 +67,8 @@ jc watchdog status
 
 `memory/L1/STYLE.md` is authoritative for caveman mode. If it says
 `caveman: disabled`, do not use caveman compression. If it says
-`caveman: enabled` or omits the flag, use the rules below.
+`caveman: enabled`, use the rules below. If it omits the flag, keep
+caveman off.
 
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
 

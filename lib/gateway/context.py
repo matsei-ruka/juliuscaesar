@@ -140,22 +140,22 @@ def render_voice_anchor(instance_dir: Path) -> str:
 def caveman_enabled(instance_dir: Path) -> bool:
     """STYLE.md controls whether framework caveman guidance is injected.
 
-    Missing STYLE.md or missing flag keeps the historical default: enabled.
+    Missing STYLE.md or missing flag keeps caveman off. It is opt-in.
     """
 
     path = _style_path(instance_dir)
     if not path.exists():
-        return True
+        return False
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return True
+        return False
     section = _extract_section(text, "Caveman")
     search_text = section or text
     match = re.search(r"^caveman:\s*(\w+)", search_text, re.MULTILINE | re.IGNORECASE)
     if not match:
-        return True
-    return match.group(1).lower() != "disabled"
+        return False
+    return match.group(1).lower() == "enabled"
 
 
 def render_preamble(instance_dir: Path) -> str:

@@ -323,8 +323,8 @@ out-of-band context reliably.
 **File:** `lib/gateway/context.py:97-116` (`render_preamble`).
 
 Today the function unconditionally concatenates `_CAVEMAN` (line 109).
-Change: read the `Caveman` line from `STYLE.md`. If `disabled`, skip the
-block. If `enabled` or absent, keep current behavior.
+Change: read the `Caveman` line from `STYLE.md`. If `enabled`, include
+the block. If `disabled`, absent, missing, or malformed, skip it.
 
 ```python
 def render_preamble(instance_dir: Path) -> str:
@@ -337,12 +337,12 @@ def render_preamble(instance_dir: Path) -> str:
 def _caveman_enabled(instance_dir: Path) -> bool:
     path = instance_dir / "memory" / "L1" / "STYLE.md"
     if not path.exists():
-        return True  # default-on for back-compat
+        return False  # opt-in; operators enable when needed
     text = path.read_text(encoding="utf-8", errors="replace")
     match = re.search(r"^caveman:\s*(\w+)", text, re.MULTILINE | re.IGNORECASE)
     if not match:
-        return True
-    return match.group(1).lower() != "disabled"
+        return False
+    return match.group(1).lower() == "enabled"
 ```
 
 This honors what each agent's STYLE already says about caveman. Sofia's
@@ -379,7 +379,7 @@ is intentional — operator decision per agent.
 
 Strict: missing required sections produce a `jc doctor` warning, not a
 runtime error. The framework degrades gracefully — no `STYLE.md` means
-old behavior (caveman default-on, no voice anchor injection).
+no caveman injection and no voice anchor injection.
 
 Parser is YAML-frontmatter + markdown section extraction. Regex-based,
 no new dependency.
@@ -417,7 +417,7 @@ required sections.
 ### For existing fleet
 
 1. Ship the framework change with a default-no-op behavior:
-   - Missing `STYLE.md` → caveman default-on, no voice anchor injection.
+   - Missing `STYLE.md` → caveman off, no voice anchor injection.
    - Existing instances continue working unchanged.
 
 2. Add a `jc style init` CLI: scaffolds a `STYLE.md` from the closest
@@ -436,7 +436,7 @@ required sections.
 
 - STYLE.md parses cleanly, all required sections found
 - Voice anchor extraction returns the trailing summary line
-- Caveman flag parsed: `disabled` → off, `enabled` → on, missing → on
+- Caveman flag parsed: `disabled` → off, `enabled` → on, missing → off
 - Malformed STYLE.md → graceful empty-string anchor (no exception)
 - 300-char summary cap enforced (warning emitted, not truncated)
 
@@ -452,8 +452,8 @@ required sections.
 `tests/gateway/test_caveman_honored.py`
 
 - `caveman: disabled` in STYLE.md → `render_preamble` omits `_CAVEMAN`
-- `caveman: enabled` → included as today
-- Missing STYLE.md → caveman included (default-on for back-compat)
+- `caveman: enabled` → includes `_CAVEMAN`
+- Missing STYLE.md → caveman omitted
 
 `tests/gateway/test_brain_pinning.py`
 

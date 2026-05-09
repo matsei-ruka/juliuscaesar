@@ -27,9 +27,15 @@ def test_caveman_disabled_omits_token_efficiency_block(tmp_path: Path) -> None:
     assert "/caveman" not in text
 
 
-def test_caveman_enabled_and_missing_style_keep_existing_default(tmp_path: Path) -> None:
+def test_caveman_enabled_includes_token_efficiency_block(tmp_path: Path) -> None:
     enabled = _instance(tmp_path / "enabled", "# Voice anchor\n\n> voice\n\ncaveman: enabled\n")
-    missing = _instance(tmp_path / "missing")
 
     assert "Token efficiency (caveman mode)" in context.render_preamble(enabled)
-    assert "Token efficiency (caveman mode)" in context.render_preamble(missing)
+
+
+def test_missing_style_and_missing_flag_keep_caveman_off(tmp_path: Path) -> None:
+    missing = _instance(tmp_path / "missing")
+    no_flag = _instance(tmp_path / "no-flag", "# Voice anchor\n\n> voice\n")
+
+    assert "Token efficiency (caveman mode)" not in context.render_preamble(missing)
+    assert "Token efficiency (caveman mode)" not in context.render_preamble(no_flag)

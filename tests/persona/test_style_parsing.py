@@ -41,10 +41,13 @@ def test_voice_anchor_missing_or_too_long_degrades_to_empty(tmp_path: Path) -> N
     assert context.render_voice_anchor(tmp_path) == ""
 
 
-def test_caveman_flag_defaults_on_and_honors_disabled(tmp_path: Path) -> None:
-    assert context.caveman_enabled(tmp_path) is True
+def test_caveman_flag_defaults_off_and_honors_enabled(tmp_path: Path) -> None:
+    assert context.caveman_enabled(tmp_path) is False
 
     _write_style(tmp_path, "# Voice anchor\n\n> voice\n\n## Caveman\n\ncaveman: disabled\n")
+    assert context.caveman_enabled(tmp_path) is False
+
+    _write_style(tmp_path, "# Voice anchor\n\n> voice\n\n## Caveman\n\n")
     assert context.caveman_enabled(tmp_path) is False
 
     _write_style(tmp_path, "# Voice anchor\n\n> voice\n\n## Caveman\n\ncaveman: enabled\n")

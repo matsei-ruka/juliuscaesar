@@ -54,7 +54,7 @@ STYLE = """
 
 ## Caveman
 
-caveman: enabled
+caveman: disabled
 """.lstrip()
 
 
