@@ -14,6 +14,7 @@ from . import brain_spec as _brain_spec
 
 
 SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider")
+SUPPORTED_UNSAFE_FALLBACK_BRAINS = (*SUPPORTED_BRAINS, "openrouter")
 SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email")
 SUPPORTED_TRIAGE_BACKENDS = (
     "none",
@@ -65,6 +66,8 @@ class TriageConfig:
     backend: str = "none"
     confidence_threshold: float = 0.7
     fallback_brain: str = "claude:sonnet-4-6"
+    unsafe_fallback_brain: str = ""
+    unsafe_fallback_timeout_seconds: int = 60
     cache_ttl_seconds: int = 30
     sticky_idle_seconds: int = 0
     routing: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TRIAGE_ROUTING))
@@ -411,12 +414,18 @@ def _validate_nonnegative_int(errors: list[str], path: str, value: Any) -> None:
         errors.append(f"{path}: must be a non-negative integer")
 
 
-def _validate_brain_spec(errors: list[str], path: str, value: Any) -> None:
+def _validate_brain_spec(
+    errors: list[str],
+    path: str,
+    value: Any,
+    *,
+    supported: tuple[str, ...] = SUPPORTED_BRAINS,
+) -> None:
     if not isinstance(value, str) or not value:
         errors.append(f"{path}: must be a brain name")
         return
     brain = value.partition(":")[0]
-    if brain not in SUPPORTED_BRAINS:
+    if brain not in supported:
         errors.append(f"{path}: unsupported brain {brain!r}")
 
 
@@ -430,6 +439,8 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "triage",
         "triage_confidence_threshold",
         "default_fallback_brain",
+        "triage_unsafe_fallback_brain",
+        "triage_unsafe_fallback_timeout_seconds",
         "sticky_brain_idle_timeout_seconds",
         "triage_routing",
         "reply_footer",
@@ -474,6 +485,13 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             )
     if data.get("default_fallback_brain") is not None:
         _validate_brain_spec(errors, "default_fallback_brain", data["default_fallback_brain"])
+    if data.get("triage_unsafe_fallback_brain") is not None:
+        _validate_brain_spec(
+            errors,
+            "triage_unsafe_fallback_brain",
+            data["triage_unsafe_fallback_brain"],
+            supported=SUPPORTED_UNSAFE_FALLBACK_BRAINS,
+        )
 
     timezone_raw = data.get("timezone")
     if timezone_raw is not None:
@@ -516,6 +534,8 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "routing",
                 "triage_confidence_threshold",
                 "default_fallback_brain",
+                "triage_unsafe_fallback_brain",
+                "triage_unsafe_fallback_timeout_seconds",
                 "triage_cache_ttl_seconds",
                 "sticky_brain_idle_timeout_seconds",
                 "ollama_model",
@@ -560,6 +580,21 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
     triage_model = _triage_opt("triage_model", "model")
     triage_timeout = _triage_opt("triage_timeout_seconds", "timeout_seconds")
     triage_max_tokens = _triage_opt("triage_max_tokens", "max_tokens")
+    unsafe_fallback_brain = _triage_opt("triage_unsafe_fallback_brain")
+    unsafe_fallback_timeout = _triage_opt("triage_unsafe_fallback_timeout_seconds")
+    if unsafe_fallback_brain is not None:
+        _validate_brain_spec(
+            errors,
+            "triage_unsafe_fallback_brain",
+            unsafe_fallback_brain,
+            supported=SUPPORTED_UNSAFE_FALLBACK_BRAINS,
+        )
+    if unsafe_fallback_timeout is not None:
+        _validate_positive_int(
+            errors,
+            "triage_unsafe_fallback_timeout_seconds",
+            unsafe_fallback_timeout,
+        )
     if triage_protocol is not None:
         if backend != "api_classifier":
             errors.append("triage_protocol: only valid when triage backend is api_classifier")
@@ -641,6 +676,12 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             errors,
             "sticky_brain_idle_timeout_seconds",
             data["sticky_brain_idle_timeout_seconds"],
+        )
+    if data.get("triage_unsafe_fallback_timeout_seconds") is not None:
+        _validate_positive_int(
+            errors,
+            "triage_unsafe_fallback_timeout_seconds",
+            data["triage_unsafe_fallback_timeout_seconds"],
         )
     if isinstance(data.get("triage_routing"), dict):
         for key, value in data["triage_routing"].items():
@@ -919,10 +960,16 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
     def _opt_pair(top: str, nested: str, default: Any) -> Any:
         return data.get(top, raw.get(nested, raw.get(top, default)))
 
+    unsafe_fallback = _opt("triage_unsafe_fallback_brain", "")
+    if unsafe_fallback is None:
+        unsafe_fallback = ""
+
     return TriageConfig(
         backend=str(backend or "none"),
         confidence_threshold=float(_opt("triage_confidence_threshold", 0.7)),
         fallback_brain=str(_opt("default_fallback_brain", "claude:sonnet-4-6")),
+        unsafe_fallback_brain=str(unsafe_fallback),
+        unsafe_fallback_timeout_seconds=int(_opt("triage_unsafe_fallback_timeout_seconds", 60)),
         cache_ttl_seconds=int(_opt("triage_cache_ttl_seconds", 30)),
         sticky_idle_seconds=int(_opt("sticky_brain_idle_timeout_seconds", 0)),
         routing=routing,
@@ -1132,6 +1179,8 @@ gateway:
 triage: {triage_backend}
 triage_confidence_threshold: 0.7
 default_fallback_brain: claude:sonnet-4-6
+triage_unsafe_fallback_brain: null
+triage_unsafe_fallback_timeout_seconds: 60
 sticky_brain_idle_timeout_seconds: 0
 reply_footer:
   enabled: false

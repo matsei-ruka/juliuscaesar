@@ -412,6 +412,8 @@ gateway:
 triage: $triage_backend
 triage_confidence_threshold: $threshold
 default_fallback_brain: $fallback
+triage_unsafe_fallback_brain: null
+triage_unsafe_fallback_timeout_seconds: 60
 sticky_brain_idle_timeout_seconds: $sticky
 triage_routing:
   smalltalk: $r_smalltalk

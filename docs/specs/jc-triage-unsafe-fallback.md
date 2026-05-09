@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft — 2026-05-09.
+Implemented — 2026-05-09.
 
 ## Why
 
@@ -99,10 +99,11 @@ A new brain `openrouter` (file: `lib/gateway/brains/openrouter.py`) that:
   silent drop).
 - Honors `triage_unsafe_fallback_timeout_seconds`.
 
-The brain adapter is not registered with the normal routing table — only
-the unsafe-fallback path uses it. (Generalizing it for `default_brain` /
-`triage_routing` is the follow-up; we don't want grok-as-default
-side-effects landing in this PR.)
+The brain adapter is available to the dispatch registry, but config
+validation accepts `openrouter:*` only for
+`triage_unsafe_fallback_brain`. `default_brain`, channel brains, and
+`triage_routing` still reject `openrouter` so this PR does not introduce
+grok-as-default side effects.
 
 ## Runtime behavior
 
