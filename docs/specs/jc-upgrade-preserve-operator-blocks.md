@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft — 2026-05-09.
+Implemented — 2026-05-09.
 
 ## Why
 
@@ -132,36 +132,26 @@ crash mid-merge still leaves the operator a one-`mv` rollback.
 
 ### YAML formatter choice
 
-Use `ruamel.yaml` round-trip mode to preserve comments and key order on the
-preserved blocks. PyYAML loses comments and reorders. `ruamel.yaml` is not a
-current framework dep — adding it is a real cost. Two paths:
-
-1. **Add `ruamel.yaml`** to `pyproject.toml`. Pros: comments + ordering
-   preserved cleanly. Cons: new transitive dep, slightly larger venv.
-2. **Stay on `pyyaml`**, accept loss of comments + ordering for the
-   templated blocks but preserve operator blocks bit-perfectly via a
-   pre-merge serialization of "everything not in `OWNED_KEYS`."
-
-Recommend (1). The cost is tiny; the win — never silently nuking operator
-config and preserving comments — is worth one extra dep. Decision-point for
-review.
+Implementation uses the existing `pyyaml` dependency and semantic preservation
+of operator-owned blocks. This avoids adding a new transitive dependency in the
+hotfix. Comments may be normalized by the YAML writer, but non-owned config
+values are preserved and the merged result is validated before replace.
 
 ## Implementation sketch
 
-New helper `bin/jc-upgrade._merge_gateway_yaml`:
+New helper `merge_gateway_yaml` in `bin/jc-upgrade`:
 
 ```python
 import sys
 from pathlib import Path
-from ruamel.yaml import YAML
+import yaml
 
 OWNED = { ... }  # see above
 
 def merge(existing_path: Path, computed: dict) -> str:
-    yaml = YAML(typ="rt")
     existing = {}
     if existing_path.exists():
-        existing = yaml.load(existing_path.read_text()) or {}
+        existing = yaml.safe_load(existing_path.read_text()) or {}
 
     for key in OWNED - {"channels"}:
         if key in computed:
@@ -175,7 +165,7 @@ def merge(existing_path: Path, computed: dict) -> str:
                 sub[k] = v
 
     out = io.StringIO()
-    yaml.dump(existing, out)
+    yaml.safe_dump(existing, out, sort_keys=False)
     return out.getvalue()
 ```
 
