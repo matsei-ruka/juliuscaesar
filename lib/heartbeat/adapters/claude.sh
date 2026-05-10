@@ -30,6 +30,17 @@ fi
 
 # Structured brain-output contract: stdout MUST be a single JSON object.
 # The gateway parses this object and decides whether to deliver to channel.
+# Worker mode override. When invoked from `jc-workers _run`, JC_IN_WORKER=1.
+# Without this, the worker auto-loads the instance CLAUDE.md, applies the
+# live-session routing logic ("impl work -> developer-01"), queries the
+# workers DB, sees itself, classifies as duplicate and exits with no work
+# done. The recursion guard prevents respawning sub-workers but does not
+# stop the self-bail. This system-prompt suffix flips the model into
+# executor mode.
+if [[ -n "${JC_IN_WORKER:-}" ]]; then
+    ARGS+=("--append-system-prompt" "WORKER MODE: You ARE the executor. The brief in stdin is your task. Execute it inline and emit a result. Do NOT triage the brief, do NOT query 'jc workers list', do NOT delegate to another worker, do NOT classify yourself as a duplicate or as redundant. The recursion guard already prevents sub-workers; the additional invariant is: do not stand by, do not no-op. If the brief is unclear, do your best with the information you have and emit a partial result with a question — do not exit silently.")
+fi
+
 ARGS+=("--append-system-prompt" "GATEWAY OUTPUT CONTRACT: Your final stdout MUST be a single JSON object on a single line (no code fences, no prose before or after) with exactly these fields:
   {\"push_message_sent\": <bool>, \"message\": <string>}
 
