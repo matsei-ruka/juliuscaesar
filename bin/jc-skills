@@ -71,6 +71,15 @@ PRE_SHIPPED: tuple[SkillSpec, ...] = (
         test_kind="browser-use",
         description="Interactive browser automation.",
     ),
+    SkillSpec(
+        name="deep-research",
+        display="Deep Research",
+        path="deep-research/SKILL.md",
+        required_env=(),
+        optional_env=("JC_RESEARCH_NAV_MODEL", "OPENROUTER_API_KEY", "JC_RESEARCH_DISABLED"),
+        test_kind="deep-research",
+        description="Browser-driven Gemini Deep Research (per-host login, no API cost).",
+    ),
 )
 
 PRE_SHIPPED_BY_NAME = {s.name: s for s in PRE_SHIPPED}
@@ -418,11 +427,38 @@ def test_browser_use(env: dict[str, str], timeout: int) -> tuple[bool, str]:
     return False, msg
 
 
+def test_deep_research(env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    """Health-check the deep-research skill.
+
+    No HTTP call — checks that the per-host Chromium profile exists, that
+    the Playwright dep is importable, and that the instance is not opted
+    out via JC_RESEARCH_DISABLED.
+    """
+    if env.get("JC_RESEARCH_DISABLED"):
+        return False, "JC_RESEARCH_DISABLED is set; skill is opt-out for this instance."
+    try:
+        from skills.gemini_deep_research import profile_age_seconds, profile_dir, profile_exists  # type: ignore
+    except ImportError as exc:
+        return False, f"deep-research lib not on PYTHONPATH: {exc}"
+    if not profile_exists():
+        return False, f"profile missing at {profile_dir()}; run `jc research login`."
+    age = profile_age_seconds()
+    age_days = (age / 86_400.0) if age is not None else None
+    try:
+        import playwright  # type: ignore  # noqa: F401
+    except ImportError:
+        return False, "playwright not installed; rerun ./install.sh."
+    if age_days is not None and age_days > 14:
+        return True, f"profile present ({age_days:.0f}d old; may need re-login)."
+    return True, "profile present, playwright importable."
+
+
 TESTERS = {
     "brave": test_brave,
     "tavily": test_tavily,
     "firecrawl": test_firecrawl,
     "browser-use": test_browser_use,
+    "deep-research": test_deep_research,
 }
 
 

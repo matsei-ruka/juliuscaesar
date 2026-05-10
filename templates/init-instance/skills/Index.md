@@ -9,6 +9,7 @@ choosing a web, search, crawl, or browser automation skill.
 | Tavily | `skills/tavily/SKILL.md` | `TAVILY_API_KEY` | Agent-optimized search, extraction, crawl, map, and research |
 | Firecrawl | `skills/firecrawl/SKILL.md` | `FIRECRAWL_API_KEY` | Clean page/site extraction, crawling, structured scrape, JS-heavy pages |
 | Browser Use | `skills/browser-use/SKILL.md` | `BROWSER_USE_API_KEY` | Interactive browser automation when APIs or scraping are insufficient |
+| Deep Research | `skills/deep-research/SKILL.md` | per-host browser profile (`jc research login`) | Multi-source deep dives via Gemini Advanced — long-form, cited reports (5-10 min, async) |
 
 Credentials live in the instance root `.env`. Never put API keys in skill
 files, prompts, memory, logs, or committed examples.

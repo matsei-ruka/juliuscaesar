@@ -108,10 +108,40 @@ class JcEventsChannel:
                 "the headline number, and any next step. Read the result file if useful."
                 f"{result_text}"
             )
+        if event_type == "research.completed":
+            return self._render_research(payload)
         return (
             f"System event of type '{event_type}'. Payload:\n```json\n"
             f"{json.dumps(payload, indent=2, sort_keys=True)}\n```\n"
             "Summarize for the user only if it is useful; otherwise reply with an empty string."
+        )
+
+    def _render_research(self, payload: dict) -> str:
+        job_id = payload.get("job_id") or "?"
+        query = (payload.get("query") or "").strip()
+        status = payload.get("status") or "ok"
+        duration = payload.get("duration_seconds")
+        sources = payload.get("sources_count")
+        report = payload.get("report_path")
+        duration_text = f" in {int(duration)}s" if isinstance(duration, (int, float)) else ""
+        sources_text = f", {int(sources)} sources" if isinstance(sources, (int, float)) else ""
+        report_text = f"\n\nReport file: {report}" if report else ""
+        if status != "ok":
+            label = payload.get("label") or status
+            message = (payload.get("message") or "").strip()
+            tail = f" — {message}" if message else ""
+            return (
+                f"Deep research job {job_id} for '{query}' failed [{label}]{tail}.\n"
+                "Tell the user concisely that the deep dive could not finish and offer to retry "
+                "or fall back to a quicker search. Do not expose the job id or internal paths."
+            )
+        return (
+            f"Deep research job {job_id} for '{query}' completed [{status}]{duration_text}{sources_text}.\n"
+            "Read the report file and synthesize a short summary for the user in your own voice — "
+            "lead with the headline finding, follow with 2-4 bullets of supporting points, then cite "
+            "the top 3-5 sources by title. Offer to surface more if they want. Do not paste the raw "
+            "report. Do not expose the job id, profile path, or screenshot path."
+            f"{report_text}"
         )
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:

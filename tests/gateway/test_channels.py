@@ -116,6 +116,70 @@ class JcEventsChannelTests(unittest.TestCase):
             self.assertEqual(len(files), 1)
             self.assertTrue(files[0].name.endswith(".bad"))
 
+    def test_research_completed_renders_synthesis_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            events_dir = instance / "state" / "events"
+            events_dir.mkdir(parents=True)
+            (events_dir / "research-job-7.json").write_text(
+                json.dumps(
+                    {
+                        "event_type": "research.completed",
+                        "event_id": "research-job-7",
+                        "job_id": "job-7",
+                        "query": "Compare eSIM market UAE vs KSA 2025",
+                        "status": "ok",
+                        "exit_code": 0,
+                        "duration_seconds": 312,
+                        "sources_count": 24,
+                        "report_path": "state/research/job-7/report.md",
+                        "notify_chat_id": "28547271",
+                        "notify_channel": "telegram",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = ChannelConfig(enabled=True, watch_dir="state/events", poll_interval_seconds=1)
+            channel = JcEventsChannel(instance, cfg, _silent_log)
+            captured = _run_channel_once(channel)
+
+            self.assertEqual(len(captured), 1)
+            kwargs = captured[0]
+            self.assertEqual(kwargs["source"], "jc-events")
+            self.assertIn("Deep research", kwargs["content"])
+            self.assertIn("job-7", kwargs["content"])
+            self.assertIn("24 sources", kwargs["content"])
+            self.assertIn("state/research/job-7/report.md", kwargs["content"])
+            self.assertEqual(kwargs["meta"]["chat_id"], "28547271")
+
+    def test_research_failed_routes_to_failure_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            events_dir = instance / "state" / "events"
+            events_dir.mkdir(parents=True)
+            (events_dir / "research-job-9.json").write_text(
+                json.dumps(
+                    {
+                        "event_type": "research.completed",
+                        "event_id": "research-job-9",
+                        "job_id": "job-9",
+                        "query": "Why",
+                        "status": "failed",
+                        "exit_code": 10,
+                        "label": "auth_required",
+                        "message": "Gemini redirected to sign-in",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = ChannelConfig(enabled=True, watch_dir="state/events", poll_interval_seconds=1)
+            channel = JcEventsChannel(instance, cfg, _silent_log)
+            captured = _run_channel_once(channel)
+
+            self.assertEqual(len(captured), 1)
+            self.assertIn("failed", captured[0]["content"])
+            self.assertIn("auth_required", captured[0]["content"])
+
 
 class CronChannelTests(unittest.TestCase):
     def test_pinned_brain_propagates_to_meta(self):
