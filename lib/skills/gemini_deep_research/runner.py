@@ -418,10 +418,26 @@ def run_query(
 # --- internal browser steps -------------------------------------------------
 
 
+def _find_system_chrome() -> str | None:
+    """Return path to system Chrome/Chromium if Playwright's bundle is absent."""
+    import shutil
+
+    env_override = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+    if env_override:
+        return env_override
+    for candidate in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
 def _default_playwright_factory(*, headed: bool) -> Any:
     """Open a Playwright persistent context against the shared profile.
 
     Imported lazily so test suites without playwright still load the module.
+    Falls back to system Chrome when Playwright's bundled Chromium is absent
+    (e.g. Ubuntu 26+ where the bundle isn't supported yet).
     """
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
@@ -432,14 +448,35 @@ def _default_playwright_factory(*, headed: bool) -> Any:
             "`pip install playwright && playwright install chromium`.",
         ) from exc
 
+    import subprocess as _sp
+
     profile = ensure_profile_dir()
     pw = sync_playwright().start()
+
+    # Detect whether Playwright's own Chromium bundle exists.
+    try:
+        _sp.run(
+            [pw.chromium.executable_path, "--version"],
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        system_exe: str | None = None
+    except Exception:
+        system_exe = _find_system_chrome()
+
+    launch_kwargs: dict = {
+        "headless": not headed,
+        "args": ["--disable-blink-features=AutomationControlled"],
+        "viewport": {"width": 1280, "height": 900},
+    }
+    if system_exe:
+        launch_kwargs["executable_path"] = system_exe
+
     try:
         context = pw.chromium.launch_persistent_context(
             user_data_dir=str(profile),
-            headless=not headed,
-            args=["--disable-blink-features=AutomationControlled"],
-            viewport={"width": 1280, "height": 900},
+            **launch_kwargs,
         )
     except Exception:
         pw.stop()
