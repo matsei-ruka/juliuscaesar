@@ -92,6 +92,12 @@ for bin in "${BINARIES[@]}"; do
         continue
     fi
 
+    # If $shim is a symlink (pre-shim era install), unlink it first. Otherwise
+    # `cat > "$shim"` follows the symlink and overwrites the SOURCE file.
+    if [[ -L "$shim" ]]; then
+        rm -f "$shim"
+    fi
+
     # Detect shebang: python scripts get the venv wrapper; everything else
     # (bash, etc.) is invoked directly.
     first_line="$(head -n1 "$source_path")"
