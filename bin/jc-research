@@ -61,47 +61,69 @@ def resolve_instance_dir(arg: str | None) -> Path:
 
 
 def cmd_login(args: argparse.Namespace) -> int:
+    import shutil
+    import subprocess
+
     profile = ensure_profile_dir()
-    print(f"Opening Chromium against {profile}", file=sys.stderr)
+
+    # Find Chrome/Chromium — prefer system install over Playwright bundle so we
+    # don't need `playwright install chromium` (fails on Ubuntu 26+).
+    exe: str | None = None
+    for candidate in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+        found = shutil.which(candidate)
+        if found:
+            exe = found
+            break
+    if exe is None:
+        # Fall back to Playwright bundle path if it exists.
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore
+            _pw = sync_playwright().start()
+            _bundle = _pw.chromium.executable_path
+            _pw.stop()
+            if os.path.isfile(_bundle):
+                exe = _bundle
+        except Exception:
+            pass
+    if exe is None:
+        print(
+            "No Chrome/Chromium found. Install google-chrome or run:\n"
+            "  playwright install chromium",
+            file=sys.stderr,
+        )
+        return 17
+
+    print(f"Opening {exe} against {profile}", file=sys.stderr)
     print(
         "Sign in to https://accounts.google.com (any tab),\n"
         "then return here and press Enter to close the browser.",
         file=sys.stderr,
     )
-    try:
-        from playwright.sync_api import sync_playwright  # type: ignore
-    except ImportError:
-        print(
-            "Playwright is not installed. Run install.sh or:\n"
-            "  pip install playwright && playwright install chromium",
-            file=sys.stderr,
-        )
-        return 17
 
-    pw = sync_playwright().start()
+    proc = subprocess.Popen(
+        [
+            exe,
+            f"--user-data-dir={profile}",
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "https://accounts.google.com",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     try:
-        ctx = pw.chromium.launch_persistent_context(
-            user_data_dir=str(profile),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-            viewport={"width": 1280, "height": 900},
-        )
-        try:
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto("https://accounts.google.com", wait_until="domcontentloaded")
-            try:
-                input("Press Enter when login is complete: ")
-            except (EOFError, KeyboardInterrupt):
-                print("", file=sys.stderr)
-        finally:
-            try:
-                ctx.close()
-            except Exception:  # noqa: BLE001
-                pass
+        input("Press Enter when login is complete: ")
+    except (EOFError, KeyboardInterrupt):
+        print("", file=sys.stderr)
     finally:
-        pw.stop()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
-    print(f"profile saved at {profile}")
+    print(f"Profile saved at {profile}")
     print('Test:  jc research run "ping" --max-wait 60 --debug')
     return 0
 
