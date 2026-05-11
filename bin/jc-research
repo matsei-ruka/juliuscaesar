@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""jc-research — deep research skill (Gemini, browser-driven).
+
+Subcommands:
+  login   One-time per-host headed login to Gemini.
+  run     Run a query synchronously; exits with the run's status code.
+  start   Detach a background run, print the job_id, return immediately.
+  status  Print one job's state as JSON.
+  result  Print one job's report.md to stdout.
+  cancel  Send SIGTERM to a running job.
+  list    Print recent jobs.
+
+Instance dir resolution mirrors the rest of the JC CLIs:
+  --instance-dir → $JC_INSTANCE_DIR → walk up for `.jc` → cwd if `state/`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
+from skills.gemini_deep_research import (  # type: ignore  # noqa: E402
+    DeepResearchError,
+    EXIT_INVALID_INPUT,
+    EXIT_OK,
+    JobState,
+    cancel,
+    list_,
+    new_job_id,
+    profile_age_seconds,
+    profile_dir,
+    profile_exists,
+    result,
+    run,
+    start,
+    status,
+)
+from skills.gemini_deep_research.auth import ensure_profile_dir  # type: ignore  # noqa: E402
+from skills.gemini_deep_research.errors import EXIT_AUTH_REQUIRED  # type: ignore  # noqa: E402
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("state", "memory", "skills"))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+# --- subcommands ------------------------------------------------------------
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    import shutil
+    import subprocess
+
+    profile = ensure_profile_dir()
+
+    # Find Chrome/Chromium — prefer system install over Playwright bundle so we
+    # don't need `playwright install chromium` (fails on Ubuntu 26+).
+    exe: str | None = None
+    for candidate in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
+        found = shutil.which(candidate)
+        if found:
+            exe = found
+            break
+    if exe is None:
+        # Fall back to Playwright bundle path if it exists.
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore
+            _pw = sync_playwright().start()
+            _bundle = _pw.chromium.executable_path
+            _pw.stop()
+            if os.path.isfile(_bundle):
+                exe = _bundle
+        except Exception:
+            pass
+    if exe is None:
+        print(
+            "No Chrome/Chromium found. Install google-chrome or run:\n"
+            "  playwright install chromium",
+            file=sys.stderr,
+        )
+        return 17
+
+    print(f"Opening {exe} against {profile}", file=sys.stderr)
+    print(
+        "Sign in to https://accounts.google.com (any tab),\n"
+        "then return here and press Enter to close the browser.",
+        file=sys.stderr,
+    )
+
+    proc = subprocess.Popen(
+        [
+            exe,
+            f"--user-data-dir={profile}",
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "https://accounts.google.com",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        input("Press Enter when login is complete: ")
+    except (EOFError, KeyboardInterrupt):
+        print("", file=sys.stderr)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    print(f"Profile saved at {profile}")
+    print('Test:  jc research run "ping" --max-wait 60 --debug')
+    return 0
+
+
+def _split_query_arg(args: argparse.Namespace) -> str:
+    parts: list[str] = []
+    if args.query:
+        parts.extend(args.query)
+    if not parts:
+        if not sys.stdin.isatty():
+            stdin = sys.stdin.read().strip()
+            if stdin:
+                return stdin
+        raise SystemExit("query is required (positional or via stdin)")
+    return " ".join(parts).strip()
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    query = _split_query_arg(args)
+    job_id = args.job_id or new_job_id()
+    if not args.quiet:
+        print(f"deep-research job_id: {job_id}", file=sys.stderr)
+        print(f"query: {query}", file=sys.stderr)
+    try:
+        state = run(
+            query,
+            instance_dir=instance,
+            job_id=job_id,
+            max_wait_seconds=args.max_wait,
+            headed=args.debug,
+            notify_chat_id=args.notify_chat_id,
+            notify_channel=args.notify_channel,
+        )
+    except DeepResearchError as exc:
+        print(f"deep-research failed [{exc.label}]: {exc.message}", file=sys.stderr)
+        return exc.code
+
+    if args.json:
+        print(json.dumps(state.to_dict(), indent=2, sort_keys=True))
+    else:
+        if state.exit_code == EXIT_OK and state.report_path:
+            print(state.report_path)
+        else:
+            print(
+                f"status={state.status} exit={state.exit_code} message={state.message}",
+                file=sys.stderr,
+            )
+    return int(state.exit_code or 0)
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    query = _split_query_arg(args)
+    try:
+        state = start(
+            query,
+            instance_dir=instance,
+            max_wait_seconds=args.max_wait,
+            headed=args.debug,
+            notify_chat_id=args.notify_chat_id,
+            notify_channel=args.notify_channel,
+        )
+    except DeepResearchError as exc:
+        print(f"deep-research start failed: {exc.message}", file=sys.stderr)
+        return exc.code
+    if args.json:
+        print(json.dumps(state.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(state.job_id)
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    state = status(instance, args.job_id)
+    if state is None:
+        print(f"no such job: {args.job_id}", file=sys.stderr)
+        return 17
+    print(json.dumps(state.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_result(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    body = result(instance, args.job_id)
+    if body is None:
+        print(f"no report for job: {args.job_id}", file=sys.stderr)
+        return 17
+    sys.stdout.write(body if body.endswith("\n") else body + "\n")
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    ok, message = cancel(instance, args.job_id)
+    print(message)
+    return 0 if ok else 1
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    rows = list_(instance, limit=args.limit)
+    if args.json:
+        print(json.dumps([r.to_dict() for r in rows], indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("(no research jobs yet)")
+        return 0
+    print(f"{'JOB':<24} {'STATUS':<10} {'EXIT':<5} {'STARTED':<20} QUERY")
+    print("-" * 80)
+    for row in rows:
+        started = (row.started_at or "")[:19].replace("T", " ")
+        exit_code = "" if row.exit_code is None else str(row.exit_code)
+        query = (row.query or "")[:60]
+        print(f"{row.job_id:<24} {row.status:<10} {exit_code:<5} {started:<20} {query}")
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    path = profile_dir()
+    age = profile_age_seconds()
+    age_text = "missing" if age is None else f"{int(age)}s old"
+    print(f"profile: {path}")
+    print(f"exists:  {profile_exists()}")
+    print(f"age:     {age_text}")
+    return 0
+
+
+# --- argparse ---------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="jc-research",
+        description="Deep Research skill — drive Gemini Advanced via persistent Chromium profile.",
+    )
+    parser.add_argument("--instance-dir", help="Override instance dir")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_login = sub.add_parser("login", help="One-time per-host login to Gemini.")
+    p_login.set_defaults(func=cmd_login)
+
+    p_run = sub.add_parser("run", help="Run a query synchronously.")
+    p_run.add_argument("query", nargs=argparse.REMAINDER, help="Query text. Use -- to separate flags.")
+    p_run.add_argument("--job-id", default=None)
+    p_run.add_argument("--max-wait", type=int, default=900)
+    p_run.add_argument("--debug", action="store_true", help="Headed Chromium for debugging.")
+    p_run.add_argument("--quiet", action="store_true", help="Suppress progress logs to stderr.")
+    p_run.add_argument("--json", action="store_true")
+    p_run.add_argument("--notify-chat-id", default=None)
+    p_run.add_argument("--notify-channel", default="telegram")
+    p_run.set_defaults(func=cmd_run)
+
+    p_start = sub.add_parser("start", help="Detach a background run; print job_id.")
+    p_start.add_argument("query", nargs=argparse.REMAINDER, help="Query text. Use -- to separate flags.")
+    p_start.add_argument("--max-wait", type=int, default=900)
+    p_start.add_argument("--debug", action="store_true")
+    p_start.add_argument("--json", action="store_true")
+    p_start.add_argument("--notify-chat-id", default=None)
+    p_start.add_argument("--notify-channel", default="telegram")
+    p_start.set_defaults(func=cmd_start)
+
+    p_status = sub.add_parser("status", help="Print job state as JSON.")
+    p_status.add_argument("job_id")
+    p_status.set_defaults(func=cmd_status)
+
+    p_result = sub.add_parser("result", help="Print job's report.md.")
+    p_result.add_argument("job_id")
+    p_result.set_defaults(func=cmd_result)
+
+    p_cancel = sub.add_parser("cancel", help="SIGTERM the running job.")
+    p_cancel.add_argument("job_id")
+    p_cancel.set_defaults(func=cmd_cancel)
+
+    p_list = sub.add_parser("list", help="List recent research jobs.")
+    p_list.add_argument("--limit", type=int, default=20)
+    p_list.add_argument("--json", action="store_true")
+    p_list.set_defaults(func=cmd_list)
+
+    p_profile = sub.add_parser("profile", help="Show profile path / age.")
+    p_profile.set_defaults(func=cmd_profile)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    func = getattr(args, "func", None)
+    if func is None:
+        return 17
+    return int(func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

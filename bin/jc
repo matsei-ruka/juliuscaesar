@@ -11,6 +11,7 @@
 #   watchdog     Supervisor for the instance's live claude session.
 #   workers      On-demand background agents.
 #   skills       Instance skill status, configuration, and tests.
+#   research     Deep Research skill — drive Gemini via persistent Chromium profile.
 #   chats        Telegram chat directory.
 #   email        Email channel operations.
 #   transcripts  Per-conversation chat transcripts (read/tail/search).
@@ -42,6 +43,7 @@ Subcommands:
   watchdog     Live session supervisor (jc-watchdog).
   workers      On-demand background agents (jc-workers).
   skills       Instance skill status, configuration, and tests (jc-skills).
+  research     Deep Research skill — drive Gemini via persistent profile (jc-research).
   chats        Telegram chat directory (jc-chats).
   email        Email channel operations (jc-email).
   transcripts  Per-conversation chat transcripts (jc-transcripts).
@@ -110,7 +112,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|skills|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|migrate-to-0.3|completion)
+    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|migrate-to-0.3|completion)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

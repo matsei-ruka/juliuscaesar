@@ -3,6 +3,23 @@
 All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 (`YYYY.MM.DD`). Newest first.
 
+## Unreleased
+
+- New `deep-research` skill drives Gemini Advanced through a per-host
+  Chromium profile. Adds `bin/jc-research` (login / run / start / status /
+  result / cancel / list / profile), the `lib/skills/gemini_deep_research/`
+  package, and a `deep-research/SKILL.md` template instance skill.
+- `jc-events` channel now renders `research.completed` events into a
+  persona-voice synthesis prompt (and a separate failure branch) so deep
+  research jobs surface back through the standard chat path.
+- `install.sh` adds `browser-use` + `playwright` to the venv and runs
+  `playwright install chromium` idempotently after the venv install.
+- `jc skills` lists the new skill (`required_env=()` — login is per-host,
+  not per-instance) and exposes a tester that checks profile freshness +
+  Playwright importability.
+- Operator opt-out: `JC_RESEARCH_DISABLED=1` in an instance `.env` makes
+  every CLI entry exit 17 immediately.
+
 ## 2026.05.09.01
 
 Release bundle for the pending gateway and operator-config PRs.

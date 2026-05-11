@@ -18,8 +18,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$SHARE_DIR/venv"
-DEPS=(pyyaml python-dotenv dashscope requests websocket-client)
-BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-skills jc-gateway jc-init jc-setup jc-doctor jc-upgrade jc-update jc-migrate-to-0.3 jc-company jc-chats jc-email jc-transcripts jc-user-model jc-codex-auth jc-self-model jc-persona jc-completion)
+DEPS=(pyyaml python-dotenv dashscope requests websocket-client browser-use playwright)
+BINARIES=(jc jc-memory jc-heartbeat jc-voice jc-watchdog jc-workers jc-skills jc-research jc-gateway jc-init jc-setup jc-doctor jc-upgrade jc-update jc-migrate-to-0.3 jc-company jc-chats jc-email jc-transcripts jc-user-model jc-codex-auth jc-self-model jc-persona jc-completion)
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
@@ -92,6 +92,12 @@ for bin in "${BINARIES[@]}"; do
         continue
     fi
 
+    # If $shim is a symlink (pre-shim era install), unlink it first. Otherwise
+    # `cat > "$shim"` follows the symlink and overwrites the SOURCE file.
+    if [[ -L "$shim" ]]; then
+        rm -f "$shim"
+    fi
+
     # Detect shebang: python scripts get the venv wrapper; everything else
     # (bash, etc.) is invoked directly.
     first_line="$(head -n1 "$source_path")"
@@ -115,6 +121,20 @@ EOF
     fi
     chmod +x "$shim"
 done
+
+# --- playwright chromium (idempotent) ---------------------------------------
+#
+# `jc-research` drives a persistent Chromium via Playwright. The browser
+# binary is large (~170 MB) but only needs to download once per host;
+# Playwright skips the download when the cached version is current.
+
+if "$VENV_DIR/bin/python" -c 'import playwright' >/dev/null 2>&1; then
+    log "Ensuring Playwright Chromium is installed (idempotent)"
+    if ! "$VENV_DIR/bin/python" -m playwright install chromium >/dev/null 2>&1; then
+        log "warning: 'playwright install chromium' failed."
+        log "         Run manually:  $VENV_DIR/bin/python -m playwright install --with-deps chromium"
+    fi
+fi
 
 log "Done."
 log "Verify:  jc-memory --help"
