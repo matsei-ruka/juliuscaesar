@@ -76,6 +76,21 @@ def test_worker_mode_prompt_present_when_in_worker(fake_home: Path) -> None:
     assert "GATEWAY OUTPUT CONTRACT" in out, "gateway contract must still be present"
 
 
+def test_worker_mode_suspends_instance_spawn_rules(fake_home: Path) -> None:
+    """Workers auto-load instance CLAUDE.md / project memory, which may include
+    'always spawn a worker / reply confirming the spawn' rules. The WORKER MODE
+    suffix must explicitly suspend that guidance so workers do not emit a
+    status acknowledgment in lieu of execution.
+    """
+    out = _run_adapter(fake_home, {"JC_IN_WORKER": "1"})
+    assert "is suspended in this session" in out, (
+        "WORKER MODE must suspend instance-level 'spawn worker' rules"
+    )
+    assert "no-op disguised as progress" in out, (
+        "WORKER MODE must explicitly forbid status-acknowledgment-only output"
+    )
+
+
 def test_worker_mode_prompt_absent_outside_worker(fake_home: Path) -> None:
     out = _run_adapter(fake_home, {})
     assert "WORKER MODE" not in out, "WORKER MODE must not leak into non-worker runs"
