@@ -114,6 +114,10 @@ ages, lifecycle event counts, and the last email event.
 - Triage classifiers do not own brain choice. The gateway maps classifier
   classes to configured brain specs before passing a `TriageHint` to the
   router.
+- Unsafe triage verdicts never disappear silently. If
+  `triage_unsafe_fallback_brain` is configured, the event routes to that
+  fallback brain; otherwise `GatewayRuntime` sends a direct rejection notice to
+  the originating channel and skips brain invocation.
 - Voice/audio events marked with `meta.was_voice` bypass text classifier calls
   and are treated as class `voice`; routing still comes from
   `triage_routing.voice` / fallback brain.

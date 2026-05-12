@@ -167,7 +167,7 @@ class SlimTriageContractTests(unittest.TestCase):
 
         self.assertTrue(result.is_unsafe())
 
-    def test_unsafe_triage_result_does_not_invoke_brain(self):
+    def test_unsafe_triage_result_notifies_sender_without_invoking_brain(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             (instance / "ops").mkdir()
@@ -188,10 +188,18 @@ class SlimTriageContractTests(unittest.TestCase):
                     return TriageResult(class_="unsafe", confidence=1.0)
 
             runtime._get_triage_backend = lambda: UnsafeBackend()
+            delivered = []
+            runtime._deliver_response = lambda source, response, meta: delivered.append(
+                (source, response, meta)
+            )
             with mock.patch("gateway.runtime.invoke_brain") as invoke:
                 response = runtime.process_event(_event())
 
-            self.assertEqual(response, "(triage rejected unsafe)")
+            self.assertIn("safety policy", response)
+            self.assertEqual(len(delivered), 1)
+            self.assertEqual(delivered[0][0], "telegram")
+            self.assertIn("safety policy", delivered[0][1])
+            self.assertEqual(delivered[0][2]["delivery_channel"], "telegram")
             invoke.assert_not_called()
 
     def test_voice_event_bypasses_classifier_and_uses_voice_route(self):
