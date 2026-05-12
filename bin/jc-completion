@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-TOP="memory heartbeat voice watchdog workers skills chats email transcripts commitments dream gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 migrate-to-0.3-commitments completion help version"
+TOP="memory heartbeat voice watchdog workers skills chats email transcripts commitments dream gateway company init setup update upgrade doctor user-model self-model persona codex-auth completion help version"
 
 usage() {
     cat <<'EOF'
@@ -27,7 +27,7 @@ _jc_complete() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local top="memory heartbeat voice watchdog workers skills chats email transcripts commitments dream gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 migrate-to-0.3-commitments completion help version"
+    local top="memory heartbeat voice watchdog workers skills chats email transcripts commitments dream gateway company init setup update upgrade doctor user-model self-model persona codex-auth completion help version"
     if [[ $COMP_CWORD -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$top" -- "$cur") )
         return 0
@@ -59,7 +59,7 @@ _jc_complete() {
         gateway)      COMPREPLY=( $(compgen -W "init status run start stop restart tail logs enqueue claim complete fail list events retry config validate-config work-once metrics reload --instance-dir" -- "$cur") ) ;;
         company)      COMPREPLY=( $(compgen -W "register status alert approval replay --instance-dir" -- "$cur") ) ;;
         setup)        COMPREPLY=( $(compgen -W "--defaults --force --start --no-start --install-watchdog --no-watchdog --no-wait --channel" -- "$cur") ) ;;
-        update)       COMPREPLY=( $(compgen -W "--check-only --yes" -- "$cur") ) ;;
+        update)       COMPREPLY=( $(compgen -W "--check-only --yes --instance-dir" -- "$cur") ) ;;
         upgrade)      COMPREPLY=( $(compgen -W "--instance-dir --defaults --restart" -- "$cur") ) ;;
         doctor)       COMPREPLY=( $(compgen -W "--instance-dir --fix" -- "$cur") ) ;;
         user-model)   COMPREPLY=( $(compgen -W "run-now status review apply reject install uninstall --instance-dir" -- "$cur") ) ;;
@@ -78,7 +78,7 @@ zsh_completion() {
 #compdef jc
 
 local -a top
-top=(memory heartbeat voice watchdog workers skills chats email transcripts commitments dream gateway company init setup update upgrade doctor user-model self-model persona codex-auth migrate-to-0.3 migrate-to-0.3-commitments completion help version)
+top=(memory heartbeat voice watchdog workers skills chats email transcripts commitments dream gateway company init setup update upgrade doctor user-model self-model persona codex-auth completion help version)
 
 if (( CURRENT == 2 )); then
   _describe 'jc command' top

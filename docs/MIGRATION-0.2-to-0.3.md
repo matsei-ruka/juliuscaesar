@@ -1,8 +1,8 @@
-# Migrating from 0.2.x to 0.3.0
+# Migrating Older Instances To The Unified Gateway
 
 The 0.2.x runtime was coupled to Claude Code via the Telegram MCP plugin: one
-plugin = one channel = one liveness path. 0.3.0 ships the unified gateway —
-multi-channel, multi-brain, optional triage. Migration is opt-in.
+plugin = one channel = one liveness path. The CalVer gateway releases ship the
+unified gateway: multi-channel, multi-brain, optional triage.
 
 ## Triggers
 
@@ -16,28 +16,22 @@ Migrate when you want any of:
 ## Steps
 
 ```sh
-# 0. Update the framework
-git pull   # in your juliuscaesar checkout
+# 0. Update the framework and run release hooks. Default hook behavior keeps
+#    things conservative: telegram-only, single brain, no triage.
+jc update --instance-dir /path/to/instance --yes
 
-# 1. Run the migrator. Default flags keep things conservative — telegram
-#    only, single brain, no triage. Add flags as needed.
+# 1. Move into the instance and verify.
 cd /path/to/instance
-jc migrate-to-0.3                           # dry-friendly defaults
-jc migrate-to-0.3 --triage openrouter       # if you want triage on day one
-jc migrate-to-0.3 --enable-slack            # if you have a Slack workspace
-jc migrate-to-0.3 --dry-run                 # preview changes only
-
-# 2. Verify
 jc doctor
 
-# 3. Start the gateway daemon (or restart the watchdog)
+# 2. Start the gateway daemon (or restart the watchdog)
 jc gateway start
 # OR
 jc watchdog tick
 
-# 4. Send a test message in Telegram and confirm the reply.
+# 3. Send a test message in Telegram and confirm the reply.
 
-# 5. (Optional) Enable triage later
+# 4. (Optional) Enable triage later
 $EDITOR ops/gateway.yaml                    # set triage: openrouter
 echo OPENROUTER_API_KEY=sk-or-... >> .env
 jc gateway reload
@@ -75,7 +69,7 @@ Store the matching key in `.env`, then run `jc doctor` and `jc gateway reload`.
 `jc doctor` reports the configured protocol, provider host, model, and whether
 the configured key env var resolves.
 
-## What the migrator does
+## What the release hook does
 
 - Reads `ops/watchdog.conf` and `.env` for current channel + chat id values.
 - Writes `ops/gateway.yaml` with conservative defaults.
@@ -93,8 +87,8 @@ jc gateway stop
 jc watchdog tick
 ```
 
-The legacy live-Claude path will keep working through 0.4.x with a
-deprecation warning. It is removed in 0.5.0.
+The legacy live-Claude path remains deprecated. Use `jc update --instance-dir`
+to apply the gateway release hook, then restart the gateway/watchdog.
 
 ## Multi-brain: enabling Codex / Gemini / etc.
 

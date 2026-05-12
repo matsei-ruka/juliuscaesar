@@ -250,7 +250,7 @@ children:
       window_seconds: 600
       start_grace_seconds: 15
 
-  # Legacy entry — only present on instances pre-0.3.0. Generates a deprecation
+  # Legacy entry — only present on older instances. Generates a deprecation
   # warning every tick and runs the original watchdog.sh main() path. Remove
   # this block once your instance no longer needs the screen+claude+plugin
   # session (the unified gateway covers Telegram + voice natively).

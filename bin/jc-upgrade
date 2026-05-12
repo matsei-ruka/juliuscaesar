@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # jc-upgrade — interactive reconfigurator for an existing JuliusCaesar instance.
 #
-# Walks through every knob in 0.3.0 (channel tokens, default brain, triage
-# backend + model + threshold, per-class routing map, reliability tweaks) and
+# Walks through the current gateway knobs (channel tokens, default brain,
+# triage backend + model + threshold, per-class routing map, reliability tweaks) and
 # writes/merges `.env`, `ops/gateway.yaml`, `ops/watchdog.conf`. Each prompt
 # pre-fills with the current value (or a sensible default) — pressing Enter
 # keeps it.

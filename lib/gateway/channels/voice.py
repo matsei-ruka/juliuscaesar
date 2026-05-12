@@ -5,8 +5,8 @@ channel (typically `telegram`) and rewrites inbound audio events into text
 events, plus offers a TTS render for outbound. ASR/TTS are delegated to
 DashScope helpers in `lib/voice/` when available.
 
-For 0.3.0 the voice channel is an enabler: the paired channel is responsible
-for receiving audio attachments and pushing them at the gateway under
+The voice channel is an enabler: the paired channel is responsible for
+receiving audio attachments and pushing them at the gateway under
 `source="voice"` events with `meta.audio_path` set. The channel's `run` loop
 is therefore a no-op heartbeat — it only logs that voice is enabled and
 waits for the daemon to stop. The transcription path is implemented as a

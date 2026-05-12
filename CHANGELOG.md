@@ -44,7 +44,8 @@ Commercial v1 for offline self-improvement.
   `memory/L2/playbooks/`, disabled `commitments_tick`, `reengage_tick`, and
   `dream_tick` heartbeat tasks, and RULES §24/§25/§26 for re-engagement,
   sweeps, and autonomous follow-through.
-- Added `jc-migrate-to-0.3-commitments` for older instances.
+- Added the `2026.05.12.01` release update hook so older instances receive the
+  commitments/re-engage scaffold automatically through `jc update`.
 - KB entries now document commitments/re-engagement and the dream pipeline.
 
 ## 2026.05.09.01
@@ -506,14 +507,13 @@ action after `git pull && ./install.sh`.
 ## 2026.04.28
 
 Earlier work shipped under unified releases. See `git log v2026.04.28..` for
-the diff that produced 2026.05.02. The major themes since 0.3.0:
+the diff that produced 2026.05.02. The major themes in that CalVer release:
 
 - Unified gateway daemon (telegram, slack, discord, voice, jc-events, cron).
 - Multi-brain Python wrappers (claude, codex, gemini, opencode, aider) with
   `[brain]` and `/brain` overrides.
 - Triage layer with ollama / openrouter / claude-channel backends and sticky
   brain.
-- `jc migrate-to-0.3` migrator, structured JSON logs, backpressure, log
-  rotation.
+- CalVer release update hook, structured JSON logs, backpressure, log rotation.
 - `docs/GATEWAY.md`, migration guide, ADR, brain capability matrix.
 - Config schema validator.

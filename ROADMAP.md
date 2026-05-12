@@ -26,18 +26,18 @@ Extract the self-contained pieces from the original reference instance into a wo
 - [x] `jc workers` — on-demand background agents (spec: `docs/specs/workers.md`)
 - [ ] Skill loader: `jc skill install <name>`, `jc skill list`, declarative SKILL.md manifests
 - [ ] Instance templates beyond the base: `jc init --template=minimal|full|briefings-only`
-- [x] Channel plumbing abstraction beyond Telegram (Slack Socket Mode shipped; Discord + voice + jc-events + cron land in 0.3.0)
+- [x] Channel plumbing abstraction beyond Telegram (Slack Socket Mode shipped; Discord + voice + jc-events + cron land in CalVer gateway releases)
 - [ ] `jc upgrade` self-updater
 - [ ] CI (shellcheck, pytest, smoke test of `jc init` → `jc doctor` pipeline)
 - [x] `install.sh`: refuse to overwrite shims that point at a different repo
 - [ ] First external alpha tester
 
-## 0.3.0 — "It helps"
+## 2026.05.02 — "It helps"
 
 - [x] Unified gateway daemon (telegram, slack, discord, voice, jc-events, cron)
 - [x] Multi-brain Python wrappers (claude, codex, gemini, opencode, aider) + `[brain]` and `/brain` overrides
 - [x] Triage layer with ollama / openrouter / claude-channel backends + sticky brain
-- [x] `jc migrate-to-0.3` migrator + structured JSON logs + backpressure + log rotation
+- [x] CalVer release update hook + structured JSON logs + backpressure + log rotation
 - [x] `docs/GATEWAY.md`, migration guide, ADR, brain capability matrix
 - [x] Config schema validator
 - [ ] Documentation site

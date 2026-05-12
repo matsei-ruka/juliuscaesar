@@ -26,7 +26,7 @@ SUPPORTED_TRIAGE_BACKENDS = (
     "codex_api",
 )
 SUPPORTED_TRIAGE_PROTOCOLS = ("openai_compat", "anthropic")
-REJECTED_CHANNELS = {"web": "web channel removed in 0.3.0; use `jc gateway enqueue` for local testing"}
+REJECTED_CHANNELS = {"web": "web channel is unsupported; use `jc gateway enqueue` for local testing"}
 CODEX_SANDBOX_VALUES = {"read-only", "workspace-write", "yolo", "danger", "danger-full-access"}
 CODEX_YOLO_SANDBOX_VALUES = {"yolo", "danger", "danger-full-access"}
 DEFAULT_TRIAGE_ROUTING = {

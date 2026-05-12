@@ -6,8 +6,8 @@ of truth for that flow; this module just shells out to it with the env vars
 the script expects, so the supervisor can supervise legacy instances during
 the v1→v2 transition without forking the bash logic.
 
-This child type is **deprecated** — slated for removal in 0.5.0 along with
-the screen + bun-plugin code path it wraps.
+This child type is **deprecated** along with the screen + bun-plugin code path
+it wraps.
 """
 
 from __future__ import annotations

@@ -7,6 +7,10 @@ code_anchors:
     symbol: "BINARIES=("
   - path: bin/jc
     symbol: "case \"$SUB\" in"
+  - path: bin/jc-update
+    symbol: "run_release_hooks"
+  - path: updates/releases/2026.05.12.01.sh
+    symbol: "release_updates.release_2026_05_12_01"
   - path: bin/jc-skills
     symbol: "PRE_SHIPPED"
 last_verified: 2026-05-12
@@ -22,7 +26,8 @@ related:
 The top-level `jc` command is a bash router. It dispatches to matching `jc-*` binaries on PATH. Current subcommand surface (router help in `bin/jc:usage()`):
 
 - Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `skills`, `gateway`, `init`, `setup`, `doctor`, `completion`.
-- Lifecycle: `update` (CalVer framework upgrade), `upgrade` (reconfigure existing instance: channels, brain, triage), `migrate-to-0.3` (one-shot migration helper for 0.2.x instances).
+- Lifecycle: `update` (CalVer framework upgrade plus automatic release hooks)
+  and `upgrade` (reconfigure existing instance: channels, brain, triage).
 - Conversation surface: `chats` (Telegram chat directory), `email` (email channel operations), `transcripts` (per-conversation chat history read/tail/search).
 - Autonomous follow-through: `commitments` (deferred YAML actions) and
   `dream` (offline reflection/self-improvement cycle).
@@ -35,6 +40,9 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - `install.sh` owns dependency setup and shim generation.
 - `bin/jc` owns the public router surface, including the first-class `email`
   subcommand that dispatches to `jc-email`.
+- `bin/jc-update` owns framework updates and runs CalVer release hook scripts
+  from `updates/releases/<version>.sh`; each changelog release has a hook file,
+  even if it is a no-op.
 - Individual binaries own subcommand behavior. `bin/jc-skills` owns instance
   skill status, pre-shipped skill sync, provider credential writes, and live
   provider checks.
@@ -51,6 +59,10 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - Python binaries run through the venv wrapper with the framework `lib/` on `PYTHONPATH`.
 - Native bash binaries are invoked directly by their shim.
 - The router preserves `--instance-dir <path>` or `--instance-dir=<path>` when placed before the subcommand.
+- `jc update` accepts `--instance-dir` and forwards it to matching release
+  hooks. If the framework code is already current, it still runs the current
+  release hook so an idempotent instance migration can be applied after a
+  manual pull.
 - `jc setup` uses `jc init` underneath, detects logged-in coding tools,
   selects a default brain, configures Telegram as the first communication
   channel, waits for the first message unless `--no-wait` is passed, writes

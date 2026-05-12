@@ -24,7 +24,7 @@ Naming may diverge from the original spec where the implementation already chose
 - Discord, voice, jc-events, cron channels.
 - Sticky brain + idle timeout + confidence threshold + fallback.
 - Brain override syntax (`[opus]` prefix and `/brain X` slash command).
-- `bin/jc-migrate-to-0.3` migration tool.
+- CalVer release hook for gateway bootstrap.
 - Structured JSON logs, backpressure, log rotation, timeout enforcement.
 - Security audit via worker spawn (Gemini bug-hunt + Opus injection audit).
 - KB / ADR / migration docs.
@@ -292,7 +292,7 @@ Five sprints. Each depends on the previous. Each ends with a green `jc doctor` a
 
 **Deliverables**
 
-1. **`bin/jc-migrate-to-0.3`.** Reads existing `ops/watchdog.conf` + `.env`. Writes `ops/gateway.yaml` with conservative defaults (telegram-only, single brain = current default, `triage: none` initially). Backs up `watchdog.conf` to `watchdog.conf.bak.<timestamp>`. Runs `jc doctor` before and after. Prints the next-step list (enable triage, add channels) to stdout. Idempotent: re-running on an already-migrated instance is a no-op.
+1. **CalVer release hook.** Reads existing `ops/watchdog.conf` + `.env`. Writes a missing `ops/gateway.yaml` with conservative defaults (telegram-only, single brain = current default, `triage: none` initially). Backs up `watchdog.conf` to `watchdog.conf.bak.<timestamp>`. Idempotent release hooks are run by `jc update`; re-running on an already-migrated instance is a no-op.
 2. **Reliability**
    - **Brain timeout enforcement.** Hard-kill brain subprocess after `brains.<brain>.timeout_seconds`. Mark event `failed` with `error="timeout"`. Retry honors `event_retry_backoff_seconds` array: `[10, 60, 300]`.
    - **Backpressure.** New config `max_queue_depth: 100`. When `SELECT count(*) FROM events WHERE status IN ('queued','running') >= max_queue_depth`, new inbound user events get a "system busy, retry shortly" reply via the originating channel; system events (`source` in `jc-events`, `cron`) are dropped with a log warning. Threshold checked at enqueue time.
@@ -318,14 +318,14 @@ Five sprints. Each depends on the previous. Each ends with a green `jc doctor` a
    - Update `ROADMAP.md`: tick 0.2.0 channel-plumbing item, add 0.3.0 line items.
    - Update `docs/kb/INDEX.md` to surface the new files.
 7. **Watchdog**
-   - When `RUNTIME_MODE=legacy-claude` is detected, log a deprecation warning each tick: "legacy-claude mode will be removed in 0.5.0; migrate via `jc migrate-to-0.3`".
+   - When `RUNTIME_MODE=legacy-claude` is detected, log a deprecation warning each tick with `jc update --instance-dir <instance>` as the migration path.
 8. **Release**
    - Tag `v0.3.0` after the spec author's instance has run for ≥7 days on the new gateway without intervention.
    - GitHub release notes generated from the sprint deliverable list.
 
 **Definition of done**
 
-- Production instance migrates with `jc migrate-to-0.3` and runs ≥7 days clean.
+- Production instance migrates through `jc update --instance-dir <instance>` and runs ≥7 days clean.
 - Heartbeat tasks, voice, memory, worker spawn — no regression.
 - Security audit captured in KB.
 - `v0.3.0` tagged. Release notes posted.

@@ -1323,7 +1323,7 @@ class ConfigWebRejectionTests(unittest.TestCase):
             )
             with self.assertRaises(ConfigError) as ctx:
                 load_config(instance)
-            self.assertIn("web channel removed", str(ctx.exception))
+            self.assertIn("web channel is unsupported", str(ctx.exception))
 
     def test_default_config_still_loads_with_new_keys(self):
         with tempfile.TemporaryDirectory() as tmp:

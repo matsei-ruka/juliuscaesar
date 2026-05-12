@@ -29,6 +29,8 @@ def test_bash_commands_have_help() -> None:
         proc = _run(str(REPO_ROOT / "bin" / binary), "--help")
         assert proc.returncode == 0, proc.stderr
         assert "Usage:" in proc.stdout
+        if binary == "jc-update":
+            assert "--instance-dir" in proc.stdout
 
 
 def test_completion_command_outputs_shell_scripts() -> None:
@@ -36,6 +38,8 @@ def test_completion_command_outputs_shell_scripts() -> None:
     assert bash_proc.returncode == 0, bash_proc.stderr
     assert "complete -F _jc_complete jc" in bash_proc.stdout
     assert "skills)       COMPREPLY" in bash_proc.stdout
+    assert "migrate-to-0.3" not in bash_proc.stdout
+    assert "--instance-dir" in bash_proc.stdout
     assert "pending) COMPREPLY" in bash_proc.stdout
     assert "senders) COMPREPLY" in bash_proc.stdout
     assert "drafts)  COMPREPLY" in bash_proc.stdout
@@ -44,6 +48,7 @@ def test_completion_command_outputs_shell_scripts() -> None:
     assert zsh_proc.returncode == 0, zsh_proc.stderr
     assert "#compdef jc" in zsh_proc.stdout
     assert "skills command' status list menu sync configure test show" in zsh_proc.stdout
+    assert "migrate-to-0.3" not in zsh_proc.stdout
     assert "email pending command' list show approve deny" in zsh_proc.stdout
     assert "email senders command' list trust external block" in zsh_proc.stdout
     assert "email drafts command' list show edit approve reject" in zsh_proc.stdout
@@ -60,3 +65,4 @@ def test_router_lists_completion() -> None:
     assert proc.returncode == 0, proc.stderr
     assert "completion" in proc.stdout
     assert "skills" in proc.stdout
+    assert "migrate-to-0.3" not in proc.stdout

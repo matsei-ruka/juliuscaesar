@@ -437,7 +437,7 @@ Dream uses `lib/reengage/queuer.py` as one of its commitment emitters (see §3, 
 ## 15. Migration
 
 1. **Phase A (this PR):** specs only. No runtime changes.
-2. **Phase B (commitments PR):** ship `lib/commitments/` + `lib/reengage/` + scaffold `state/commitments/`. Existing Mario instance gets `jc-migrate-to-0.3-commitments` (defined in sub-spec).
+2. **Phase B (commitments PR):** ship `lib/commitments/` + `lib/reengage/` + scaffold `state/commitments/`. Existing Mario instance gets the commitments/re-engage scaffold through the `2026.05.12.01` release hook run by `jc update`.
 3. **Phase C (dream PR):** ship `lib/dream/` + `jc-dream` binary + `state/dreams/` scaffold. Heartbeat builtin disabled by default. Operator enables per instance.
 4. **Phase D (default-on, ~3 releases later):** once we have stable adoption signal, flip `dream_tick` default to `enabled: true` in `jc-init` templates.
 

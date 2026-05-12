@@ -2,12 +2,13 @@
 # jc-update — Check and apply framework updates.
 #
 # Usage:
-#   jc update [--check-only]
+#   jc update [--check-only] [--yes] [--instance-dir path]
 #
 # Behavior:
 #   - Fetches latest release version from GitHub
 #   - Compares with current local version
 #   - If newer, offers to pull and restart watchdog
+#   - Runs CalVer release hooks from updates/releases/
 
 set -euo pipefail
 
@@ -16,11 +17,12 @@ usage() {
 jc-update — Check and apply framework updates.
 
 Usage:
-  jc update [--check-only] [--yes]
+  jc update [--check-only] [--yes] [--instance-dir path]
 
 Options:
   --check-only   Only report whether an update is available.
   --yes          Apply without prompting.
+  --instance-dir Path to the instance that should receive release hooks.
   -h, --help     Show this help.
 EOF
 }
@@ -31,6 +33,8 @@ JC_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 # Parse args
 CHECK_ONLY=0
 ASSUME_YES=0
+INSTANCE_DIR=""
+CALLING_CWD="$(pwd)"
 while (( $# )); do
     case "$1" in
         -h|--help|help)
@@ -43,6 +47,18 @@ while (( $# )); do
             ;;
         --yes|-y)
             ASSUME_YES=1
+            shift
+            ;;
+        --instance-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "--instance-dir requires a path" >&2
+                exit 2
+            fi
+            INSTANCE_DIR="$2"
+            shift 2
+            ;;
+        --instance-dir=*)
+            INSTANCE_DIR="${1#--instance-dir=}"
             shift
             ;;
         *)
@@ -64,6 +80,72 @@ get_remote_version() {
         | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/' || echo ""
 }
 
+run_release_hooks() {
+    local from_version="$1"
+    local to_version="$2"
+    local hooks_dir="$JC_ROOT/updates/releases"
+
+    if [[ ! -d "$hooks_dir" ]]; then
+        echo "No release hooks directory found."
+        return 0
+    fi
+
+    local hooks
+    hooks=$(
+        python3 - "$hooks_dir" "$from_version" "$to_version" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+hooks_dir = Path(sys.argv[1])
+from_version = sys.argv[2]
+to_version = sys.argv[3]
+
+def parts(value: str) -> tuple[int, ...]:
+    return tuple(int(piece) for piece in re.findall(r"\d+", value))
+
+start = parts(from_version)
+target = parts(to_version)
+
+for hook in sorted(hooks_dir.glob("*.sh"), key=lambda path: parts(path.stem)):
+    version = parts(hook.stem)
+    if start == target:
+        include = version == target
+    else:
+        include = start < version <= target
+    if include:
+        print(hook)
+PY
+    )
+
+    if [[ -z "$hooks" ]]; then
+        echo "No release hooks to run for $from_version -> $to_version."
+        return 0
+    fi
+
+    echo "Running release hooks for $from_version -> $to_version..."
+    export JC_FRAMEWORK_ROOT="$JC_ROOT"
+    export JC_UPDATE_CALLING_CWD="$CALLING_CWD"
+    while IFS= read -r hook; do
+        [[ -z "$hook" ]] && continue
+        echo "-> $(basename "$hook" .sh)"
+        if [[ -n "$INSTANCE_DIR" ]]; then
+            "$hook" --from-version "$from_version" --to-version "$to_version" --instance-dir "$INSTANCE_DIR"
+        else
+            "$hook" --from-version "$from_version" --to-version "$to_version"
+        fi
+    done <<< "$hooks"
+}
+
+reload_watchdog() {
+    echo "Reloading watchdog..."
+    if command -v jc-watchdog >/dev/null 2>&1; then
+        jc-watchdog reload || true
+    fi
+}
+
 LOCAL=$(get_local_version)
 echo "Local version: $LOCAL"
 
@@ -79,6 +161,11 @@ echo "Latest version: $REMOTE"
 
 if [[ "$LOCAL" == "$REMOTE" ]]; then
     echo "Already up-to-date."
+    if [[ "$CHECK_ONLY" == 1 ]]; then
+        exit 0
+    fi
+    run_release_hooks "$LOCAL" "$LOCAL"
+    reload_watchdog
     exit 0
 fi
 
@@ -102,9 +189,8 @@ cd "$JC_ROOT"
 git fetch origin
 git merge --ff-only origin/main
 
-echo "Reloading watchdog..."
-if command -v jc-watchdog >/dev/null 2>&1; then
-    jc-watchdog reload || true
-fi
+UPDATED=$(get_local_version)
+run_release_hooks "$LOCAL" "$UPDATED"
+reload_watchdog
 
-echo "✓ Update complete. Version $REMOTE deployed."
+echo "✓ Update complete. Version $UPDATED deployed."

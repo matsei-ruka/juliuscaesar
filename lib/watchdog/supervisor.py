@@ -167,9 +167,7 @@ class Supervisor:
             self._log_supervisor(f"{spec.name}: alert_mode — waiting for `jc watchdog reset`")
             return
         if spec.type == "legacy-claude":
-            self._log_supervisor(
-                f"{spec.name}: DEPRECATION legacy-claude child type — slated for removal in 0.5.0"
-            )
+            self._log_supervisor(f"{spec.name}: DEPRECATION legacy-claude child type")
         now = self.clock()
         alive, reason = health.check(spec, st, instance_dir=self.instance_dir, now=now)
         if alive:

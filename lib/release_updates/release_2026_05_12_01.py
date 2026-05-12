@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
-"""Migrate an existing instance to the commitments/re-engage scaffold."""
+"""Release hook for 2026.05.12.01."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -12,21 +12,27 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None  # type: ignore
 
-_HERE = Path(__file__).resolve().parent
-_LIB = _HERE.parent / "lib"
-if _LIB.exists() and str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from commitments.engine import ensure_dirs, iter_pending  # type: ignore  # noqa: E402
-from commitments.schema import dump, load  # type: ignore  # noqa: E402
-from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
+from commitments.engine import ensure_dirs, iter_pending
+from commitments.schema import dump, load
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir
 
 
-def resolve_instance_dir(arg: str | None) -> Path:
+RELEASE_VERSION = "2026.05.12.01"
+
+
+def resolve_instance_dir(arg: str | None) -> Path | None:
+    calling_cwd = os.environ.get("JC_UPDATE_CALLING_CWD")
+    cwd = Path(calling_cwd).expanduser().resolve() if calling_cwd else None
     try:
-        return _resolve_instance_dir(arg, fallback_markers=("memory", "heartbeat/tasks.yaml"))
+        return _resolve_instance_dir(
+            arg,
+            fallback_markers=("memory", "heartbeat/tasks.yaml"),
+            cwd=cwd,
+        )
     except InstanceResolutionError as exc:
-        raise SystemExit(str(exc)) from exc
+        if arg or os.environ.get("JC_INSTANCE_DIR"):
+            raise SystemExit(str(exc)) from exc
+        return None
 
 
 def normalize_commitments(instance: Path, *, dry_run: bool) -> tuple[int, list[str]]:
@@ -94,16 +100,12 @@ def ensure_reengage_config(instance: Path, *, dry_run: bool) -> bool:
     return True
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jc-migrate-to-0.3-commitments")
-    parser.add_argument("--instance-dir")
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args(argv)
-    instance = resolve_instance_dir(args.instance_dir)
-
-    rewritten, errors = normalize_commitments(instance, dry_run=args.dry_run)
-    task_changed = ensure_task(instance, dry_run=args.dry_run)
-    reengage_changed = ensure_reengage_config(instance, dry_run=args.dry_run)
+def apply(instance: Path, *, dry_run: bool) -> int:
+    rewritten, errors = normalize_commitments(instance, dry_run=dry_run)
+    task_changed = ensure_task(instance, dry_run=dry_run)
+    reengage_changed = ensure_reengage_config(instance, dry_run=dry_run)
+    print(f"release_update={RELEASE_VERSION}")
+    print(f"instance={instance}")
     print(f"commitments_normalized={rewritten}")
     print(f"heartbeat_tasks_added={str(task_changed).lower()}")
     print(f"reengage_config_added={str(reengage_changed).lower()}")
@@ -117,5 +119,23 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if errors else 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=f"release-update-{RELEASE_VERSION}")
+    parser.add_argument("--from-version", default="")
+    parser.add_argument("--to-version", default=RELEASE_VERSION)
+    parser.add_argument("--instance-dir")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    instance = resolve_instance_dir(args.instance_dir)
+    if instance is None:
+        print(f"release_update={RELEASE_VERSION}")
+        print("instance_resolved=false")
+        print("release hook complete; no instance directory was available")
+        return 0
+    return apply(instance, dry_run=args.dry_run)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
+

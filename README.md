@@ -130,7 +130,7 @@ jc commitments — deferred action engine
 jc dream       — offline reflection + self-improvement cycle
 jc gateway     — unified event queue + brain dispatch
 jc doctor      — diagnostics + auto-repair
-jc update      — check and apply framework updates
+jc update      — check, apply framework updates, and run release hooks
 jc init        — scaffold a new instance
 jc setup       — guided first-run configurator
 ```

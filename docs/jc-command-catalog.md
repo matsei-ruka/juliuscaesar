@@ -50,8 +50,6 @@ Routed public subcommands:
 | `jc codex-auth` | `jc-codex-auth` | auth | Local Codex OAuth token inspection/refresh |
 | `jc self-model` | `jc-self-model` | persona | Autonomous self-observation loop (proposes JOURNAL/RULES/IDENTITY edits) |
 | `jc persona` | `jc-persona` | persona | Gap-driven interview engine; macro binding + slot filling |
-| `jc migrate-to-0.3` | `jc-migrate-to-0.3` | migration | Bootstrap older instances for unified gateway |
-| `jc migrate-to-0.3-commitments` | `jc-migrate-to-0.3-commitments` | migration | Add commitments/re-engage scaffold to older instances |
 | `jc completion` | `jc-completion` | shell UX | Print bash/zsh completion scripts |
 
 Installed but not routed by `jc`:
@@ -430,23 +428,27 @@ Current flow:
 
 Binary: `bin/jc-update`
 
-Purpose: check GitHub releases and optionally update framework code.
+Purpose: check GitHub releases, update framework code, and run CalVer release
+hooks.
 
 Usage:
 
 ```bash
-jc update [--check-only]
+jc update [--check-only] [--yes] [--instance-dir path]
 ```
 
 Behavior:
 
 - reads local version from `pyproject.toml`;
 - fetches latest release from GitHub;
-- prompts before `git fetch origin` plus `git reset --hard origin/main`;
+- prompts before `git fetch origin` plus `git merge --ff-only origin/main`;
+- runs matching release hooks from `updates/releases/<CalVer>.sh`;
+- when the code is already current, still runs the current release hook so
+  idempotent instance migrations can be applied after a manual pull;
 - attempts `jc-watchdog reload`.
 
-Help status: fixed. Update now uses `git merge --ff-only origin/main` instead
-of `git reset --hard`.
+Help status: fixed. Release hooks are part of `jc update`, not separate public
+migration commands.
 
 ### `jc upgrade`
 
@@ -560,22 +562,6 @@ Subcommands:
 | `refresh` | `--force` | Refresh bearer token |
 | `token` | none | Print a fresh bearer token |
 
-### `jc migrate-to-0.3`
-
-Binary: `bin/jc-migrate-to-0.3`
-
-Purpose: one-shot migration helper for older instances.
-
-Options:
-
-- `--instance-dir`
-- `--triage none|openrouter|ollama|claude-channel`
-- `--default-brain`
-- `--telegram-chat-id`
-- `--enable-slack`
-- `--enable-discord`
-- `--dry-run`
-
 ### `jc completion`
 
 Binary: `bin/jc-completion`
@@ -608,7 +594,7 @@ These are catalog observations, not fixes yet:
    `jc email senders trust`, and `jc gateway list` overlaps `jc gateway events`.
 4. Internal commands are still callable where needed, but `jc workers _run` is
    hidden from normal help.
-5. Setup/lifecycle commands use mixed strategies: `jc setup`, `jc init`,
-   `jc upgrade`, and `jc migrate-to-0.3` each own separate config-writing logic.
+5. Setup/lifecycle commands use mixed strategies: `jc setup`, `jc init`, and
+   `jc upgrade` each own separate config-writing logic.
 6. Directly running Python binaries outside the installed venv can fail before
    help renders because imports happen before argparse setup.

@@ -252,7 +252,7 @@ The framework `jc-init` template adds `§24 RE-ENGAGEMENT` to `memory/L1/RULES.m
 
 ## Migration
 
-1. **Existing Mario instance** keeps its `ops/commitments-tick.py` working until first JC release with `jc-commitments`. After release: operator runs `jc-migrate-to-0.3-commitments` (one-shot script) which:
+1. **Existing Mario instance** keeps its `ops/commitments-tick.py` working until first JC release with `jc-commitments`. The `2026.05.12.01` release hook, run automatically by `jc update`, does the instance migration:
    - Reads existing `state/commitments/*.yaml` (Mario's format is already close)
    - Normalizes to v1 schema (add missing fields, validate)
    - Disables old crontab line, enables new heartbeat builtin in `heartbeat/tasks.yaml`
