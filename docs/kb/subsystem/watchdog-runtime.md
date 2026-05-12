@@ -57,7 +57,10 @@ Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_M
 - Once the gateway daemon is alive, intelligent watchdog inspects
   `state/gateway/queue.db` and `state/gateway/gateway.log` for running events
   older than `watchdog.long_running_notice_seconds` (default 180s), failed
-  brain/auth events, and recent recovery logs.
+  brain/auth events, and recent recovery logs. Failed/queued recovery candidates
+  are capped by both `watchdog.failed_event_limit` (default 50) and
+  `watchdog.failed_event_max_age_seconds` (default 3600s), so stale unanswered
+  events from days-old quiet instances are not retried.
 - Long-running user requests get one direct progress notice per event by
   default; optional repeats are controlled by
   `watchdog.long_running_repeat_seconds`.

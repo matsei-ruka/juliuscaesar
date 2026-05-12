@@ -76,3 +76,5 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-12] update | subsystem/installation-and-cli-routing.md — document jc update release hooks and remove public migrate-to-0.3 lifecycle surface
 ## [2026-05-12] update | subsystem/watchdog-runtime.md — documented intelligent watchdog brain health, long-running notices, and fallback switching
 ## [2026-05-12] update | subsystem/gateway-queue.md + decision/why-unified-gateway.md — documented user-visible unsafe triage rejection notices
+## [2026-05-12] update | subsystem/watchdog-runtime.md — documented failed-event recovery age cap to avoid stale unanswered-message replay
+## [2026-05-12] update | subsystem/installation-and-cli-routing.md — bumped current release hook anchor to 2026.05.12.02 hotfix

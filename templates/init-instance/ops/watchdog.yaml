@@ -11,6 +11,8 @@ watchdog:
   brain_switch_cooldown_seconds: 900
   log_window_seconds: 900
   log_window_lines: 200
+  failed_event_max_age_seconds: 3600
+  failed_event_limit: 50
   brain_fallbacks:
     claude: [codex, gemini, opencode]
     codex: [claude, gemini]

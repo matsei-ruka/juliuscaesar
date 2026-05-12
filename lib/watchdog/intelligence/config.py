@@ -28,6 +28,7 @@ class IntelligenceConfig:
     brain_switch_cooldown_seconds: int = 900
     log_window_seconds: int = 900
     log_window_lines: int = 200
+    failed_event_max_age_seconds: int = 3600
     failed_event_limit: int = 50
     use_triage_model: bool = True
     brain_fallbacks: dict[str, tuple[str, ...]] = field(
@@ -56,6 +57,7 @@ def load_config(instance_dir: Path) -> IntelligenceConfig:
         brain_switch_cooldown_seconds=_int(raw.get("brain_switch_cooldown_seconds"), 900),
         log_window_seconds=_int(raw.get("log_window_seconds"), 900),
         log_window_lines=_int(raw.get("log_window_lines"), 200),
+        failed_event_max_age_seconds=_int(raw.get("failed_event_max_age_seconds"), 3600),
         failed_event_limit=_int(raw.get("failed_event_limit"), 50),
         use_triage_model=_bool(raw.get("use_triage_model"), True),
         brain_fallbacks=fallbacks,
@@ -85,4 +87,3 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
-

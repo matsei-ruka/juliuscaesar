@@ -125,7 +125,10 @@ def _read_failed(
         event = queue.row_to_event(row)
         if event is None:
             continue
-        out.append(_summary(event, age=_event_age(event, now=now), brain_by_event=brain_by_event))
+        age = _event_age(event, now=now)
+        if cfg.failed_event_max_age_seconds > 0 and age > cfg.failed_event_max_age_seconds:
+            continue
+        out.append(_summary(event, age=age, brain_by_event=brain_by_event))
     return out
 
 
@@ -243,4 +246,3 @@ def _value_after(msg: str, marker: str) -> str:
 
 def event_channel(summary: EventSummary) -> str:
     return str(summary.meta.get("delivery_channel") or channel_name(summary.event))
-

@@ -152,6 +152,46 @@ def test_failed_auth_event_switches_to_fallback_brain(tmp_path: Path, monkeypatc
     assert any("switching this request to codex" in message for message in delivered)
 
 
+def test_old_failed_auth_event_is_not_recovered(tmp_path: Path, monkeypatch) -> None:
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    event, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="please answer",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "chat_type": "private", "brain_override": "claude"},
+    )
+    queue.fail(conn, event.id, error="authentication failed 401 unauthorized", max_retries=0)
+    conn.execute(
+        "UPDATE events SET received_at=?, started_at=? WHERE id=?",
+        (_old_ts(7 * 24 * 3600), _old_ts(7 * 24 * 3600), event.id),
+    )
+    conn.commit()
+    conn.close()
+
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+    monkeypatch.setattr("watchdog.intelligence.actions._brain_validates", lambda *args: True)
+
+    result = run_tick(inst)
+
+    assert result.actions == []
+    assert delivered == []
+    conn = queue.connect(inst)
+    unchanged = queue.get(conn, event.id)
+    conn.close()
+    assert unchanged is not None
+    assert unchanged.status == "failed"
+    meta = json.loads(unchanged.meta or "{}")
+    assert meta["brain_override"] == "claude"
+    assert "watchdog_switch" not in meta
+
+
 def test_group_auth_failure_notifies_group_and_operator(tmp_path: Path, monkeypatch) -> None:
     inst = _write_instance(tmp_path, telegram_chat_id="operator", brain_fallbacks="claude: []")
     conn = queue.connect(inst)

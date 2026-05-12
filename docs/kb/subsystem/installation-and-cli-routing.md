@@ -9,8 +9,8 @@ code_anchors:
     symbol: "case \"$SUB\" in"
   - path: bin/jc-update
     symbol: "run_release_hooks"
-  - path: updates/releases/2026.05.12.01.sh
-    symbol: "release_updates.release_2026_05_12_01"
+  - path: updates/releases/2026.05.12.02.sh
+    symbol: "release_updates.release_2026_05_12_02"
   - path: bin/jc-skills
     symbol: "PRE_SHIPPED"
 last_verified: 2026-05-12
@@ -95,5 +95,5 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 
 - 2026-04-25: Roadmap still lists public distribution via npm, brew, or curl as future work.
 - 2026-05-12: `bin/jc` declares a `VERSION` constant (CalVer, currently
-  `2026.05.12.01`) used by `jc update` to compare against released framework
+  `2026.05.12.02`) used by `jc update` to compare against released framework
   versions.

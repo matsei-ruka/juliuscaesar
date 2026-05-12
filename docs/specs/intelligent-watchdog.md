@@ -162,6 +162,19 @@ watchdog:
   long_running_notice_seconds: 180
 ```
 
+Failed/queued recovery must also be bounded by both count and event age so a
+quiet instance cannot resurrect week-old unanswered messages:
+
+```yaml
+watchdog:
+  failed_event_max_age_seconds: 3600
+  failed_event_limit: 50
+```
+
+Use `started_at` when present and `received_at` otherwise. If
+`failed_event_max_age_seconds <= 0`, the age guard is disabled for explicit
+operator override only.
+
 ### 5.2 Gateway Log Snapshot
 
 Read the current gateway JSON log and extract only recent relevant records:
@@ -514,6 +527,7 @@ jc watchdog reset-brain claude
 ### Unit
 
 - Snapshot reads running events older than threshold.
+- Snapshot ignores failed/queued events older than the recovery age window.
 - Snapshot parses bounded JSON log windows and ignores malformed lines.
 - Evaluator parses valid JSON and rejects invalid/unknown kinds safely.
 - Dedupe state prevents duplicate long-running notices.
