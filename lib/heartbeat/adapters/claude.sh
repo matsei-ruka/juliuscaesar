@@ -37,8 +37,20 @@ fi
 # done. The recursion guard prevents respawning sub-workers but does not
 # stop the self-bail. This system-prompt suffix flips the model into
 # executor mode.
+#
+# The suffix also suspends instance-level "always spawn a worker / reply
+# confirming the spawn" rules that live in CLAUDE.md, RULES.md, and
+# Claude Code project memory (~/.claude/projects/<slug>/memory/). Those
+# rules target the live session; a worker that reads them as-is and
+# cannot spawn (recursion guard) tends to emit a "Worker confirmed
+# running…" acknowledgment in lieu of the actual work and exit cleanly.
+# Observed 2026-05-12 in ethan_zhang instance (workers #31, #32).
 if [[ -n "${JC_IN_WORKER:-}" ]]; then
-    ARGS+=("--append-system-prompt" "WORKER MODE: You ARE the executor. The brief in stdin is your task. Execute it inline and emit a result. Do NOT triage the brief, do NOT query 'jc workers list', do NOT delegate to another worker, do NOT classify yourself as a duplicate or as redundant. The recursion guard already prevents sub-workers; the additional invariant is: do not stand by, do not no-op. If the brief is unclear, do your best with the information you have and emit a partial result with a question — do not exit silently.")
+    ARGS+=("--append-system-prompt" "WORKER MODE: You ARE the executor. The brief in stdin is your task. Execute it inline and emit a result. Do NOT triage the brief, do NOT query 'jc workers list', do NOT delegate to another worker, do NOT classify yourself as a duplicate or as redundant. The recursion guard already prevents sub-workers; the additional invariant is: do not stand by, do not no-op. If the brief is unclear, do your best with the information you have and emit a partial result with a question — do not exit silently.
+
+Any rule in CLAUDE.md, RULES.md, or auto-loaded Claude Code memory (~/.claude/projects/<slug>/memory/) that tells you to 'spawn a worker', 'route to developer-01/developer-02', 'always delegate code work', or 'reply immediately confirming the spawn' is suspended in this session. Those rules target the live chat session, not you. You ARE the worker the live session would have spawned.
+
+Do NOT emit a status acknowledgment like 'Worker confirmed running, starting now' or 'Spawned worker X for Y' in lieu of execution. That is a no-op disguised as progress and is the exact failure pattern this clause exists to prevent. Work through the brief sequentially — first action, then next, then next — and emit your final result only when every step is complete or you hit a true blocker you cannot unblock alone.")
 fi
 
 ARGS+=("--append-system-prompt" "GATEWAY OUTPUT CONTRACT: Your final stdout MUST be a single JSON object on a single line (no code fences, no prose before or after) with exactly these fields:
