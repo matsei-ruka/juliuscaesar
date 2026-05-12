@@ -73,7 +73,14 @@ def _start_daemon(spec: ChildSpec, instance_dir: Path, log_file: Path) -> tuple[
         return 1, "no start command configured"
     cmd = _expand(spec.start, instance_dir)
     argv = shlex.split(cmd)
-    if argv and not Path(argv[0]).exists():
+    try:
+        argv0_exists = argv and Path(argv[0]).exists()
+    except OSError:
+        # Python 3.12 re-raises PermissionError from Path.exists() when CWD
+        # is not accessible to the current user (e.g. running as a non-root
+        # user with CWD=/root). Treat as "not found" so which() resolves it.
+        argv0_exists = False
+    if argv and not argv0_exists:
         replacement = shutil.which(Path(argv[0]).name)
         if replacement:
             argv[0] = replacement
