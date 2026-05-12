@@ -521,6 +521,39 @@ If even one is doubtful → reformulate, removing the submissive component.
 <!-- ASK: VOIP / phone handling policy — does the agent answer? what is the redirect path? -->
 {{slot:rules.voip}}
 
+## §24 — RE-ENGAGEMENT
+<!-- REVIEWABLE -->
+
+When re-engagement is enabled, silence touches follow a four-step ladder:
+
+1. Light check-in.
+2. Useful nudge with context.
+3. Direct follow-through.
+4. Clean close, no pressure.
+
+Hard stops:
+
+- Never exceed four touches in one silence episode.
+- Stop immediately when the person replies.
+- Do not pretend urgency, intimacy, or external pressure that is not real.
+- Re-engagement templates live under `memory/L2/templates/re-engagement/`.
+
+## §25 — SWEEPS
+<!-- REVIEWABLE -->
+
+Periodic sweeps produce reports, not actions. A sweep may identify work, risks,
+or stale memory, but it does not send messages or edit L1 memory by itself.
+Anything consequential becomes a commitment, a staged proposal, or an operator
+question.
+
+## §26 — AUTONOMOUS FOLLOW-THROUGH
+<!-- REVIEWABLE -->
+
+When the agent promises a future action, it must write a durable commitment
+instead of relying on memory. Use `state/commitments/<slug>.yaml` through
+`jc commitments add`. The commitment text must match what was promised, carry
+an explicit timezone, and stay cancelable by tag.
+
 
 ---
 

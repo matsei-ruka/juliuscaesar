@@ -11,7 +11,7 @@ code_anchors:
     symbol: "def parse_brain_output"
   - path: templates/init-instance/heartbeat/tasks.yaml
     symbol: "only_if_delta"
-last_verified: 2026-05-06
+last_verified: 2026-05-12
 verified_by: Matsei Ruka
 related:
   - contract/adapter-and-delivery-contracts.md
@@ -21,6 +21,10 @@ related:
 ## Summary
 
 Heartbeat is the cron-driven scheduled work system. It reads `<instance>/heartbeat/tasks.yaml`, builds a prompt from L1 memory, optional context files, an optional pre-fetch bundle, and a task prompt, then calls a configured brain adapter. Adapter stdout is parsed through the gateway brain-output contract before delivery. Non-empty parsed messages are delivered to Telegram unless `--dry-run` is set, the parsed message is empty, `push_message_sent=true`, a canonical sender push marker exists, or a legacy silent sentinel suppresses delivery.
+
+Pure-Python builtins can bypass the LLM adapter path. Current stateful builtins
+include `commitments_tick`, `reengage_tick`, and `dream_tick`; they ship
+disabled and run as dry-runs until an operator sets `enabled: true`.
 
 ## Pipeline
 
@@ -57,6 +61,9 @@ Named destinations are optional. If absent, delivery falls back to `TELEGRAM_CHA
 - Locks prevent overlapping runs of the same task.
 - MCP servers are enabled for adapter runs (commit 1a180dc); session continuity is preserved between heartbeat runs of the same task.
 - Session id capture uses pre/post JSONL snapshot diff (`snapshot_jsonl` + `capture_session_id`, commit fa37487), not file mtimes — closes the mtime race that previously misattributed sessions when two heartbeats finished within the same second.
+- `commitments_tick` fires due deferred actions from `state/commitments/`.
+- `reengage_tick` can queue template-backed re-engagement commitments.
+- `dream_tick` runs the offline reflection cycle and writes a dream report.
 
 ## Open questions / known stale
 

@@ -42,6 +42,8 @@
 | Voice channel | subsystem/channel-voice.md | Paired-channel ASR/TTS via DashScope |
 | jc-events channel | subsystem/channel-jc-events.md | Internal worker/system event ingestion via `state/events/` |
 | Cron channel | subsystem/channel-cron.md | Scheduled task → gateway event with pinned brain |
+| Commitments and re-engagement | subsystem/commitments-and-reengagement.md | Deferred action YAML engine plus silence-aware re-engagement producer |
+| Dream pipeline | subsystem/dream-pipeline.md | Offline reflection cycle, artifact emitters, risk gates, reports |
 
 ### contract
 

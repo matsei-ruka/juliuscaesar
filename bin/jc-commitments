@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""jc-commitments — manage deferred YAML commitments."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import timezone
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from commitments.engine import add_commitment, cancel_by_tag, iter_pending, tick  # type: ignore  # noqa: E402
+from commitments.schema import Commitment, CommitmentError, dump, format_datetime, load, now_utc, parse_datetime  # type: ignore  # noqa: E402
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("state", "heartbeat/tasks.yaml"))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _tags(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def cmd_add(args: argparse.Namespace, instance: Path) -> int:
+    due_at = parse_datetime(args.due, field_name="--due")
+    created_at = now_utc()
+    chat_id = int(args.chat_id) if args.chat_id is not None else None
+    text = args.text or ""
+    if args.text_file:
+        text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
+    commitment = Commitment(
+        slug=args.slug,
+        created_at=created_at,
+        due_at=due_at,
+        action=args.action,
+        chat_id=chat_id,
+        text=text,
+        tags=_tags(args.tags),
+        repeat=args.repeat,
+        origin=args.origin,
+        metadata={"retries": 0},
+    )
+    try:
+        path = add_commitment(instance, commitment, overwrite=args.overwrite)
+    except CommitmentError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(path)
+    return 0
+
+
+def cmd_tick(args: argparse.Namespace, instance: Path) -> int:
+    summary = tick(instance, dry_run=args.dry_run)
+    print(
+        f"scanned={summary.scanned} fired={len(summary.fired)} "
+        f"skipped={len(summary.skipped)} failed={len(summary.failed)}"
+    )
+    for error in summary.errors:
+        print(f"ERROR {error}", file=sys.stderr)
+    return 0 if summary.ok else 1
+
+
+def cmd_list(args: argparse.Namespace, instance: Path) -> int:
+    rows: list[tuple[str, Commitment, Path]] = []
+    root = instance / "state" / "commitments"
+    if args.status in ("pending", "all"):
+        for path in iter_pending(instance):
+            rows.append(("pending", load(path), path))
+    if args.status in ("done", "all"):
+        for path in sorted((root / "done").glob("*.yaml")):
+            rows.append(("done", load(path), path))
+    if args.status in ("failed", "all"):
+        for path in sorted((root / "failed").glob("*.yaml")):
+            rows.append(("failed", load(path), path))
+    if not rows:
+        print("(no commitments)")
+        return 0
+    for status, commitment, path in rows:
+        due = format_datetime(commitment.due_at.astimezone(timezone.utc))
+        tags = ",".join(commitment.tags)
+        print(f"{status}\t{commitment.slug}\t{due}\t{commitment.action}\t{tags}\t{path}")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace, instance: Path) -> int:
+    root = instance / "state" / "commitments"
+    candidates = [
+        root / f"{args.slug}.yaml",
+        *sorted((root / "done").glob(f"{args.slug}.*.yaml")),
+        *sorted((root / "failed").glob(f"{args.slug}.*.yaml")),
+    ]
+    for path in candidates:
+        if path.exists():
+            print(path.read_text(encoding="utf-8"), end="")
+            return 0
+    print(f"commitment not found: {args.slug}", file=sys.stderr)
+    return 1
+
+
+def cmd_cancel(args: argparse.Namespace, instance: Path) -> int:
+    if args.tag:
+        canceled = cancel_by_tag(instance, args.tag, dry_run=args.dry_run)
+        print(f"canceled={len(canceled)}")
+        for slug in canceled:
+            print(slug)
+        return 0
+    path = instance / "state" / "commitments" / f"{args.slug}.yaml"
+    if not path.exists():
+        print(f"commitment not found: {args.slug}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print(path)
+        return 0
+    path.unlink()
+    print(f"canceled {args.slug}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-commitments")
+    p.add_argument("--instance-dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pt = sub.add_parser("tick", help="Fire due commitments")
+    pt.add_argument("--dry-run", action="store_true")
+    pt.set_defaults(func=cmd_tick)
+
+    pa = sub.add_parser("add", help="Create a pending commitment")
+    pa.add_argument("slug")
+    pa.add_argument("--due", required=True, help="ISO-8601 timestamp with timezone")
+    pa.add_argument("--action", required=True, choices=["telegram-send", "jc-event"])
+    pa.add_argument("--chat-id")
+    pa.add_argument("--text", default="")
+    pa.add_argument("--text-file")
+    pa.add_argument("--tags")
+    pa.add_argument("--repeat", choices=["daily", "weekly"])
+    pa.add_argument("--origin", default="manual", choices=["agent", "reengage", "heartbeat", "manual", "dream"])
+    pa.add_argument("--overwrite", action="store_true")
+    pa.set_defaults(func=cmd_add)
+
+    pl = sub.add_parser("list", help="List commitments")
+    pl.add_argument("--status", choices=["pending", "done", "failed", "all"], default="pending")
+    pl.set_defaults(func=cmd_list)
+
+    ps = sub.add_parser("show", help="Print one commitment YAML")
+    ps.add_argument("slug")
+    ps.set_defaults(func=cmd_show)
+
+    pc = sub.add_parser("cancel", help="Cancel pending commitment(s)")
+    pc.add_argument("slug", nargs="?")
+    pc.add_argument("--tag")
+    pc.add_argument("--dry-run", action="store_true")
+    pc.set_defaults(func=cmd_cancel)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "cancel" and not args.slug and not args.tag:
+        parser.error("cancel requires <slug> or --tag")
+    instance = resolve_instance_dir(args.instance_dir)
+    return args.func(args, instance)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

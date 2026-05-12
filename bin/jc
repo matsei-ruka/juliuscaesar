@@ -15,6 +15,8 @@
 #   chats        Telegram chat directory.
 #   email        Email channel operations.
 #   transcripts  Per-conversation chat transcripts (read/tail/search).
+#   commitments  Deferred action engine.
+#   dream        Offline reflection and self-improvement cycle.
 #   gateway      Durable event queue and gateway runtime.
 #   company      Fleet observability client (The Company).
 #   init         Scaffold a new instance from templates.
@@ -28,7 +30,7 @@
 
 set -euo pipefail
 
-VERSION="2026.05.09.01"
+VERSION="2026.05.12.01"
 
 usage() {
     cat <<EOF
@@ -47,6 +49,8 @@ Subcommands:
   chats        Telegram chat directory (jc-chats).
   email        Email channel operations (jc-email).
   transcripts  Per-conversation chat transcripts (jc-transcripts).
+  commitments  Deferred action engine (jc-commitments).
+  dream        Offline reflection and self-improvement cycle (jc-dream).
   gateway      Durable event queue and gateway runtime (jc-gateway).
   company      Fleet observability client (jc-company).
   init         Scaffold a new instance from templates.
@@ -59,6 +63,7 @@ Subcommands:
   self-model   Autonomous self-observation loop (jc-self-model).
   persona      Persona interview engine (jc-persona).
   migrate-to-0.3  Bootstrap an existing 0.2.x instance for the unified gateway.
+  migrate-to-0.3-commitments  Add commitments/re-engage scaffold to an instance.
 
 Global flags:
   --instance-dir <path>    Override instance dir (or set \$JC_INSTANCE_DIR).
@@ -112,7 +117,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|transcripts|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|migrate-to-0.3|completion)
+    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|transcripts|commitments|dream|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|migrate-to-0.3|migrate-to-0.3-commitments|completion)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

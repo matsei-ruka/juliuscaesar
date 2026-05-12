@@ -382,6 +382,7 @@ class GatewayRuntime:
                 queue.complete(conn2, event.id, response=response)
             finally:
                 conn2.close()
+            self._cancel_reengage_on_inbound_reply(event)
             self.log(f"event done id={event.id} source={event.source}")
         except AdapterFailure as failure:
             self._recovery.handle_adapter_failure(event, failure)
@@ -398,6 +399,32 @@ class GatewayRuntime:
                 conn3.close()
             self.log(f"event {failed.status} id={event.id} error={exc}")
         return True
+
+    def _cancel_reengage_on_inbound_reply(self, event: queue.Event) -> None:
+        """Cancel pending re-engagement touches when a tracked chat replies."""
+        if event.source not in self._TRANSCRIPT_CHANNELS:
+            return
+        meta = decode_meta(event)
+        chat_id = meta.get("chat_id") or event.conversation_id
+        if not chat_id:
+            return
+        try:
+            from reengage.queuer import cancel_if_tracked  # noqa: WPS433
+
+            canceled = cancel_if_tracked(self.instance_dir, str(chat_id))
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                f"reengage reset failed for chat={chat_id}: {exc}",
+                kind="reengage_reset",
+                chat_id=str(chat_id),
+            )
+            return
+        if canceled:
+            self.log(
+                f"reengage reset canceled {len(canceled)} pending touch(es) for chat={chat_id}",
+                kind="reengage_reset",
+                chat_id=str(chat_id),
+            )
 
     def _maybe_triage(
         self,

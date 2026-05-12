@@ -72,6 +72,11 @@ cp -rn "$TEMPLATE_DIR"/. "$TARGET"/
 echo "framework=juliuscaesar" > "$TARGET/.jc"
 echo "created=$(date +%F)" >> "$TARGET/.jc"
 
+# Runtime state skeletons for opt-in schedulers. `state/` remains ignored.
+mkdir -p "$TARGET/state/commitments/done" "$TARGET/state/commitments/failed"
+mkdir -p "$TARGET/state/dreams/pending" "$TARGET/state/dreams/approved" "$TARGET/state/dreams/rejected" "$TARGET/state/dreams/retained"
+mkdir -p "$TARGET/memory/L2/playbooks"
+
 # Root .gitignore if missing
 if [[ ! -f "$TARGET/.gitignore" ]]; then
     cat > "$TARGET/.gitignore" <<'EOF'

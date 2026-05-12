@@ -9,7 +9,7 @@ code_anchors:
     symbol: "case \"$SUB\" in"
   - path: bin/jc-skills
     symbol: "PRE_SHIPPED"
-last_verified: 2026-05-08
+last_verified: 2026-05-12
 verified_by: Matsei Ruka
 related:
   - contract/instance-layout-and-resolution.md
@@ -24,6 +24,8 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - Core: `memory`, `heartbeat`, `voice`, `watchdog`, `workers`, `skills`, `gateway`, `init`, `setup`, `doctor`, `completion`.
 - Lifecycle: `update` (CalVer framework upgrade), `upgrade` (reconfigure existing instance: channels, brain, triage), `migrate-to-0.3` (one-shot migration helper for 0.2.x instances).
 - Conversation surface: `chats` (Telegram chat directory), `email` (email channel operations), `transcripts` (per-conversation chat history read/tail/search).
+- Autonomous follow-through: `commitments` (deferred YAML actions) and
+  `dream` (offline reflection/self-improvement cycle).
 - Observability: `company` (fleet observability client — see `lib/company/`).
 - Modeling: `user-model` (autonomous user-model corpus/detector/proposer/applier).
 - Auth: `codex-auth` (inspect/refresh local Codex CLI OAuth state used by the `codex_api` brain).
@@ -40,7 +42,9 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 
 ## Important behavior
 
-- Python dependencies are currently `pyyaml`, `python-dotenv`, `dashscope`, `requests`, and `websocket-client`.
+- Python dependencies currently include `pyyaml`, `python-dotenv`,
+  `dashscope`, `requests`, `websocket-client`, `browser-use`, and
+  `playwright`; the installer also ensures Playwright Chromium is present.
 - Python 3.10+ is required because the library code uses modern type syntax.
 - `jc doctor` uses the installed JuliusCaesar venv Python for internal dependency probes and SQLite/YAML helper snippets when that venv exists.
 - The installer refuses to overwrite existing `~/.local/bin/jc-*` shims that point to a different JuliusCaesar clone unless run with `--force`.
@@ -60,6 +64,9 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 - `jc email` owns email-channel operations: doctor, IMAP/SMTP credential
   checks, sender policy, pending inbound inspection/drain, and outbound draft
   review.
+- `jc commitments` owns deferred action YAMLs under `state/commitments/`.
+- `jc dream` owns offline reflection, artifact emission, report inspection,
+  pending staged diffs, approval, and reject/rollback.
 - `jc doctor --fix` performs conservative local repairs: chmod `.env` to 600, rebuild a missing memory index, initialize the gateway queue, create missing gateway config, remove stale gateway pidfiles, remove stale legacy Telegram plugin pidfiles, and create `state/`. It also reports email-channel credential presence and local pending/draft metrics.
 
 ## Failure modes
@@ -75,4 +82,6 @@ The top-level `jc` command is a bash router. It dispatches to matching `jc-*` bi
 ## Open questions / known stale
 
 - 2026-04-25: Roadmap still lists public distribution via npm, brew, or curl as future work.
-- 2026-05-08: `bin/jc` declares a `VERSION` constant (CalVer, currently `2026.05.07.01`) used by `jc update` to compare against released framework versions.
+- 2026-05-12: `bin/jc` declares a `VERSION` constant (CalVer, currently
+  `2026.05.12.01`) used by `jc update` to compare against released framework
+  versions.
