@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..config import env_value, load_config_cached
+from ..config import env_value
 from ..queue import Event
 from .base import Brain, UUID_RE
 
@@ -40,13 +40,13 @@ class CodexBrain(Brain):
             env["CODEX_SANDBOX"] = str(self.override.sandbox)
         else:
             env["CODEX_SANDBOX"] = "read-only"
-        # Inject the API key codex needs from instance .env — gateway starts
-        # with env -i so os.environ won't have it.
-        cfg = load_config_cached(self.instance_dir)
-        key_name = cfg.openrouter_api_key_env
-        key_value = env_value(self.instance_dir, key_name)
-        if key_value:
-            env[key_name] = key_value
+        # Inject API keys codex needs from instance .env — gateway starts with
+        # env -i so os.environ won't have them. Codex CLI picks up the key
+        # named in ~/.codex/config.toml `env_key`; inject both common names.
+        for key_name in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+            key_value = env_value(self.instance_dir, key_name)
+            if key_value:
+                env[key_name] = key_value
         return env
 
     def extra_args_for_event(self, event: Event) -> tuple[str, ...]:
