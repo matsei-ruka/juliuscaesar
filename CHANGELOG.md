@@ -20,6 +20,33 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 - Operator opt-out: `JC_RESEARCH_DISABLED=1` in an instance `.env` makes
   every CLI entry exit 17 immediately.
 
+## 2026.05.12.01
+
+Commercial v1 for offline self-improvement.
+
+- Added `jc commitments`, a durable YAML deferred-action engine with
+  timezone-aware due times, retries, done/failed archives, daily/weekly repeats,
+  `telegram-send` and `jc-event` actions, and a `commitments_tick` heartbeat
+  builtin.
+- Added opt-in re-engagement: `ops/reengage.yaml`, template-backed touch
+  messages under `memory/L2/templates/re-engagement/`, hard touch caps,
+  allowed slots/quiet hours, and immediate gateway-side cancellation when a
+  tracked chat replies.
+- Added `jc dream`, the offline reflection cycle. Dream reads transcripts,
+  heartbeat sent records, memory frontmatter, and closed commitments; runs
+  self-model signal and memory hygiene checks; emits playbooks, learnings,
+  backlink stubs, and verification commitments; writes markdown reports under
+  `state/dreams/`; and exposes `tick`, `dry-run`, `run`, `list`, `show`,
+  `pending`, `approve`, and `reject`.
+- Added risk gates for dream artifacts: LOW/MEDIUM auto-apply with retained
+  rollback metadata, SENSITIVE stage-only diffs, and frozen-target rejection.
+- Fresh instances now scaffold commitments state, dream review state,
+  `memory/L2/playbooks/`, disabled `commitments_tick`, `reengage_tick`, and
+  `dream_tick` heartbeat tasks, and RULES §24/§25/§26 for re-engagement,
+  sweeps, and autonomous follow-through.
+- Added `jc-migrate-to-0.3-commitments` for older instances.
+- KB entries now document commitments/re-engagement and the dream pipeline.
+
 ## 2026.05.09.01
 
 Release bundle for the pending gateway and operator-config PRs.

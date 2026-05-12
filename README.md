@@ -1,7 +1,7 @@
 # JuliusCaesar
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2026.05.08.01-blue.svg)](https://github.com/matsei-ruka/juliuscaesar/releases/tag/v2026.05.08.01)
+[![Version](https://img.shields.io/badge/version-2026.05.12.01-blue.svg)](https://github.com/matsei-ruka/juliuscaesar/releases/tag/v2026.05.12.01)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-8A2BE2)](https://www.anthropic.com/claude-code)
 
@@ -78,12 +78,14 @@ graph TD
 | **Deterministic heartbeat** | `cron` → `bash pre_fetch` → hash-delta check → LLM synthesis. Zero tokens if nothing changed. |
 | **Production watchdog** | PID + heartbeat file + cwd health probes. Exponential backoff (5s → 300s). Restart budget. Telegram alerts on state transitions. |
 | **Async workers** | Double-forked detached background agents. Deliver results via Telegram DM. SQLite state tracking. |
+| **Dream cycle** | Offline reflection turns transcripts and memory hygiene signals into playbooks, learnings, commitments, and auditable reports. |
+| **Commitments & re-engagement** | Durable YAML future actions plus opt-in silence-aware follow-through with hard caps and immediate reply cancellation. |
 | **Self-heal recovery** | Classifies failures (transient, session_expired, session_missing, bad_input) and applies typed handlers. Not blind retry. |
 | **Telegram group auth** | Bot added → pending → operator approves via inline keyboard. Auth status in SQLite with WAL isolation. |
 | **MarkdownV2 renderer** | Two-pass escaper handles all reserved chars. Brains write plain markdown; gateway delivers bold/italic/code/links natively. Graceful fallback on parse error. |
 | **Voice subsystem** | DashScope Qwen TTS/ASR + speaker enrollment. Full voice reply path in Telegram. |
 | **Two-repo architecture** | Framework (this repo, open source) + instance (your private repo). Zero user data in the framework. Secrets in `<instance>/.env` mode 600. |
-| **`jc` CLI** | Unified router: `jc memory`, `jc watchdog`, `jc workers`, `jc gateway`, `jc doctor --fix`, `jc update`. |
+| **`jc` CLI** | Unified router: `jc memory`, `jc commitments`, `jc dream`, `jc watchdog`, `jc workers`, `jc gateway`, `jc doctor --fix`, `jc update`. |
 
 ---
 
@@ -124,6 +126,8 @@ jc watchdog    — process supervisor
 jc workers     — on-demand background agents
 jc skills      — instance skill status, configuration, and tests
 jc chats       — Telegram chat directory
+jc commitments — deferred action engine
+jc dream       — offline reflection + self-improvement cycle
 jc gateway     — unified event queue + brain dispatch
 jc doctor      — diagnostics + auto-repair
 jc update      — check and apply framework updates

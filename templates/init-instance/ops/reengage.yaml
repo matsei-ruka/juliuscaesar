@@ -1,0 +1,29 @@
+enabled: false
+scan_interval_hours: 6
+
+silence_threshold_hours: 48
+max_touches: 4
+touch_schedule:
+  - 48
+  - 72
+  - 96
+  - 120
+
+allowed_slots:
+  - "07:00"
+  - "19:00"
+quiet_hours:
+  start: "23:00"
+  end: "07:00"
+
+tracked_chats: []
+  # - chat_id: 123456789
+  #   name: "Owner DM"
+  #   allowed_slots:
+  #     - "07:00"
+  #     - "19:00"
+  #   templates:
+  #     touch_1: "templates/re-engagement/touch-1.md"
+  #     touch_2: "templates/re-engagement/touch-2.md"
+  #     touch_3: "templates/re-engagement/touch-3.md"
+  #     touch_4: "templates/re-engagement/touch-4.md"

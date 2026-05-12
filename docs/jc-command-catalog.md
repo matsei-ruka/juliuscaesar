@@ -1,7 +1,7 @@
 # JC Command Catalog
 
 Status: Inventory draft
-Date: 2026-05-09
+Date: 2026-05-12
 
 ## Purpose
 
@@ -22,7 +22,7 @@ Sources checked:
 `jc` is a Bash router. It accepts optional global `--instance-dir <path>` or
 `--instance-dir=<path>`, then dispatches `jc <name>` to `jc-<name>` on `PATH`.
 
-Router version: `2026.05.09.01`.
+Router version: `2026.05.12.01`.
 
 Routed public subcommands:
 
@@ -37,6 +37,8 @@ Routed public subcommands:
 | `jc chats` | `jc-chats` | channel ops | Telegram chat directory and compatibility email sender aliases |
 | `jc email` | `jc-email` | channel ops | Email doctor, sender policy, pending inbox, draft approval |
 | `jc transcripts` | `jc-transcripts` | gateway history | Per-conversation transcript read/search/tail |
+| `jc commitments` | `jc-commitments` | autonomous follow-through | Deferred action YAML engine |
+| `jc dream` | `jc-dream` | self-improvement | Offline reflection, artifact emitters, reports |
 | `jc gateway` | `jc-gateway` | gateway runtime | Queue, daemon, logs, config, triage metrics |
 | `jc company` | `jc-company` | fleet ops | Company registration, outbox replay, alerts, approvals |
 | `jc init` | `jc-init` | setup | Scaffold a new instance |
@@ -49,6 +51,7 @@ Routed public subcommands:
 | `jc self-model` | `jc-self-model` | persona | Autonomous self-observation loop (proposes JOURNAL/RULES/IDENTITY edits) |
 | `jc persona` | `jc-persona` | persona | Gap-driven interview engine; macro binding + slot filling |
 | `jc migrate-to-0.3` | `jc-migrate-to-0.3` | migration | Bootstrap older instances for unified gateway |
+| `jc migrate-to-0.3-commitments` | `jc-migrate-to-0.3-commitments` | migration | Add commitments/re-engage scaffold to older instances |
 | `jc completion` | `jc-completion` | shell UX | Print bash/zsh completion scripts |
 
 Installed but not routed by `jc`:
@@ -274,6 +277,41 @@ Subcommands:
 | `search` | `query`, `--since`, `--role user|assistant`, `--limit` | Search transcripts |
 | `get` | `message_id` | Find one event by message id |
 | `list` | none | List known conversation ids |
+
+### `jc commitments`
+
+Binary: `bin/jc-commitments`
+
+Purpose: manage deferred YAML commitments under `state/commitments/`.
+
+Subcommands:
+
+| Subcommand | Arguments/options | Purpose |
+|---|---|---|
+| `tick` | `--dry-run` | Fire due commitments |
+| `add` | `slug`, `--due`, `--action telegram-send|jc-event`, `--chat-id`, `--text`, `--text-file`, `--tags`, `--repeat daily|weekly`, `--origin`, `--overwrite` | Create a pending commitment |
+| `list` | `--status pending|done|failed|all` | List commitments |
+| `show` | `slug` | Print one commitment YAML |
+| `cancel` | `slug` or `--tag`, `--dry-run` | Remove pending commitments |
+
+### `jc dream`
+
+Binary: `bin/jc-dream`
+
+Purpose: run the offline reflection and self-improvement cycle.
+
+Subcommands:
+
+| Subcommand | Arguments/options | Purpose |
+|---|---|---|
+| `tick` | `--dry-run` | Run one dream cycle |
+| `dry-run` | none | Run phases without writing artifacts or report |
+| `run` | `--since`, `--until`, `--dry-run` | Replay over a window |
+| `list` | none | List dream reports |
+| `show` | `dream_id` | Print one dream report |
+| `pending` | none | List staged sensitive diffs |
+| `approve` | `diff_id` | Apply a staged sensitive diff |
+| `reject` | `diff_id` | Reject a staged diff or roll back retained auto-applied artifact |
 
 ### `jc gateway`
 

@@ -11,8 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from . import commitments_tick as _commitments_tick
+from . import dream_tick as _dream_tick
 from . import hot_tidy as _hot_tidy
 from . import journal_tidy as _journal_tidy
+from . import reengage_tick as _reengage_tick
 from . import self_model_run as _self_model_run
 
 
@@ -20,8 +23,11 @@ BuiltinFn = Callable[[Path, bool], dict]
 
 
 _BUILTINS: dict[str, BuiltinFn] = {
+    "commitments_tick": _commitments_tick.run,
+    "dream_tick": _dream_tick.run,
     "hot_tidy": _hot_tidy.run,
     "journal_tidy": _journal_tidy.run,
+    "reengage_tick": _reengage_tick.run,
     "self_model_run": _self_model_run.run,
 }
 

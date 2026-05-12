@@ -49,6 +49,24 @@ tasks:
     builtin: hot_tidy
     enabled: false
 
+  # Built-in: fire due deferred commitments from state/commitments/*.yaml.
+  # Ships disabled. Suggested cadence after opt-in: every 5 minutes.
+  commitments_tick:
+    builtin: commitments_tick
+    enabled: false
+
+  # Built-in: inspect tracked chats and queue re-engagement commitments when
+  # silence crosses ops/reengage.yaml thresholds. Ships disabled.
+  reengage_tick:
+    builtin: reengage_tick
+    enabled: false
+
+  # Built-in: run the offline reflection cycle and write a dream report.
+  # Ships disabled. Suggested cadence after opt-in: nightly at 03:30 local.
+  dream_tick:
+    builtin: dream_tick
+    enabled: false
+
   # Example: a report that fans out to two destinations simultaneously.
   # Uncomment + wire up your destinations above to use.
   #

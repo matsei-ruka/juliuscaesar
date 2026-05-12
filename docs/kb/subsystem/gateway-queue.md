@@ -9,7 +9,7 @@ code_anchors:
     symbol: "def claim_next("
   - path: lib/gateway/runtime.py
     symbol: "class GatewayRuntime:"
-last_verified: 2026-05-08
+last_verified: 2026-05-12
 verified_by: Matsei Ruka
 related:
   - subsystem/installation-and-cli-routing.md
@@ -120,6 +120,9 @@ ages, lifecycle event counts, and the last email event.
 - Reply footers are opt-in and attach only to normal gateway text delivery.
   They do not alter voice TTS, slash/inline responses, or push-marker
   deliveries where the brain already sent its own message.
+- After an inbound chat event completes, the runtime calls the re-engagement
+  reset hook. If the chat is tracked in `ops/reengage.yaml`, pending
+  commitments tagged `re-engagement:<chat_id>` are canceled immediately.
 - `state/` is ignored by newly initialized instances.
 - Slack Socket Mode requires the optional `websocket-client` Python package.
 

@@ -67,3 +67,9 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-08] update | contract/config-and-secret-boundaries.md — documented reserved runtime-control env filtering for instance .env helpers
 ## [2026-05-08] update | contract/adapter-and-delivery-contracts.md + subsystem/workers-background-agents.md - documented OpenCode LM Studio failure classification and session capture
 ## [2026-05-08] update | subsystem/gateway-queue.md - documented email default-external sender policy behavior
+## [2026-05-12] update | subsystem/commitments-and-reengagement.md — added deferred actions and re-engagement subsystem entry
+## [2026-05-12] update | subsystem/dream-pipeline.md — added dream reflection pipeline entry
+## [2026-05-12] update | subsystem/heartbeat-runner.md — recorded commitments/reengage/dream builtins
+## [2026-05-12] update | subsystem/gateway-queue.md — recorded re-engagement reset hook
+## [2026-05-12] update | contract/instance-layout-and-resolution.md — recorded commitments/dream scaffold
+## [2026-05-12] update | subsystem/installation-and-cli-routing.md — recorded commitments/dream router and installer surface
