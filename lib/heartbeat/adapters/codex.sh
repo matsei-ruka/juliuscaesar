@@ -44,7 +44,7 @@ if [[ -n "$RESUME" ]]; then
             ;;
     esac
 else
-    ARGS=("exec")
+    ARGS=("exec" "--skip-git-repo-check")
     case "$SANDBOX" in
         read-only|workspace-write)
             ARGS+=("--sandbox" "$SANDBOX")
