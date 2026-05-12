@@ -1,6 +1,6 @@
 # Spec: Intelligent watchdog for brain health and long-running requests
 
-**Status:** Draft
+**Status:** Implemented v1
 **Date:** 2026-05-12
 **Branch base:** `main`
 **Owner:** tbd
@@ -22,8 +22,9 @@ long task, or repeatedly timing out. In those cases the watchdog must:
    than waiting or retrying the failed brain;
 5. avoid duplicate alerts and avoid creating retry loops.
 
-This spec covers the product and implementation contract. It does not implement
-the feature.
+This spec covers the product and implementation contract. v1 is implemented in
+`lib/watchdog/intelligence/` and wired into both watchdog v2 and the legacy
+gateway-mode bash watchdog.
 
 ---
 
@@ -537,12 +538,18 @@ jc watchdog reset-brain claude
 
 ## 14. Open Questions
 
-1. Should the first long-running notice go at exactly 3 minutes for every chat,
-   or should group chats have a longer threshold to reduce noise?
-2. Should brain switching be enabled by default once fallback brains validate,
-   or should v1 require explicit `watchdog.brain_switch_enabled: true` per
-   instance?
-3. For a running event that is clearly auth-expired but whose process has not
-   returned yet, do we want v1 to kill the adapter subprocess, or wait for the
-   current timeout and switch only after failure? This spec chooses "wait" for
-   v1 to avoid double execution.
+Resolved for v1:
+
+1. The first long-running notice uses the same 180s default for all chats.
+   Operators can tune this with `watchdog.long_running_notice_seconds`.
+2. Brain switching is enabled by default when a configured fallback validates.
+   Operators can disable it with `watchdog.brain_switch_enabled: false`.
+3. v1 does not kill a still-running adapter process. It notifies on long-running
+   work and switches only queued/failed events to avoid double execution.
+
+Open for v2:
+
+1. Should group chats get a longer default notice threshold once we have usage
+   data?
+2. Should the gateway track adapter process ids so the watchdog can safely
+   cancel a known-bad running adapter before its normal timeout?

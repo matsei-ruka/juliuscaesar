@@ -138,6 +138,8 @@ Subcommands:
 | `uninstall` | none | Remove this instance's cron entries |
 | `status` | none | Show legacy state, cron entries, and recent log |
 | `status-v2` | `--json` | Show v2 child status table |
+| `intelligence` | `--json`, `--tick`, `--dry-run` | Show intelligent watchdog state; optionally run one brain-health tick |
+| `reset-brain` | `brain` | Clear intelligent-watchdog brain cooldown for one brain |
 | `tail` | `child`, `-n/--lines`, `-f/--follow` | Tail a v2 child log |
 | `reset` | `child` or `all` | Clear alert mode and restart counters |
 | `reload` | none | Re-read `ops/watchdog.yaml` and run one tick |
@@ -146,10 +148,11 @@ Subcommands:
 
 Notes:
 
-- `status-v2`, `tail`, `reset`, `reload`, and `migrate` delegate to
+- `status-v2`, `intelligence`, `reset-brain`, `tail`, `reset`, `reload`, and `migrate` delegate to
   `python -m watchdog.cli`.
 - `tick` chooses v2 supervisor when `ops/watchdog.yaml` exists, otherwise
-  legacy `lib/watchdog/watchdog.sh`.
+  legacy `lib/watchdog/watchdog.sh`; both paths run the intelligent watchdog
+  tick after confirming the gateway is alive.
 
 ### `jc workers`
 

@@ -431,6 +431,20 @@ def retry_now(conn: sqlite3.Connection, event_id: int) -> Event:
     return event
 
 
+def update_meta(conn: sqlite3.Connection, event_id: int, meta: dict[str, Any]) -> Event:
+    cur = conn.execute(
+        "UPDATE events SET meta=? WHERE id=?",
+        (encode_meta(meta), event_id),
+    )
+    if cur.rowcount != 1:
+        raise KeyError(event_id)
+    conn.commit()
+    event = get(conn, event_id)
+    if event is None:
+        raise KeyError(event_id)
+    return event
+
+
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT status, COUNT(*) AS n FROM events GROUP BY status").fetchall()
     return {str(row["status"]): int(row["n"]) for row in rows}

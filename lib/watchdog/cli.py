@@ -20,6 +20,10 @@ from .registry import (
     render_default_yaml,
 )
 from .supervisor import Supervisor
+from .intelligence.config import load_config as load_intelligence_config
+from .intelligence.runner import run_tick as run_intelligence_tick
+from .intelligence.snapshot import build_snapshot
+from .intelligence.state import IntelligenceState
 
 
 def cmd_status(instance_dir: Path, args: argparse.Namespace) -> int:
@@ -142,6 +146,55 @@ def cmd_reload(instance_dir: Path, args: argparse.Namespace) -> int:
     return sup.run_tick()
 
 
+def cmd_intelligence(instance_dir: Path, args: argparse.Namespace) -> int:
+    if args.tick:
+        result = run_intelligence_tick(
+            instance_dir,
+            dry_run=args.dry_run,
+            log=lambda msg: print(msg, file=sys.stderr),
+        )
+        if args.json:
+            print(json.dumps(result.to_json(), indent=2, sort_keys=True))
+        else:
+            _print_intelligence_result(result.to_json())
+        return 0 if not result.error else 1
+    cfg = load_intelligence_config(instance_dir)
+    snapshot = build_snapshot(instance_dir, cfg)
+    state = IntelligenceState.load(instance_dir)
+    payload = {
+        "enabled": cfg.enabled,
+        "running": [_event_payload(item) for item in snapshot.running],
+        "failed": [_event_payload(item) for item in snapshot.failed],
+        "brain_health": state.brain_health,
+        "notified_events": state.notified_events,
+        "latest_decisions": state.latest_decisions[-10:],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_intelligence_result(payload)
+    return 0
+
+
+def cmd_brain_health(instance_dir: Path, args: argparse.Namespace) -> int:
+    result = run_intelligence_tick(
+        instance_dir,
+        dry_run=args.dry_run,
+        log=lambda msg: print(msg, file=sys.stderr),
+    )
+    if args.json:
+        print(json.dumps(result.to_json(), indent=2, sort_keys=True))
+    return 0 if not result.error else 1
+
+
+def cmd_reset_brain(instance_dir: Path, args: argparse.Namespace) -> int:
+    state = IntelligenceState.load(instance_dir)
+    state.clear_brain(args.brain)
+    state.save(instance_dir)
+    print(f"reset watchdog brain health for {args.brain}")
+    return 0
+
+
 def cmd_migrate(instance_dir: Path, args: argparse.Namespace) -> int:
     """Generate `ops/watchdog.yaml` from `ops/watchdog.conf`. Idempotent."""
     target = registry_path(instance_dir)
@@ -208,6 +261,34 @@ children:
     return legacy_block
 
 
+def _event_payload(item) -> dict[str, Any]:
+    return {
+        "id": item.event.id,
+        "status": item.status,
+        "source": item.event.source,
+        "conversation_id": item.event.conversation_id,
+        "age_seconds": int(item.age_seconds),
+        "brain": item.brain_spec,
+        "error": item.error,
+    }
+
+
+def _print_intelligence_result(payload: dict[str, Any]) -> None:
+    if payload.get("error"):
+        print(f"error: {payload['error']}")
+    print(f"enabled: {payload.get('enabled')}")
+    print(f"running: {len(payload.get('running', [])) if isinstance(payload.get('running'), list) else payload.get('running', 0)}")
+    print(f"failed: {len(payload.get('failed', [])) if isinstance(payload.get('failed'), list) else payload.get('failed', 0)}")
+    if payload.get("actions"):
+        print("actions:")
+        for action in payload["actions"]:
+            print(f"  - {action}")
+    if payload.get("brain_health"):
+        print("brain health:")
+        for brain, mark in payload["brain_health"].items():
+            print(f"  - {brain}: {mark}")
+
+
 # --- parser plumbing ---------------------------------------------------------
 
 
@@ -232,6 +313,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     prl = sub.add_parser("reload", help="Re-read registry and run one tick")
     prl.set_defaults(func=cmd_reload)
+
+    pi = sub.add_parser("intelligence", help="Show intelligent watchdog state")
+    pi.add_argument("--json", action="store_true")
+    pi.add_argument("--tick", action="store_true", help="Run an intelligent tick before reporting")
+    pi.add_argument("--dry-run", action="store_true", help="Evaluate without sending or switching")
+    pi.set_defaults(func=cmd_intelligence)
+
+    pbh = sub.add_parser("brain-health", help=argparse.SUPPRESS)
+    pbh.add_argument("--json", action="store_true")
+    pbh.add_argument("--dry-run", action="store_true")
+    pbh.set_defaults(func=cmd_brain_health)
+
+    prb = sub.add_parser("reset-brain", help="Clear intelligent-watchdog brain cooldown")
+    prb.add_argument("brain")
+    prb.set_defaults(func=cmd_reset_brain)
 
     pm = sub.add_parser("migrate", help="Generate ops/watchdog.yaml from ops/watchdog.conf")
     pm.add_argument("--force", action="store_true", help="Overwrite existing watchdog.yaml")

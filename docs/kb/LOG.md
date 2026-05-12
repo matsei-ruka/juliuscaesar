@@ -74,3 +74,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-12] update | contract/instance-layout-and-resolution.md — recorded commitments/dream scaffold
 ## [2026-05-12] update | subsystem/installation-and-cli-routing.md — recorded commitments/dream router and installer surface
 ## [2026-05-12] update | subsystem/installation-and-cli-routing.md — document jc update release hooks and remove public migrate-to-0.3 lifecycle surface
+## [2026-05-12] update | subsystem/watchdog-runtime.md — documented intelligent watchdog brain health, long-running notices, and fallback switching
