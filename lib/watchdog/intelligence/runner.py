@@ -147,6 +147,9 @@ def _handle_unhealthy(
             decision=decision,
         )
         state.mark_notice(summary.event.id, "brain_switch_notice_at")
+    elif decision.kind == "auth_expired" and not fallback:
+        if not dry_run and actions.ensure_auth_pending(instance_dir, summary):
+            result.actions.append({"event_id": summary.event.id, "action": "auth_pending"})
     if decision.user_visible and not state.has_notice(summary.event.id, "brain_issue_notice_at"):
         if not dry_run:
             actions.notify_brain_issue(
@@ -181,4 +184,3 @@ def _record_decision(
     payload.update({"event_id": summary.event.id, "brain": summary.brain_spec, "status": summary.status})
     result.decisions.append(payload)
     state.record_decision(summary.event.id, payload)
-

@@ -44,16 +44,14 @@ Today the gateway-mode watchdog is mostly process supervision:
   failures such as `session_expired`, `session_missing`, `transient`, and
   `bad_input`.
 
-What is missing:
+The v1 implementation closes the original product gap by adding:
 
-- The watchdog does not inspect recent gateway JSON logs for brain/auth errors.
-- The watchdog does not inspect `events.status='running'` rows to detect a user
-  request that is taking too long.
-- The watchdog does not notify the originating chat while a brain is still
-  running.
-- The watchdog does not automatically move a pending request away from a brain
-  that is probably unhealthy.
-- The triage model is not used for watchdog health decisions.
+- Recent gateway JSON logs are inspected for brain/auth errors.
+- `events.status='running'` rows are inspected to detect a user request that is
+  taking too long.
+- The originating chat is notified while a brain is still running.
+- Pending requests can be moved away from a brain that is probably unhealthy.
+- The configured triage model participates in watchdog health decisions.
 
 ---
 
@@ -415,6 +413,16 @@ Codex-specific expiry must be supported too. If the failed brain is `codex` or
 `codex_api`, the operator action should point at `jc codex-auth refresh` or the
 configured Codex auth recovery path, not `claude /login`.
 
+v1 behavior:
+
+- When a fallback brain is selected, the event is switched and retried; the
+  operator still receives an auth-specific message for the failed brain.
+- When no fallback is selected, watchdog creates/reuses the existing
+  `auth_pending` row so the normal recovery token-redemption flow can replay
+  the event after operator action.
+- Group chats receive only a generic status message; token/login instructions
+  go to the configured operator DM.
+
 ---
 
 ## 10. Observability
@@ -511,6 +519,8 @@ jc watchdog reset-brain claude
 - Dedupe state prevents duplicate long-running notices.
 - Candidate selection skips unavailable and capability-incompatible brains.
 - Brain switch patches `meta.brain_override` and preserves existing meta.
+- Auth failure without fallback creates/reuses `auth_pending`.
+- Brain cooldown expiry clears stale unavailable marks.
 
 ### Integration
 

@@ -10,6 +10,7 @@ from gateway import brain_spec, capabilities, queue
 from gateway.brains.dispatch import _BRAIN_REGISTRY
 from gateway.config import BrainOverrideConfig, GatewayConfig, env_value
 from gateway.delivery import deliver_response
+from gateway.recovery import state as recovery_state
 
 from .config import IntelligenceConfig
 from .models import Decision, EventSummary
@@ -133,6 +134,31 @@ def switch_event_to_brain(
         conn.close()
 
 
+def ensure_auth_pending(instance_dir: Path, summary: EventSummary) -> bool:
+    operator = _operator_chat(instance_dir, summary)
+    if not operator:
+        return False
+    conn = queue.connect(instance_dir)
+    try:
+        pending = recovery_state.insert_pending(
+            conn,
+            event_id=summary.event.id,
+            operator_chat=operator,
+            login_url="",
+        )
+        if pending is None:
+            existing = recovery_state.get_active_pending(conn, operator_chat=operator)
+            if existing is not None:
+                recovery_state.append_pending_event(
+                    conn,
+                    pending_id=existing.id,
+                    event_id=summary.event.id,
+                )
+        return True
+    finally:
+        conn.close()
+
+
 def _deliver(
     instance_dir: Path,
     gateway_config: GatewayConfig,
@@ -172,7 +198,7 @@ def _notify_operator_auth(
     *,
     log: LogFn,
 ) -> None:
-    operator = env_value(instance_dir, "TELEGRAM_CHAT_ID")
+    operator = _operator_chat(instance_dir, summary)
     if not operator:
         return
     body = _operator_auth_message(summary)
@@ -186,6 +212,16 @@ def _notify_operator_auth(
         live_channels={},
         log=lambda msg, **fields: log(f"{msg} {fields}" if fields else msg),
     )
+
+
+def _operator_chat(instance_dir: Path, summary: EventSummary) -> str:
+    operator = env_value(instance_dir, "TELEGRAM_CHAT_ID")
+    if operator:
+        return str(operator)
+    if summary.meta.get("chat_type") == "private":
+        chat = summary.meta.get("chat_id") or summary.event.conversation_id or summary.event.user_id
+        return str(chat) if chat else ""
+    return ""
 
 
 def _operator_auth_message(summary: EventSummary) -> str:

@@ -139,6 +139,8 @@ class Evaluator:
             return self._ollama_decision(snapshot, summary)
         elif cfg.backend in ("codex_api", "codex-api"):
             return self._codex_api_decision(snapshot, summary)
+        elif cfg.backend == "claude-channel":
+            return self._claude_channel_decision(snapshot, summary)
         else:
             return None
         api_key = env_value(self.instance_dir, api_key_env)
@@ -220,6 +222,27 @@ class Evaluator:
         except Exception:
             return None
         parsed = parse_decision_json(result.text or "")
+        return replace(parsed, source="triage_model") if parsed is not None else None
+
+    def _claude_channel_decision(self, snapshot: Snapshot, summary: EventSummary) -> Decision | None:
+        cfg = self.gateway_config.triage
+        body = {"message": _render_prompt(snapshot, summary)}
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{cfg.claude_triage_port}/classify",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except (OSError, TimeoutError, ConnectionError):
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {"text": raw}
+        text = payload.get("text") if isinstance(payload, dict) else str(payload)
+        parsed = parse_decision_json(str(text or "")) or parse_decision_json(raw)
         return replace(parsed, source="triage_model") if parsed is not None else None
 
 

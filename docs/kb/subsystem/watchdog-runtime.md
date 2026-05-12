@@ -63,11 +63,15 @@ Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_M
   `watchdog.long_running_repeat_seconds`.
 - Brain/auth failures are evaluated by deterministic heuristics plus the
   configured triage model when available (`openrouter`, `api_classifier`,
-  `ollama`, or `codex_api`).
+  `ollama`, `codex_api`, or `claude-channel`).
 - For queued/failed events, intelligent watchdog can patch
   `event.meta.brain_override`, add `event.meta.watchdog_switch`, and retry the
   event on the first configured fallback brain that validates and supports the
   event capabilities.
+- If an auth-expired event has no fallback brain, intelligent watchdog
+  creates/reuses the existing `auth_pending` row so the gateway recovery token
+  flow can replay it later. Group chats receive only a generic status message;
+  operator auth instructions go to the configured operator DM.
 - Brain cooldowns prevent immediate rerouting back to a known-bad brain; clear
   them with `jc watchdog reset-brain <brain>`.
 - Default Claude args include `--dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official`.
