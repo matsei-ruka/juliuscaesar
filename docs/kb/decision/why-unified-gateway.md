@@ -9,7 +9,7 @@ code_anchors:
     symbol: "def route("
   - path: docs/specs/unified-gateway-0.3.0-remaining.md
     symbol: "# Spec: Unified Gateway"
-last_verified: 2026-05-07
+last_verified: 2026-05-12
 verified_by: Matsei Ruka
 related:
   - subsystem/gateway-queue.md
@@ -53,6 +53,9 @@ Positive:
 - Triage trims cost: classifiers emit class plus confidence, and the gateway
   maps classes to configured brains such as Haiku or Opus with a confidence
   threshold and graceful fallback.
+- Unsafe triage verdicts are still user-visible: the gateway either routes to
+  the configured unsafe fallback brain or sends a direct rejection notice
+  without invoking a brain.
 - Worker completions auto-synthesize via `jc-events` — single message UX.
 
 Tradeoffs:

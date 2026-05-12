@@ -2,7 +2,8 @@
 
 ## Status
 
-Implemented — 2026-05-09.
+Implemented — 2026-05-09. Amended 2026-05-12: unsafe rejections without a
+fallback now notify the sender instead of failing silently.
 
 ## Why
 
@@ -44,9 +45,9 @@ When triage classifies `unsafe`:
 1. **If a fallback brain is configured**, route the event to it instead of
    dropping. Skip the primary brain's `triage_routing` map entirely; the
    fallback brain owns this dispatch.
-2. **If no fallback is configured**, behavior is unchanged (drop with the
-   existing `triage_unsafe` log + audit). Existing deployments keep current
-   semantics.
+2. **If no fallback is configured**, do not invoke a brain, but send a direct
+   rejection notice to the originating channel. The user must not be left
+   wondering whether the assistant died.
 3. The fallback path emits a distinct log line + metric so operators can
    see how often it kicks in. If the fallback also fails or the fallback
    brain itself refuses, log + drop, do not loop.
@@ -129,16 +130,18 @@ if result.is_unsafe():
         brain, _, model = fb_spec.partition(":")
         return router.TriageHint(brain=brain, model=model or None,
                                  confidence=result.confidence), False
-    return None, True   # existing drop path
+    return None, True   # caller sends direct rejection notice; no brain call
 return hint, False
 ```
 
-Two log/metric kinds:
+Log/metric kinds:
 
 - `triage_unsafe` — original line, always emitted on an unsafe verdict.
 - `triage_unsafe_fallback` — emitted only when we actually rerouted. Lets
   the operator distinguish "classifier flagged unsafe AND we dropped" from
   "classifier flagged unsafe AND we redirected to the fallback brain".
+- `triage_rejection_notice` — emitted when no fallback is configured and the
+  runtime sends the direct rejection notice to the sender.
 
 The fallback brain dispatches through the normal adapter pipeline, so
 adapter timeouts, retries, recovery, and parse-error handling all reuse
@@ -153,15 +156,16 @@ existing logic. No special unsafe-only error paths.
 - **Fallback brain refuses (e.g. Grok itself emits a "I won't answer"
   response):** delivered to the user as the brain's text. We don't retry
   with a tertiary model. The user sees the refusal and can rephrase.
-- **No fallback configured:** existing behavior — drop, log
-  `triage_unsafe`. No regression for instances that don't opt in.
+- **No fallback configured:** do not invoke a brain; deliver the standard
+  rejection notice to the sender and log `triage_unsafe` plus
+  `triage_rejection_notice`.
 
 ## Test plan
 
 1. **Unit (Python):** `tests/gateway/test_triage_unsafe_fallback.py`
    - With `triage_unsafe_fallback_brain` set, an `unsafe` verdict produces
      a `TriageHint` pointing at the fallback brain, not `None, True`.
-   - With it unset, behavior is unchanged.
+   - With it unset, `_maybe_triage` returns the rejection flag.
    - Fallback `TriageHint` carries the right `brain`/`model` fields.
    - `triage_unsafe_fallback` log line emitted exactly once per unsafe
      event when fallback is configured.
@@ -170,6 +174,8 @@ existing logic. No special unsafe-only error paths.
    - Mock triage backend forced to return `unsafe`. Mock openrouter brain
      returns `BrainResult(response="answered")`. Assert the response is
      delivered to the user.
+   - With no unsafe fallback configured, assert the rejection notice is
+     delivered and no brain is invoked.
    - Adapter timeout on the fallback brain: assert event re-queues like
      any other failure.
 
@@ -182,8 +188,8 @@ existing logic. No special unsafe-only error paths.
 
 ## Migration
 
-- Existing instances: no action. Default keeps drop semantics until an
-  operator opts in.
+- Existing instances: no action. Without an unsafe fallback, they now get a
+  user-visible rejection notice instead of silence.
 - Rachel + fleet rollout: separate operational task, not part of this
   spec. Will land in `gateway.yaml` per-instance.
 
@@ -205,6 +211,9 @@ existing logic. No special unsafe-only error paths.
   the fallback brain dispatch does not re-trigger triage.
 - **Don't leak openrouter context across fallback calls.** Stateless API,
   no `session_id` write-back. Every fallback call starts cold.
+- **Don't silently drop unsafe rejections.** If no fallback is configured,
+  direct channel delivery must explain that the request was rejected by the
+  safety policy.
 
 ## Out-of-scope follow-ups
 
@@ -217,5 +226,5 @@ existing logic. No special unsafe-only error paths.
   considering once this lands.
 - **Per-channel / per-conversation fallback overrides.** Out of scope.
 - **User-visible "your message was rerouted" notice.** Considered. Not
-  shipping in v1; the brain's reply is enough signal that the event was
-  handled. Add later if it's a felt gap.
+  shipping in v1; the fallback brain's reply is enough signal that the event
+  was handled. Add later if it's a felt gap.

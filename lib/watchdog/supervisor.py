@@ -37,6 +37,7 @@ from .child import (
     state_dir,
 )
 from .registry import load_enabled
+from .intelligence.runner import run_tick as run_intelligence_tick
 
 
 AlertFn = Callable[[str, ChildSpec, ChildState], None]
@@ -175,6 +176,8 @@ class Supervisor:
                 self._log_supervisor(f"{spec.name}: recovered after {st.consecutive_failures} failures")
             policy.record_healthy(st)
             st.last_failure = ""
+            if spec.name == "jc-gateway":
+                self._run_intelligence_tick()
             return
         st.last_failure = reason
         self._log_supervisor(f"{spec.name}: down — {reason}")
@@ -223,6 +226,18 @@ class Supervisor:
             self._log_supervisor(
                 f"{spec.name}: restart attempt {st.consecutive_failures} → rc={rc} ({cmd})"
             )
+
+    def _run_intelligence_tick(self) -> None:
+        try:
+            result = run_intelligence_tick(self.instance_dir, log=self._log_supervisor)
+        except Exception as exc:  # noqa: BLE001
+            self._log_supervisor(f"jc-gateway: intelligence tick failed: {exc}")
+            return
+        if result.error:
+            self._log_supervisor(f"jc-gateway: intelligence tick error: {result.error}")
+            return
+        for action in result.actions:
+            self._log_supervisor(f"jc-gateway: intelligence action {action}")
 
     # --- alerting ----------------------------------------------------------
 

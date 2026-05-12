@@ -102,6 +102,10 @@ def _elapsed_seconds(event: queue.Event, monotonic_start: float | None) -> float
 
 class GatewayRuntime:
     HEARTBEAT_INTERVAL_SECONDS = 5.0
+    TRIAGE_REJECTION_MESSAGE = (
+        "I can't help with that request. It looks outside the assistant's "
+        "safety policy, so I did not pass it to a brain."
+    )
 
     def __init__(
         self,
@@ -540,6 +544,24 @@ class GatewayRuntime:
                 kind="triage_unsafe_fallback",
             )
 
+    def _notify_triage_rejection(
+        self,
+        event: queue.Event,
+        meta: dict[str, Any],
+        channel: str,
+    ) -> str:
+        notice = self.TRIAGE_REJECTION_MESSAGE
+        meta = dict(meta)
+        meta.setdefault("delivery_channel", channel)
+        self._deliver_response(channel, notice, meta)
+        self._log_outbound_transcript(event, notice, meta, channel)
+        self.log(
+            f"triage rejection notified sender id={event.id}",
+            event_id=event.id,
+            kind="triage_rejection_notice",
+        )
+        return notice
+
     def _triage_to_hint(self, result: TriageResult) -> router.TriageHint | None:
         spec = self.config.triage.routing.get(result.class_) or self.config.triage.fallback_brain
         if not spec:
@@ -620,7 +642,7 @@ class GatewayRuntime:
         sticky = self._resolve_sticky(event, channel)
         triage, triage_rejected = self._maybe_triage(event, sticky)
         if triage_rejected:
-            return "(triage rejected unsafe)"
+            return self._notify_triage_rejection(event, meta, channel)
         selection = router.route(
             event,
             cfg=self.config,

@@ -6,6 +6,7 @@
 #   install     Install cron entries (@reboot + */2 * * * *) for this instance.
 #   uninstall   Remove this instance's cron entries.
 #   status      Print current state + tail of log.
+#   intelligence Show intelligent watchdog state.
 #   test-notify Send a manual Telegram ping to verify creds.
 #
 # Instance dir resolution (same as other jc-* binaries):
@@ -50,6 +51,29 @@ load_env_file() {
     done < "$file"
 }
 
+usage() {
+    cat <<'EOF'
+jc-watchdog — supervise a JuliusCaesar instance's live claude session.
+
+Usage:
+  jc-watchdog [--instance-dir <path>] <subcommand>
+
+Subcommands:
+  tick          Run one supervisor tick (intended for cron).
+  install       Install @reboot + */2 cron entries for this instance.
+  uninstall     Remove this instance's cron entries.
+  status        Show legacy state, cron entries, recent log.
+  status-v2     Show v2 child status table (uses ops/watchdog.yaml).
+  intelligence  Show intelligent watchdog state (--tick to run one).
+  reset-brain   Clear intelligent-watchdog brain cooldown.
+  tail <child>  Tail a v2 child's log file.
+  reset <child> Clear alert mode + restart counters (v2).
+  reload        Re-read ops/watchdog.yaml and run one tick (v2).
+  migrate       Generate ops/watchdog.yaml from ops/watchdog.conf.
+  test-notify   Send a Telegram message to validate credentials.
+EOF
+}
+
 # --- Instance dir resolution ---
 resolve_instance_dir() {
     local arg="${1:-}"
@@ -92,6 +116,12 @@ set -- "${REST[@]:+${REST[@]}}"
 
 SUBCMD="${1:-}"
 shift || true
+case "$SUBCMD" in
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+esac
 INSTANCE_DIR="$(resolve_instance_dir "$INSTANCE_DIR_ARG")"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -116,7 +146,7 @@ case "$SUBCMD" in
         exit $?
         ;;
 
-    tail|reset|reload|migrate)
+    tail|reset|reload|migrate|intelligence|reset-brain|brain-health)
         run_v2_cli "$SUBCMD" "$@"
         exit $?
         ;;
@@ -200,27 +230,6 @@ case "$SUBCMD" in
             echo "jc-watchdog: send_telegram.sh not found at $SENDER" >&2
             exit 1
         fi
-        ;;
-
-    -h|--help|help)
-        cat <<'EOF'
-jc-watchdog — supervise a JuliusCaesar instance's live claude session.
-
-Usage:
-  jc-watchdog [--instance-dir <path>] <subcommand>
-
-Subcommands:
-  tick          Run one supervisor tick (intended for cron).
-  install       Install @reboot + */2 cron entries for this instance.
-  uninstall     Remove this instance's cron entries.
-  status        Show legacy state, cron entries, recent log.
-  status-v2     Show v2 child status table (uses ops/watchdog.yaml).
-  tail <child>  Tail a v2 child's log file.
-  reset <child> Clear alert mode + restart counters (v2).
-  reload        Re-read ops/watchdog.yaml and run one tick (v2).
-  migrate       Generate ops/watchdog.yaml from ops/watchdog.conf.
-  test-notify   Send a Telegram message to validate credentials.
-EOF
         ;;
 
     *)

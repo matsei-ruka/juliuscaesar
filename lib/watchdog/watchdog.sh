@@ -312,10 +312,20 @@ start_gateway() {
     return 1
 }
 
+run_intelligence_tick() {
+    local py lib_dir
+    py="${PYTHON_BIN:-python3}"
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    PYTHONPATH="$lib_dir${PYTHONPATH:+:$PYTHONPATH}" \
+        "$py" -m watchdog.cli --instance-dir "$INSTANCE_DIR" brain-health >>"$LOG_FILE" 2>&1 || \
+        log "gateway intelligence tick failed"
+}
+
 main_gateway() {
     local prev
     prev=$(read_state)
     if gateway_alive; then
+        run_intelligence_tick
         write_state "ok"
         if [[ "$prev" == "down" || "$prev" == "restart-failed" ]]; then
             log "transition: $prev -> ok"
