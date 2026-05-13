@@ -9,12 +9,24 @@ export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp
 
 MODEL="${1:-}"
 
+# Resolve JC internal aliases (brain:model) to valid claude CLI model IDs.
+# The workers runner passes worker.model verbatim; that field stores the JC
+# alias format (e.g. "claude:opus", "claude:sonnet-4-6", "claude:opus-4-7-1m").
+# Strip the "claude:" prefix, then map short aliases to canonical IDs.
+if [[ "$MODEL" == claude:* ]]; then
+    MODEL="${MODEL#claude:}"
+fi
+case "$MODEL" in
+    opus|opus-4-7|opus-4-7-1m) MODEL="claude-opus-4-7"    ;;
+    sonnet|sonnet-4-6)          MODEL="claude-sonnet-4-6"  ;;
+    haiku|haiku-4-5*)           MODEL="claude-haiku-4-5-20251001" ;;
+esac
+
 # Use subscription auth (no API key env var set). No --channels flag: scheduled
 # runs should never bind to the telegram channel.
 ARGS=(
     "-p"
     "--dangerously-skip-permissions"
-    "--chrome"
 )
 if [[ -n "$MODEL" ]]; then
     ARGS+=("--model" "$MODEL")

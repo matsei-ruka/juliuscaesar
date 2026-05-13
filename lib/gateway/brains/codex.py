@@ -39,7 +39,7 @@ class CodexBrain(Brain):
         elif self.override.sandbox:
             env["CODEX_SANDBOX"] = str(self.override.sandbox)
         else:
-            env["CODEX_SANDBOX"] = "read-only"
+            env["CODEX_SANDBOX"] = "workspace-write"
         # Inject API keys codex needs from instance .env — gateway starts with
         # env -i so os.environ won't have them. Codex CLI picks up the key
         # named in ~/.codex/config.toml `env_key`; inject both common names.

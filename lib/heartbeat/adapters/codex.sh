@@ -16,7 +16,7 @@ export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp
 
 MODEL="${1:-}"
 shift || true
-SANDBOX="${CODEX_SANDBOX:-read-only}"
+SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 
 if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not installed. See https://developers.openai.com/codex/cli" >&2
