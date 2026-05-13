@@ -9,7 +9,9 @@ code_anchors:
     symbol: "def claim_next("
   - path: lib/gateway/runtime.py
     symbol: "class GatewayRuntime:"
-last_verified: 2026-05-12
+  - path: lib/gateway/recovery_integration.py
+    symbol: "class RecoveryIntegration:"
+last_verified: 2026-05-13
 verified_by: Matsei Ruka
 related:
   - subsystem/installation-and-cli-routing.md
@@ -44,6 +46,9 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
   return only class and confidence; `GatewayRuntime` maps classes to brains
   through `triage_routing` plus `default_fallback_brain`.
 - `lib/gateway/recovery/`: failure classifier + per-handler recovery (e.g. session-drop on `--resume <expired-uuid>`).
+- `lib/gateway/recovery_integration.py`: bridges adapter failures into
+  recovery decisions and parks deferred recovery events so queue leases cannot
+  replay the same user message while a recovery owner is waiting.
 - `lib/gateway/sessions.py` + `lib/gateway/process_sessions.py`: per-`(channel, conversation_id, brain)` session map and live-process tracking.
 - `lib/gateway/reply_footer.py`: optional operator footer for normal text
   replies when `reply_footer.enabled=true`.
@@ -67,6 +72,10 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
 - `complete()` marks an event `done` and stores the response.
 - `fail()` retries with delayed backoff until `max_retries`, then marks the event `failed`.
 - Expired `running` leases are returned to `queued` during claim.
+- Adapter recovery decisions that return `Defer` mark the original running
+  event as a recovery-managed failed row with `meta.recovery_deferred`. The
+  recovery owner later calls `retry_now()` when it is actually safe to replay.
+  This prevents deferred auth/session repair from racing the lease requeue path.
 - Dedup uses `(source, source_message_id)` when the source provides a stable message id.
 - Sessions are stored by `(channel, conversation_id, brain)` so later messages resume the same native brain conversation when an adapter exposes a session id.
 

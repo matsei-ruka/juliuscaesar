@@ -160,10 +160,12 @@ For long-running detection, use `started_at` when present; fall back to
 ```yaml
 watchdog:
   long_running_notice_seconds: 180
+  long_running_notice_requires_triage: true
 ```
 
-Failed/queued recovery must also be bounded by both count and event age so a
-quiet instance cannot resurrect week-old unanswered messages:
+Failed recovery must also be bounded by count, event age, and conversation
+recency so a quiet instance cannot resurrect week-old or superseded unanswered
+messages:
 
 ```yaml
 watchdog:
@@ -171,7 +173,12 @@ watchdog:
   failed_event_limit: 50
 ```
 
-Use `started_at` when present and `received_at` otherwise. If
+Use `started_at` when present and `received_at` otherwise. Only terminal
+`failed` events are watchdog recovery candidates; `queued` events still belong
+to the gateway retry loop. Skip any event already owned by gateway recovery
+(`error` starting with `recovery:`, `meta.recovery_deferred`, or recovery
+source-message ids). Also skip a failed event if a newer event exists in the
+same source/conversation, because the chat has moved on. If
 `failed_event_max_age_seconds <= 0`, the age guard is disabled for explicit
 operator override only.
 
@@ -287,19 +294,17 @@ notify the configured operator chat.
 
 ### 7.2 Long-Running Message
 
-After `long_running_notice_seconds` (default 180s), send exactly one first
-notice per event:
+After `long_running_notice_seconds` (default 180s), the watchdog asks the
+triage model whether a human would send a progress note. The default
+`long_running_notice_requires_triage: true` means no generic timer-based
+message is sent when triage is unavailable or undecided.
+
+If triage decides a notice is useful, it must provide a natural chat message
+that references the actual request and visible work. Do not mention event ids,
+queue state, brain/model names, or the old static template.
 
 ```text
-This is taking a bit longer than usual. I am still working on it with
-<brain[:model]> and will keep the request open.
-```
-
-If the evaluator can safely classify the likely reason from the event and logs,
-the message may add one short clause:
-
-```text
-It looks like a multi-step/code-heavy task, so I am letting it continue.
+Sto cercando proprio il video della vacanza estiva; ci metto ancora un attimo.
 ```
 
 Do not claim tool activity that is not known. Avoid "I am spawning a worker"
@@ -321,15 +326,16 @@ When a brain failure is tied to a specific event and an alternate brain is
 available:
 
 ```text
-The current brain hit a runtime/auth issue before it could answer. I am
-switching this request to <fallback brain> and retrying now.
+I could not get a clean answer for "<request preview>" because the current brain
+hit a runtime/auth issue. I am retrying it with <fallback brain> now.
 ```
 
 When no alternate is available:
 
 ```text
-The current brain hit a runtime/auth issue before it could answer. I notified
-the operator and will retry when the session is healthy again.
+I could not get a clean answer for "<request preview>" because the current brain
+hit a runtime/auth issue. I notified the operator and will retry when the
+session is healthy again.
 ```
 
 Messages must be sent directly through `deliver_response()` or channel clients,
@@ -369,7 +375,7 @@ is appropriate; config decides which candidates are legal.
 
 ### 8.2 Switching A Pending Event
 
-For a queued or failed event:
+For a failed event:
 
 1. patch `event.meta.brain_override` to the selected fallback brain;
 2. add `event.meta.watchdog_switch`:
@@ -381,6 +387,11 @@ For a queued or failed event:
      "at": "2026-05-12T10:07:00Z"
    }
    ```
+3. retry the same event once with the fallback brain.
+
+Queued events are not switched by watchdog; they are still controlled by the
+gateway retry loop. Events already marked by gateway recovery are not switched
+by watchdog.
 3. call `queue.retry_now(conn, event.id)`.
 
 For a currently running event:
@@ -471,9 +482,13 @@ jc watchdog reset-brain claude
 
 - Do not send secrets, login URLs, or token instructions to a group chat.
 - Do not ask the stuck brain to explain its own stuck state.
-- Do not send more than one first long-running notice per event.
+- Do not send more than one first long-running notice per event. Persist the
+  dedupe both in watchdog state and event metadata so losing the watchdog state
+  file does not create chat spam.
 - Do not switch an event more than once unless an operator explicitly enables
   multi-switch retries.
+- Do not switch queued events or recovery-owned events; that creates competing
+  retry owners.
 - Do not switch to a brain that lacks required capabilities, especially image
   support.
 - Do not mark a brain globally unavailable from one soft timeout. Require
@@ -510,7 +525,7 @@ jc watchdog reset-brain claude
 
 - Add fallback config and candidate selection.
 - Patch event meta with `brain_override` and `watchdog_switch`.
-- Retry failed/queued events on fallback brain.
+- Retry terminal failed events on fallback brain.
 - Notify originating chat.
 
 ### Phase 5 — V2 Supervisor Integration
@@ -527,10 +542,12 @@ jc watchdog reset-brain claude
 ### Unit
 
 - Snapshot reads running events older than threshold.
-- Snapshot ignores failed/queued events older than the recovery age window.
+- Snapshot ignores failed events older than the recovery age window, queued
+  retries, recovery-managed events, and events superseded by newer messages in
+  the same conversation.
 - Snapshot parses bounded JSON log windows and ignores malformed lines.
 - Evaluator parses valid JSON and rejects invalid/unknown kinds safely.
-- Dedupe state prevents duplicate long-running notices.
+- Dedupe state plus event metadata prevents duplicate long-running notices.
 - Candidate selection skips unavailable and capability-incompatible brains.
 - Brain switch patches `meta.brain_override` and preserves existing meta.
 - Auth failure without fallback creates/reuses `auth_pending`.
@@ -564,12 +581,15 @@ jc watchdog reset-brain claude
 
 Resolved for v1:
 
-1. The first long-running notice uses the same 180s default for all chats.
-   Operators can tune this with `watchdog.long_running_notice_seconds`.
+1. The first long-running evaluation uses the same 180s default for all chats,
+   but triage decides whether a user-visible notice is warranted. Operators can
+   tune this with `watchdog.long_running_notice_seconds` and can opt out of the
+   triage requirement with `watchdog.long_running_notice_requires_triage: false`.
 2. Brain switching is enabled by default when a configured fallback validates.
    Operators can disable it with `watchdog.brain_switch_enabled: false`.
-3. v1 does not kill a still-running adapter process. It notifies on long-running
-   work and switches only queued/failed events to avoid double execution.
+3. v1 does not kill a still-running adapter process. It may notify on
+   long-running work, but switches only terminal failed events and leaves queued
+   or recovery-managed rows to their existing owner to avoid double execution.
 
 Open for v2:
 

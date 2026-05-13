@@ -13,12 +13,12 @@ from gateway.config import GatewayConfig, TriageConfig, render_default_config  #
 from gateway.recovery import state as recovery_state  # noqa: E402
 from watchdog.intelligence.config import IntelligenceConfig  # noqa: E402
 from watchdog.intelligence.evaluator import Evaluator  # noqa: E402
-from watchdog.intelligence.models import EventSummary, Snapshot  # noqa: E402
+from watchdog.intelligence.models import Decision, EventSummary, Snapshot  # noqa: E402
 from watchdog.intelligence.runner import run_tick  # noqa: E402
 from watchdog.intelligence.state import IntelligenceState  # noqa: E402
 
 
-def _instance(tmp_path: Path) -> Path:
+def _instance(tmp_path: Path, *, long_running_notice_requires_triage: bool = True) -> Path:
     (tmp_path / ".jc").write_text("", encoding="utf-8")
     (tmp_path / "ops").mkdir()
     (tmp_path / "ops" / "gateway.yaml").write_text(
@@ -26,10 +26,11 @@ def _instance(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "ops" / "watchdog.yaml").write_text(
-        """
+        f"""
 watchdog:
   intelligent: true
   long_running_notice_seconds: 180
+  long_running_notice_requires_triage: {str(long_running_notice_requires_triage).lower()}
   brain_switch_enabled: true
   brain_fallbacks:
     claude: [codex]
@@ -83,7 +84,7 @@ def _old_ts(seconds: int) -> str:
 
 
 def test_long_running_notice_is_sent_once(tmp_path: Path, monkeypatch) -> None:
-    inst = _instance(tmp_path)
+    inst = _instance(tmp_path, long_running_notice_requires_triage=False)
     conn = queue.connect(inst)
     event, _ = queue.enqueue(
         conn,
@@ -114,7 +115,95 @@ def test_long_running_notice_is_sent_once(tmp_path: Path, monkeypatch) -> None:
     assert [action["action"] for action in first.actions] == ["long_running_notice"]
     assert second.actions == []
     assert len(delivered) == 1
-    assert "taking a bit longer" in delivered[0][1]
+    assert 'I am still working on: "please do a long thing"' in delivered[0][1]
+
+
+def test_long_running_notice_defaults_to_triage_only(tmp_path: Path, monkeypatch) -> None:
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    event, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="please do a long thing",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "brain_override": "claude"},
+    )
+    conn.execute(
+        "UPDATE events SET status='running', started_at=?, locked_until=? WHERE id=?",
+        (_old_ts(240), _old_ts(60), event.id),
+    )
+    conn.commit()
+    conn.close()
+
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+
+    result = run_tick(inst)
+
+    assert result.actions == []
+    assert delivered == []
+
+
+def test_long_running_notice_uses_contextual_triage_notice_and_meta_dedupe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    event, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="Trova il video della vacanza estiva",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "brain_override": "claude"},
+    )
+    conn.execute(
+        "UPDATE events SET status='running', started_at=?, locked_until=? WHERE id=?",
+        (_old_ts(240), _old_ts(60), event.id),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        Evaluator,
+        "_triage_model_decision",
+        lambda self, snapshot, summary: Decision(
+            kind="long_running",
+            confidence=0.91,
+            severity="info",
+            user_visible=True,
+            should_switch_brain=False,
+            summary="human progress note is useful",
+            notice="Sto cercando proprio il video della vacanza estiva; ci metto ancora un attimo.",
+            source="triage_model",
+        ),
+    )
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+
+    first = run_tick(inst)
+    state_path = inst / "state" / "watchdog" / "intelligence.json"
+    state_path.unlink()
+    second = run_tick(inst)
+
+    assert [action["action"] for action in first.actions] == ["long_running_notice"]
+    assert second.actions == []
+    assert delivered == [
+        "Sto cercando proprio il video della vacanza estiva; ci metto ancora un attimo."
+    ]
+    conn = queue.connect(inst)
+    saved = queue.get(conn, event.id)
+    conn.close()
+    meta = json.loads(saved.meta or "{}")
+    assert "long_running_first_notice_at" in meta["watchdog_notices"]
 
 
 def test_failed_auth_event_switches_to_fallback_brain(tmp_path: Path, monkeypatch) -> None:
@@ -149,7 +238,7 @@ def test_failed_auth_event_switches_to_fallback_brain(tmp_path: Path, monkeypatc
     meta = json.loads(updated.meta or "{}")
     assert meta["brain_override"] == "codex"
     assert meta["watchdog_switch"]["from"] == "claude"
-    assert any("switching this request to codex" in message for message in delivered)
+    assert any("please answer" in message and "retrying it with codex" in message for message in delivered)
 
 
 def test_old_failed_auth_event_is_not_recovered(tmp_path: Path, monkeypatch) -> None:
@@ -187,6 +276,123 @@ def test_old_failed_auth_event_is_not_recovered(tmp_path: Path, monkeypatch) -> 
     conn.close()
     assert unchanged is not None
     assert unchanged.status == "failed"
+    meta = json.loads(unchanged.meta or "{}")
+    assert meta["brain_override"] == "claude"
+    assert "watchdog_switch" not in meta
+
+
+def test_recovery_managed_failed_event_is_not_recovered_by_watchdog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    event, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="please answer",
+        user_id="123",
+        conversation_id="123",
+        meta={
+            "chat_id": "123",
+            "chat_type": "private",
+            "brain_override": "claude",
+            "recovery_deferred": {"reason": "auth_pending", "at": _old_ts(10)},
+        },
+    )
+    queue.fail(conn, event.id, error="recovery defer: auth_pending waiting", max_retries=0)
+    conn.close()
+
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+    monkeypatch.setattr("watchdog.intelligence.actions._brain_validates", lambda *args: True)
+
+    result = run_tick(inst)
+
+    assert result.actions == []
+    assert delivered == []
+
+
+def test_failed_recovery_skips_event_superseded_by_newer_conversation_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    old, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="old request",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "chat_type": "private", "brain_override": "claude"},
+    )
+    queue.fail(conn, old.id, error="authentication failed 401 unauthorized", max_retries=0)
+    newer, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="newer request",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "chat_type": "private", "brain_override": "claude"},
+    )
+    queue.complete(conn, newer.id, response="done")
+    conn.close()
+
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+    monkeypatch.setattr("watchdog.intelligence.actions._brain_validates", lambda *args: True)
+
+    result = run_tick(inst)
+
+    assert result.actions == []
+    assert delivered == []
+    conn = queue.connect(inst)
+    unchanged = queue.get(conn, old.id)
+    conn.close()
+    meta = json.loads(unchanged.meta or "{}")
+    assert meta["brain_override"] == "claude"
+    assert "watchdog_switch" not in meta
+
+
+def test_queued_retry_with_error_is_left_to_gateway_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    event, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="please answer",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "chat_type": "private", "brain_override": "claude"},
+    )
+    queue.fail(conn, event.id, error="authentication failed 401 unauthorized", max_retries=3)
+    conn.close()
+
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+    monkeypatch.setattr("watchdog.intelligence.actions._brain_validates", lambda *args: True)
+
+    result = run_tick(inst)
+
+    assert result.actions == []
+    assert delivered == []
+    conn = queue.connect(inst)
+    unchanged = queue.get(conn, event.id)
+    conn.close()
+    assert unchanged.status == "queued"
     meta = json.loads(unchanged.meta or "{}")
     assert meta["brain_override"] == "claude"
     assert "watchdog_switch" not in meta

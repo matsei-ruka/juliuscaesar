@@ -25,7 +25,10 @@ def generate_proposals(
 
     # Call LLM to synthesize signals into structured proposals.
     prompt = _build_proposer_prompt(signals, current_user_md, config)
-    response_text = _call_proposer_llm(prompt, config)
+    try:
+        response_text = _call_proposer_llm(prompt, config)
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return
 
     try:
         proposals_data = json.loads(response_text)

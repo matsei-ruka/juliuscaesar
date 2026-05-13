@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -29,14 +30,28 @@ def notify_long_running(
     *,
     log: LogFn,
 ) -> bool:
-    brain = summary.brain_spec if summary.brain != "unknown" else "the current brain"
-    body = (
-        f"This is taking a bit longer than usual. I am still working on it with "
-        f"{brain} and will keep the request open."
-    )
-    if decision.summary and decision.source == "triage_model":
-        body += f"\n\n{decision.summary}"
+    body = decision.notice.strip() if decision.source == "triage_model" else ""
+    if not body:
+        preview = _preview_request(summary.event.content)
+        if preview:
+            body = f"I am still working on: {preview}"
+        else:
+            body = "I am still working on this and will keep the request open."
     return _deliver(instance_dir, gateway_config, summary, body, log=log)
+
+
+def mark_event_notice(instance_dir: Path, summary: EventSummary, key: str) -> None:
+    conn = queue.connect(instance_dir)
+    try:
+        current = queue.get(conn, summary.event.id)
+        meta = _decode_meta(current) if current is not None else dict(summary.meta)
+        raw_notices = meta.get("watchdog_notices")
+        notices = dict(raw_notices) if isinstance(raw_notices, dict) else {}
+        notices[key] = now_iso()
+        meta["watchdog_notices"] = notices
+        queue.update_meta(conn, summary.event.id, meta)
+    finally:
+        conn.close()
 
 
 def notify_brain_issue(
@@ -48,16 +63,30 @@ def notify_brain_issue(
     decision: Decision,
     log: LogFn,
 ) -> bool:
+    preview = _preview_request(summary.event.content)
     if fallback:
-        body = (
-            "The current brain hit a runtime/auth issue before it could answer. "
-            f"I am switching this request to {fallback} and retrying now."
-        )
+        if preview:
+            body = (
+                f"I could not get a clean answer for {preview} because the current "
+                f"brain hit a runtime/auth issue. I am retrying it with {fallback} now."
+            )
+        else:
+            body = (
+                "The current brain hit a runtime/auth issue before it could answer. "
+                f"I am retrying it with {fallback} now."
+            )
     else:
-        body = (
-            "The current brain hit a runtime/auth issue before it could answer. "
-            "I notified the operator and will retry when the session is healthy again."
-        )
+        if preview:
+            body = (
+                f"I could not get a clean answer for {preview} because the current "
+                "brain hit a runtime/auth issue. I notified the operator and will retry "
+                "when the session is healthy again."
+            )
+        else:
+            body = (
+                "The current brain hit a runtime/auth issue before it could answer. "
+                "I notified the operator and will retry when the session is healthy again."
+            )
     delivered = _deliver(instance_dir, gateway_config, summary, body, log=log)
     if decision.kind == "auth_expired":
         _notify_operator_auth(instance_dir, gateway_config, summary, log=log)
@@ -235,6 +264,25 @@ def _operator_auth_message(summary: EventSummary) -> str:
         "Claude authentication appears expired for a pending gateway request. "
         "Run `claude /login` on the instance host, then retry or let the queued event replay."
     )
+
+
+def _decode_meta(event) -> dict[str, Any]:
+    if event is None or not event.meta:
+        return {}
+    try:
+        data = json.loads(event.meta)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _preview_request(content: str) -> str:
+    text = " ".join((content or "").split())
+    if not text:
+        return ""
+    if len(text) > 120:
+        text = text[:117].rstrip() + "..."
+    return f'"{text}"'
 
 
 def _brain_validates(instance_dir: Path, gateway_config: GatewayConfig, brain: str) -> bool:

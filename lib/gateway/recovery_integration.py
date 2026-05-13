@@ -80,6 +80,7 @@ class RecoveryIntegration:
             )
             self._notify_failure(event, failure, decision.reason)
         elif isinstance(decision, Defer):
+            self._park_deferred_event(event, decision.reason)
             self.runtime.log(
                 f"recovery defer id={event.id} brain={failure.brain} reason={decision.reason}"
             )
@@ -106,6 +107,46 @@ class RecoveryIntegration:
         finally:
             conn.close()
         self.runtime.log(f"event {failed.status} id={event.id} error={error}")
+
+    def _park_deferred_event(self, event: "Event", reason: str) -> None:
+        """Stop a recovery-deferred event from being lease-requeued.
+
+        Defer means a recovery owner has taken responsibility for the event
+        (for example, waiting for an auth token or handing off to a redispatch
+        row). Leaving the original row in `running` lets the lease expire and
+        makes the same user message eligible for normal dispatch again.
+        """
+        conn = queue.connect(self.runtime.instance_dir)
+        try:
+            current = queue.get(conn, event.id)
+            if current is None or current.status != "running":
+                return
+            meta = _decode_meta(current)
+            meta["recovery_deferred"] = {
+                "reason": reason[:200],
+                "at": queue.now_iso(),
+            }
+            conn.execute(
+                """
+                UPDATE events
+                SET status='failed',
+                    finished_at=?,
+                    locked_by=NULL,
+                    locked_until=NULL,
+                    error=?,
+                    meta=?
+                WHERE id=? AND status='running'
+                """,
+                (
+                    queue.now_iso(),
+                    f"recovery defer: {reason}"[:1000],
+                    queue.encode_meta(meta),
+                    event.id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _notify_failure(
         self,

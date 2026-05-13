@@ -13,7 +13,7 @@ code_anchors:
     symbol: "watchdog:"
   - path: templates/init-instance/ops/watchdog.conf
     symbol: "CLAUDE_ARGS_EXTRA"
-last_verified: 2026-05-12
+last_verified: 2026-05-13
 verified_by: Matsei Ruka
 related:
   - contract/config-and-secret-boundaries.md
@@ -57,20 +57,24 @@ Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_M
 - Once the gateway daemon is alive, intelligent watchdog inspects
   `state/gateway/queue.db` and `state/gateway/gateway.log` for running events
   older than `watchdog.long_running_notice_seconds` (default 180s), failed
-  brain/auth events, and recent recovery logs. Failed/queued recovery candidates
-  are capped by both `watchdog.failed_event_limit` (default 50) and
-  `watchdog.failed_event_max_age_seconds` (default 3600s), so stale unanswered
-  events from days-old quiet instances are not retried.
-- Long-running user requests get one direct progress notice per event by
-  default; optional repeats are controlled by
-  `watchdog.long_running_repeat_seconds`.
+  brain/auth events, and recent recovery logs. Failed recovery candidates are
+  capped by `watchdog.failed_event_limit` (default 50),
+  `watchdog.failed_event_max_age_seconds` (default 3600s), and conversation
+  recency. The watchdog skips queued retries, recovery-managed rows, and any
+  failed event superseded by a newer message in the same conversation.
+- Long-running user requests are triage-gated by default
+  (`watchdog.long_running_notice_requires_triage: true`). The triage model gets
+  the event, recent same-conversation queue context, and relevant logs, then
+  must provide a specific user-facing notice before watchdog sends one.
+  Deduping is persisted in both `state/watchdog/intelligence.json` and event
+  metadata.
 - Brain/auth failures are evaluated by deterministic heuristics plus the
   configured triage model when available (`openrouter`, `api_classifier`,
   `ollama`, `codex_api`, or `claude-channel`).
-- For queued/failed events, intelligent watchdog can patch
+- For terminal failed events, intelligent watchdog can patch
   `event.meta.brain_override`, add `event.meta.watchdog_switch`, and retry the
   event on the first configured fallback brain that validates and supports the
-  event capabilities.
+  event capabilities. Queued events remain owned by the gateway retry loop.
 - If an auth-expired event has no fallback brain, intelligent watchdog
   creates/reuses the existing `auth_pending` row so the gateway recovery token
   flow can replay it later. Group chats receive only a generic status message;

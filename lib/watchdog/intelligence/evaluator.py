@@ -97,7 +97,7 @@ class Evaluator:
                 kind="long_running",
                 confidence=0.78,
                 severity="info",
-                user_visible=True,
+                user_visible=not self.intelligence_config.long_running_notice_requires_triage,
                 should_switch_brain=False,
                 summary="request is still running past the notice threshold",
                 source="heuristic",
@@ -280,6 +280,7 @@ def parse_decision_json(raw: str) -> Decision | None:
         user_visible=bool(data.get("user_visible", False)),
         should_switch_brain=bool(data.get("should_switch_brain", False)),
         summary=str(data.get("summary") or "")[:200],
+        notice=str(data.get("notice") or data.get("message") or "")[:800],
         source="triage_model",
     )
 
@@ -295,8 +296,27 @@ def _render_prompt(snapshot: Snapshot, summary: EventSummary) -> str:
             "brain": summary.brain_spec,
             "error": summary.error[:500],
             "content_preview": (summary.event.content or "")[:500],
-            "meta_keys": sorted(summary.meta.keys()),
+            "conversation_id": summary.event.conversation_id,
+            "source_message_id": summary.event.source_message_id,
+            "meta": _safe_meta(summary.meta),
         },
+        "conversation_recent": [
+            {
+                "id": item.event.id,
+                "status": item.status,
+                "age_seconds": int(item.age_seconds),
+                "source_message_id": item.event.source_message_id,
+                "content_preview": (item.event.content or "")[:240],
+                "error": (item.error or "")[:240],
+                "has_response": bool(item.event.response),
+                "watchdog_notices": sorted(
+                    (item.meta.get("watchdog_notices") or {}).keys()
+                    if isinstance(item.meta.get("watchdog_notices"), dict)
+                    else []
+                ),
+            }
+            for item in _same_conversation(snapshot, summary)[:8]
+        ],
         "logs": [
             {
                 "ts": entry.ts,
@@ -309,3 +329,51 @@ def _render_prompt(snapshot: Snapshot, summary: EventSummary) -> str:
         ],
     }
     return template.replace("{snapshot}", json.dumps(payload, sort_keys=True))
+
+
+def _same_conversation(snapshot: Snapshot, summary: EventSummary) -> list[EventSummary]:
+    key = _conversation_key(summary)
+    if key is None:
+        return []
+    return [item for item in snapshot.recent if _conversation_key(item) == key]
+
+
+def _conversation_key(summary: EventSummary) -> tuple[str, str] | None:
+    conversation = (
+        summary.event.conversation_id
+        or summary.meta.get("chat_id")
+        or summary.event.user_id
+    )
+    if conversation is None or str(conversation) == "":
+        return None
+    return (summary.event.source, str(conversation))
+
+
+def _safe_meta(meta: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        "chat_id",
+        "chat_type",
+        "message_id",
+        "message_thread_id",
+        "reply_to_message_id",
+        "reply_to_text",
+        "brain_override",
+        "brain",
+        "was_voice",
+        "attachment_kind",
+        "file_name",
+        "watchdog_switch",
+        "recovery_deferred",
+    }
+    out: dict[str, object] = {}
+    for key in allowed:
+        value = meta.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            out[key] = value[:500]
+        elif isinstance(value, (bool, int, float)):
+            out[key] = value
+        else:
+            out[key] = str(value)[:500]
+    return out

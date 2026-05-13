@@ -7,8 +7,8 @@
 # is a fresh conversation — DOES NOT resume any prior session.
 #
 # Sandbox mode is controlled by $CODEX_SANDBOX:
-#   read-only        (default) — codex may read but not write
-#   workspace-write            — codex may edit files inside the working dir
+#   workspace-write  (default) — codex may edit files inside the working dir
+#   read-only                  — codex may read but not write
 #   yolo                       — bypass all approvals + sandbox (DANGEROUS)
 set -euo pipefail
 

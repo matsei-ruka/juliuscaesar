@@ -25,6 +25,7 @@ class IntelligenceConfig:
     brain_switch_enabled: bool = True
     long_running_notice_seconds: int = 180
     long_running_repeat_seconds: int = 0
+    long_running_notice_requires_triage: bool = True
     brain_switch_cooldown_seconds: int = 900
     log_window_seconds: int = 900
     log_window_lines: int = 200
@@ -54,6 +55,9 @@ def load_config(instance_dir: Path) -> IntelligenceConfig:
         brain_switch_enabled=_bool(raw.get("brain_switch_enabled"), True),
         long_running_notice_seconds=_int(raw.get("long_running_notice_seconds"), 180),
         long_running_repeat_seconds=_int(raw.get("long_running_repeat_seconds"), 0),
+        long_running_notice_requires_triage=_bool(
+            raw.get("long_running_notice_requires_triage"), True
+        ),
         brain_switch_cooldown_seconds=_int(raw.get("brain_switch_cooldown_seconds"), 900),
         log_window_seconds=_int(raw.get("log_window_seconds"), 900),
         log_window_lines=_int(raw.get("log_window_lines"), 200),

@@ -65,17 +65,21 @@ def run_tick(
         _record_decision(result, state, summary, decision)
         if decision.kind == "long_running" and decision.user_visible:
             key = "long_running_first_notice_at"
-            if not state.has_notice(summary.event.id, key):
+            if not _has_notice(state, summary, key):
                 if not dry_run:
-                    actions.notify_long_running(
+                    delivered = actions.notify_long_running(
                         instance_dir,
                         gateway_cfg,
                         summary,
                         decision,
                         log=log,
                     )
-                    state.mark_notice(summary.event.id, key)
-                result.actions.append({"event_id": summary.event.id, "action": "long_running_notice"})
+                    if delivered:
+                        actions.mark_event_notice(instance_dir, summary, key)
+                        state.mark_notice(summary.event.id, key)
+                result.actions.append(
+                    {"event_id": summary.event.id, "action": "long_running_notice"}
+                )
         elif decision.kind in ("auth_expired", "brain_unhealthy"):
             _handle_unhealthy(
                 instance_dir,
@@ -150,9 +154,10 @@ def _handle_unhealthy(
     elif decision.kind == "auth_expired" and not fallback:
         if not dry_run and actions.ensure_auth_pending(instance_dir, summary):
             result.actions.append({"event_id": summary.event.id, "action": "auth_pending"})
-    if decision.user_visible and not state.has_notice(summary.event.id, "brain_issue_notice_at"):
+    notice_key = "brain_issue_notice_at"
+    if decision.user_visible and not _has_notice(state, summary, notice_key):
         if not dry_run:
-            actions.notify_brain_issue(
+            delivered = actions.notify_brain_issue(
                 instance_dir,
                 gateway_cfg,
                 summary,
@@ -160,7 +165,9 @@ def _handle_unhealthy(
                 decision=decision,
                 log=log,
             )
-            state.mark_notice(summary.event.id, "brain_issue_notice_at")
+            if delivered:
+                actions.mark_event_notice(instance_dir, summary, notice_key)
+                state.mark_notice(summary.event.id, notice_key)
         result.actions.append(
             {
                 "event_id": summary.event.id,
@@ -172,6 +179,15 @@ def _handle_unhealthy(
         result.actions.append(
             {"event_id": summary.event.id, "action": "brain_switch", "to": fallback}
         )
+
+
+def _has_notice(state: IntelligenceState, summary: EventSummary, key: str) -> bool:
+    if state.has_notice(summary.event.id, key):
+        return True
+    if summary.meta.get(key):
+        return True
+    notices = summary.meta.get("watchdog_notices")
+    return isinstance(notices, dict) and bool(notices.get(key))
 
 
 def _record_decision(

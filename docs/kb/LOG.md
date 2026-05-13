@@ -78,3 +78,5 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-12] update | subsystem/gateway-queue.md + decision/why-unified-gateway.md — documented user-visible unsafe triage rejection notices
 ## [2026-05-12] update | subsystem/watchdog-runtime.md — documented failed-event recovery age cap to avoid stale unanswered-message replay
 ## [2026-05-12] update | subsystem/installation-and-cli-routing.md — bumped current release hook anchor to 2026.05.12.02 hotfix
+## [2026-05-13] update | subsystem/watchdog-runtime.md + subsystem/gateway-queue.md — documented recovery-defer parking, latest-message failed recovery, and triage-gated contextual long-running notices
+## [2026-05-13] update | subsystem/installation-and-cli-routing.md — bumped current release hook anchor to 2026.05.13.01 hotfix

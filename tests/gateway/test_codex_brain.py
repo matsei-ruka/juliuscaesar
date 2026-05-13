@@ -48,10 +48,10 @@ def _write_gateway_config(instance: Path, text: str) -> None:
 
 
 class CodexBrainSandboxTests(unittest.TestCase):
-    def test_unset_codex_sandbox_defaults_to_read_only(self) -> None:
+    def test_unset_codex_sandbox_defaults_to_workspace_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             brain = CodexBrain(Path(tmp), override=BrainOverrideConfig())
-            self.assertEqual(brain.extra_env()["CODEX_SANDBOX"], "read-only")
+            self.assertEqual(brain.extra_env()["CODEX_SANDBOX"], "workspace-write")
 
     def test_explicit_sandbox_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,9 +164,20 @@ class CodexShellAdapterTests(unittest.TestCase):
             self.assertIn("fake ok", proc.stdout)
             return argv_file.read_text(encoding="utf-8").splitlines()
 
-    def test_default_argv_uses_supported_read_only_sandbox(self) -> None:
+    def test_default_argv_uses_supported_workspace_write_sandbox(self) -> None:
         argv = self._run_adapter()
-        self.assertEqual(argv, ["exec", "--sandbox", "read-only", "--model", "gpt-5", "-"])
+        self.assertEqual(
+            argv,
+            [
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "--model",
+                "gpt-5",
+                "-",
+            ],
+        )
         self.assertNotIn("--ask-for-approval", argv)
 
     def test_image_arg_is_passed_before_prompt_dash(self) -> None:
@@ -175,8 +186,9 @@ class CodexShellAdapterTests(unittest.TestCase):
             argv,
             [
                 "exec",
+                "--skip-git-repo-check",
                 "--sandbox",
-                "read-only",
+                "workspace-write",
                 "--model",
                 "gpt-5",
                 "--image",
@@ -191,6 +203,7 @@ class CodexShellAdapterTests(unittest.TestCase):
             argv,
             [
                 "exec",
+                "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
                 "gpt-5",

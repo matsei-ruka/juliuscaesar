@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 from gateway import queue  # noqa: E402
 from gateway.brains import AdapterFailure  # noqa: E402
 from gateway.config import GatewayConfig  # noqa: E402
-from gateway.recovery import Fail, Retry  # noqa: E402
+from gateway.recovery import Defer, Fail, Retry  # noqa: E402
 from gateway.recovery_integration import RecoveryIntegration  # noqa: E402
 
 
@@ -41,6 +42,14 @@ class _RetryDispatcher:
 class _FailDispatcher:
     def handle(self, event, failure):
         return Fail(reason="root/sudo permissions error")
+
+    def maybe_consume_auth_token(self, event):
+        return False
+
+
+class _DeferDispatcher:
+    def handle(self, event, failure):
+        return Defer(reason="auth_pending 7 created - waiting for operator token")
 
     def maybe_consume_auth_token(self, event):
         return False
@@ -129,6 +138,35 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.assertIn("Gateway adapter failed", response)
             self.assertIn("root/sudo permissions error", response)
             self.assertIn("root/sudo privileges denied", response)
+
+    def test_defer_decision_parks_event_until_recovery_owner_replays_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            runtime = _Runtime(instance)
+            integration = RecoveryIntegration.__new__(RecoveryIntegration)
+            integration.runtime = runtime
+            integration.dispatcher = _DeferDispatcher()
+            event = self._event(instance)
+
+            integration.handle_adapter_failure(
+                event,
+                AdapterFailure("claude", 1, "please run /login"),
+            )
+
+            conn = queue.connect(instance)
+            try:
+                saved = queue.get(conn, event.id)
+            finally:
+                conn.close()
+            self.assertEqual(saved.status, "failed")
+            self.assertIsNone(saved.locked_by)
+            self.assertIsNone(saved.locked_until)
+            self.assertIn("recovery defer:", saved.error)
+            meta = json.loads(saved.meta)
+            self.assertEqual(
+                meta["recovery_deferred"]["reason"],
+                "auth_pending 7 created - waiting for operator token",
+            )
 
 
 if __name__ == "__main__":
