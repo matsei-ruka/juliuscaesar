@@ -34,7 +34,6 @@ class TickResult:
             "decisions": self.decisions,
             "error": self.error,
             "running": len(self.snapshot.running) if self.snapshot else 0,
-            "failed": len(self.snapshot.failed) if self.snapshot else 0,
         }
 
 
@@ -63,41 +62,7 @@ def run_tick(
     for summary in snapshot.running:
         decision = evaluator.evaluate_event(snapshot, summary)
         _record_decision(result, state, summary, decision)
-        if decision.kind == "long_running" and decision.user_visible:
-            key = "long_running_first_notice_at"
-            if not _has_notice(state, summary, key):
-                if not dry_run:
-                    delivered = actions.notify_long_running(
-                        instance_dir,
-                        gateway_cfg,
-                        summary,
-                        decision,
-                        log=log,
-                    )
-                    if delivered:
-                        actions.mark_event_notice(instance_dir, summary, key)
-                        state.mark_notice(summary.event.id, key)
-                result.actions.append(
-                    {"event_id": summary.event.id, "action": "long_running_notice"}
-                )
-        elif decision.kind in ("auth_expired", "brain_unhealthy"):
-            _handle_unhealthy(
-                instance_dir,
-                intelligence_cfg=intelligence_cfg,
-                gateway_cfg=gateway_cfg,
-                state=state,
-                summary=summary,
-                decision=decision,
-                result=result,
-                dry_run=dry_run,
-                log=log,
-            )
-    for summary in snapshot.failed:
-        if summary.meta.get("watchdog_switch"):
-            continue
-        decision = evaluator.evaluate_event(snapshot, summary)
-        _record_decision(result, state, summary, decision)
-        if decision.kind in ("auth_expired", "brain_unhealthy") and decision.should_switch_brain:
+        if decision.kind in ("auth_expired", "brain_unhealthy"):
             _handle_unhealthy(
                 instance_dir,
                 intelligence_cfg=intelligence_cfg,
@@ -131,29 +96,11 @@ def _handle_unhealthy(
             state,
             summary.brain,
             reason=decision.kind,
-            cooldown_seconds=intelligence_cfg.brain_switch_cooldown_seconds,
+            cooldown_seconds=intelligence_cfg.brain_health_cooldown_seconds,
         )
         result.actions.append(
             {"event_id": summary.event.id, "action": "brain_cooldown", "brain": summary.brain}
         )
-    fallback = actions.select_fallback_brain(
-        instance_dir,
-        gateway_cfg,
-        intelligence_cfg,
-        state,
-        summary,
-    )
-    if summary.status in ("failed", "queued") and fallback and not dry_run:
-        actions.switch_event_to_brain(
-            instance_dir,
-            summary,
-            target_brain=fallback,
-            decision=decision,
-        )
-        state.mark_notice(summary.event.id, "brain_switch_notice_at")
-    elif decision.kind == "auth_expired" and not fallback:
-        if not dry_run and actions.ensure_auth_pending(instance_dir, summary):
-            result.actions.append({"event_id": summary.event.id, "action": "auth_pending"})
     notice_key = "brain_issue_notice_at"
     if decision.user_visible and not _has_notice(state, summary, notice_key):
         if not dry_run:
@@ -161,7 +108,6 @@ def _handle_unhealthy(
                 instance_dir,
                 gateway_cfg,
                 summary,
-                fallback=fallback,
                 decision=decision,
                 log=log,
             )
@@ -172,12 +118,7 @@ def _handle_unhealthy(
             {
                 "event_id": summary.event.id,
                 "action": "brain_issue_notice",
-                "fallback": fallback or "",
             }
-        )
-    if summary.status in ("failed", "queued") and fallback:
-        result.actions.append(
-            {"event_id": summary.event.id, "action": "brain_switch", "to": fallback}
         )
 
 

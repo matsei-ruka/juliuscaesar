@@ -2,7 +2,7 @@
 
 This hotfix changes watchdog and gateway-recovery framework behavior. Existing
 instances do not need a file migration because the new safeguards are enforced
-by code defaults even when older ops/watchdog.yaml files omit the new key.
+by code defaults.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     print(f"release_update={RELEASE_VERSION}")
     print("watchdog_recovery_replay_guard=framework_default")
-    print("long_running_notice_requires_triage=framework_default")
+    print("watchdog_long_running_observe_only=framework_default")
     if args.instance_dir:
         print(f"instance={args.instance_dir}")
     print("release hook complete; no instance file migration required")

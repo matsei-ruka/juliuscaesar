@@ -23,8 +23,8 @@ related:
 ## Summary
 
 Watchdog supervises the gateway daemon by default. It is meant to run from cron
-via `jc-watchdog tick`, keep `jc gateway` alive, and send notifications when
-recovery or intelligent brain-health handling happens.
+via `jc-watchdog tick`, keep `jc gateway` alive, and send notifications for
+intelligent brain-health handling when active evidence is clear.
 
 Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_MODE=legacy-claude`.
 
@@ -38,9 +38,9 @@ Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_M
   after confirming the daemon is alive.
 - `lib/watchdog/supervisor.py`: v2 child supervisor; calls intelligent
   watchdog when the `jc-gateway` child is healthy.
-- `lib/watchdog/intelligence/`: queue/log snapshot, triage-backed health
-  evaluator, dedupe/cooldown state, direct notifications, and fallback brain
-  switching.
+- `lib/watchdog/intelligence/`: queue/log snapshot, deterministic health
+  evaluator, dedupe/cooldown state, direct notifications, and brain-health
+  cooldowns.
 - `<instance>/ops/watchdog.conf`: optional per-instance overrides.
 - `<instance>/ops/watchdog.yaml`: v2 supervisor config and `watchdog:`
   intelligence config block.
@@ -56,30 +56,17 @@ Legacy live Claude Telegram-plugin supervision remains available with `RUNTIME_M
 - In gateway mode, watchdog checks `<instance>/state/gateway/jc-gateway.pid` and restarts with `jc-gateway --instance-dir <instance> start`.
 - Once the gateway daemon is alive, intelligent watchdog inspects
   `state/gateway/queue.db` and `state/gateway/gateway.log` for running events
-  older than `watchdog.long_running_notice_seconds` (default 180s), failed
-  brain/auth events, and recent recovery logs. Failed recovery candidates are
-  capped by `watchdog.failed_event_limit` (default 50),
-  `watchdog.failed_event_max_age_seconds` (default 3600s), and conversation
-  recency. The watchdog skips queued retries, recovery-managed rows, and any
-  failed event superseded by a newer message in the same conversation.
-- Long-running user requests are triage-gated by default
-  (`watchdog.long_running_notice_requires_triage: true`). The triage model gets
-  the event, recent same-conversation queue context, and relevant logs, then
-  must provide a specific user-facing notice before watchdog sends one.
-  Deduping is persisted in both `state/watchdog/intelligence.json` and event
-  metadata.
-- Brain/auth failures are evaluated by deterministic heuristics plus the
-  configured triage model when available (`openrouter`, `api_classifier`,
-  `ollama`, `codex_api`, or `claude-channel`).
-- For terminal failed events, intelligent watchdog can patch
-  `event.meta.brain_override`, add `event.meta.watchdog_switch`, and retry the
-  event on the first configured fallback brain that validates and supports the
-  event capabilities. Queued events remain owned by the gateway retry loop.
-- If an auth-expired event has no fallback brain, intelligent watchdog
-  creates/reuses the existing `auth_pending` row so the gateway recovery token
-  flow can replay it later. Group chats receive only a generic status message;
-  operator auth instructions go to the configured operator DM.
-- Brain cooldowns prevent immediate rerouting back to a known-bad brain; clear
+  older than `watchdog.long_running_notice_seconds` (default 180s) and recent
+  active brain/auth evidence in logs. It does not scan terminal failed events
+  for missed-message recovery.
+- Long-running user requests are observed only. Watchdog records a
+  `long_running` decision for visibility but does not send progress chat
+  messages or ask an LLM to invent one.
+- Brain/auth failures are evaluated by deterministic heuristics only. Normal
+  gateway triage is separate and still handles incoming message routing.
+- Watchdog does not switch, retry, replay, or create `auth_pending` for user
+  message events. Gateway recovery owns adapter-failure retry/replay.
+- Brain cooldowns prevent repeated watchdog notices for a known-bad brain; clear
   them with `jc watchdog reset-brain <brain>`.
 - Default Claude args include `--dangerously-skip-permissions --chrome --channels plugin:telegram@claude-plugins-official`.
 - `SESSION_ID` from watchdog config adds `--resume <id>`.

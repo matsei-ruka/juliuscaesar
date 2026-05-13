@@ -49,8 +49,6 @@ class LogEntry:
 @dataclass(frozen=True)
 class Snapshot:
     running: list[EventSummary] = field(default_factory=list)
-    failed: list[EventSummary] = field(default_factory=list)
-    recent: list[EventSummary] = field(default_factory=list)
     logs: list[LogEntry] = field(default_factory=list)
 
 
@@ -62,7 +60,6 @@ class Decision:
     user_visible: bool
     should_switch_brain: bool
     summary: str
-    notice: str = ""
     source: str = "heuristic"
 
     def to_json(self) -> dict[str, Any]:
@@ -73,6 +70,5 @@ class Decision:
             "user_visible": self.user_visible,
             "should_switch_brain": self.should_switch_brain,
             "summary": self.summary,
-            "notice": self.notice,
             "source": self.source,
         }

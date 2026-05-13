@@ -80,3 +80,5 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-12] update | subsystem/installation-and-cli-routing.md — bumped current release hook anchor to 2026.05.12.02 hotfix
 ## [2026-05-13] update | subsystem/watchdog-runtime.md + subsystem/gateway-queue.md — documented recovery-defer parking, latest-message failed recovery, and triage-gated contextual long-running notices
 ## [2026-05-13] update | subsystem/installation-and-cli-routing.md — bumped current release hook anchor to 2026.05.13.01 hotfix
+## [2026-05-13] update | subsystem/watchdog-runtime.md — removed watchdog LLM triage; long-running detection is observe-only
+## [2026-05-13] update | subsystem/watchdog-runtime.md — removed watchdog failed-event replay and brain switching

@@ -236,21 +236,9 @@ WATCHDOG_YAML_TEMPLATE = """# Watchdog v2 — generic process supervisor.
 watchdog:
   intelligent: true
   long_running_notice_seconds: 180
-  long_running_repeat_seconds: 0
-  long_running_notice_requires_triage: true
-  brain_switch_enabled: true
-  brain_switch_cooldown_seconds: 900
+  brain_health_cooldown_seconds: 900
   log_window_seconds: 900
   log_window_lines: 200
-  failed_event_max_age_seconds: 3600
-  failed_event_limit: 50
-  brain_fallbacks:
-    claude: [codex, gemini, opencode]
-    codex: [claude, gemini]
-    codex_api: [claude, codex]
-    gemini: [claude, codex]
-    opencode: [claude, codex]
-    aider: [claude, codex]
 
 children:
   - name: jc-gateway

@@ -164,7 +164,6 @@ def cmd_intelligence(instance_dir: Path, args: argparse.Namespace) -> int:
     payload = {
         "enabled": cfg.enabled,
         "running": [_event_payload(item) for item in snapshot.running],
-        "failed": [_event_payload(item) for item in snapshot.failed],
         "brain_health": state.brain_health,
         "notified_events": state.notified_events,
         "latest_decisions": state.latest_decisions[-10:],

@@ -16,10 +16,9 @@ The gateway can be up while the active brain is broken, logged out, wedged on a
 long task, or repeatedly timing out. In those cases the watchdog must:
 
 1. inspect gateway state and logs;
-2. ask the configured triage model to classify the situation;
-3. notify the right chat with a user-visible status;
-4. switch the pending request to another available brain when that is safer
-   than waiting or retrying the failed brain;
+2. classify clear runtime/auth failures with deterministic evidence;
+3. notify the right chat only for user-visible brain/auth failures;
+4. observe long-running work without sending generic progress messages;
 5. avoid duplicate alerts and avoid creating retry loops.
 
 This spec covers the product and implementation contract. v1 is implemented in
@@ -49,9 +48,10 @@ The v1 implementation closes the original product gap by adding:
 - Recent gateway JSON logs are inspected for brain/auth errors.
 - `events.status='running'` rows are inspected to detect a user request that is
   taking too long.
-- The originating chat is notified while a brain is still running.
-- Pending requests can be moved away from a brain that is probably unhealthy.
-- The configured triage model participates in watchdog health decisions.
+- Failed/past requests are left to gateway recovery and operator action; watchdog
+  does not replay or switch them.
+- Long-running requests are recorded for operator visibility, but watchdog does
+  not send chat progress messages for them.
 
 ---
 
@@ -61,10 +61,10 @@ The v1 implementation closes the original product gap by adding:
   in the gateway and remains the first responder after `invoke_brain()` returns
   or raises.
 - Not killing long-running brain subprocesses at the three-minute mark. The
-  first milestone is user-visible progress, not cancellation.
-- Not letting the triage model choose arbitrary brains. It may recommend a
-  category of action, but fallback candidates come from operator config and the
-  brain capability matrix.
+  watchdog observes them; human progress messages belong in the active
+  brain/runtime flow where real task context exists.
+- Not moving failed/past user messages to another brain. Gateway recovery owns
+  retry/replay after adapter failure.
 - Not sending status messages through the stuck brain. Watchdog status delivery
   uses the channel delivery layer directly.
 - Not changing normal triage routing for healthy requests.
@@ -83,8 +83,8 @@ gateway alive?
   yes -> intelligent watchdog tick
            inspect queue
            inspect gateway logs
-           classify with triage model when heuristic signal is present
-           notify/switch/defer
+           classify clear runtime/auth failures deterministically
+           notify/mark brain health only for active evidence
 ```
 
 This phase should live in Python, not in `watchdog.sh`. Preferred placement:
@@ -93,9 +93,9 @@ This phase should live in Python, not in `watchdog.sh`. Preferred placement:
 lib/watchdog/intelligence/
   __init__.py
   snapshot.py       # queue/log/config snapshot
-  evaluator.py      # triage-backed classifier
+  evaluator.py      # deterministic classifier
   decisions.py      # dataclasses for decisions
-  actions.py        # notify, switch, mark state
+  actions.py        # notify, mark state
   state.py          # dedupe/cooldown state
 ```
 
@@ -118,9 +118,7 @@ Minimum fields:
 {
   "notified_events": {
     "123": {
-      "long_running_first_notice_at": "2026-05-12T10:05:00Z",
-      "long_running_last_notice_at": "2026-05-12T10:12:00Z",
-      "brain_switch_notice_at": "2026-05-12T10:07:00Z"
+      "brain_issue_notice_at": "2026-05-12T10:05:00Z"
     }
   },
   "brain_health": {
@@ -141,7 +139,7 @@ minute, so duplicate prevention is load-bearing.
 ## 5. Snapshot Inputs
 
 Each intelligent tick builds a bounded snapshot. It must not dump whole logs or
-full prompts into the triage call.
+full prompts into watchdog decision state.
 
 ### 5.1 Queue Snapshot
 
@@ -149,9 +147,6 @@ Read from `state/gateway/queue.db`:
 
 - running events where `started_at` or `received_at` is older than
   `watchdog.long_running_notice_seconds`;
-- recently failed events, especially failures with `error` mentioning
-  `authentication`, `login`, `session`, `401`, `timeout`, or adapter names;
-- retry counts for the same event;
 - `source`, `conversation_id`, `user_id`, and decoded `meta` for delivery.
 
 For long-running detection, use `started_at` when present; fall back to
@@ -160,27 +155,13 @@ For long-running detection, use `started_at` when present; fall back to
 ```yaml
 watchdog:
   long_running_notice_seconds: 180
-  long_running_notice_requires_triage: true
 ```
 
-Failed recovery must also be bounded by count, event age, and conversation
-recency so a quiet instance cannot resurrect week-old or superseded unanswered
-messages:
-
-```yaml
-watchdog:
-  failed_event_max_age_seconds: 3600
-  failed_event_limit: 50
-```
-
-Use `started_at` when present and `received_at` otherwise. Only terminal
-`failed` events are watchdog recovery candidates; `queued` events still belong
-to the gateway retry loop. Skip any event already owned by gateway recovery
-(`error` starting with `recovery:`, `meta.recovery_deferred`, or recovery
-source-message ids). Also skip a failed event if a newer event exists in the
-same source/conversation, because the chat has moved on. If
-`failed_event_max_age_seconds <= 0`, the age guard is disabled for explicit
-operator override only.
+Terminal `failed` events are not watchdog recovery candidates. The watchdog must
+not scan failed rows looking for missed messages, must not patch
+`event.meta.brain_override`, must not add `event.meta.watchdog_switch`, and must
+not call `queue.retry_now()`. Failed adapter handling remains owned by gateway
+recovery.
 
 ### 5.2 Gateway Log Snapshot
 
@@ -211,26 +192,16 @@ The evaluator receives summarized log entries, not raw unbounded log files.
 Include:
 
 - selected brain/model for the event when known;
-- enabled brains and configured fallback brains;
-- `triage_routing`, `default_fallback_brain`,
-  `triage_unsafe_fallback_brain`;
-- brain capability matrix result for the event (`supports_images`, etc.);
 - delivery channel availability.
 
 ---
 
-## 6. Triage-Backed Evaluator
+## 6. Deterministic Watchdog Evaluator
 
-Use the configured triage provider/model as the evaluator engine. This should
-share transport/config with `lib/gateway/triage` where practical, but it must
-use a separate prompt and schema because the watchdog is not classifying user
-intent; it is classifying runtime health.
-
-New prompt:
-
-```text
-lib/watchdog/intelligence/prompt.md
-```
+The watchdog evaluator must not call the configured triage provider/model. Normal
+gateway triage still routes incoming user messages, but watchdog health handling
+is a separate deterministic subsystem. It reads bounded queue/log evidence and
+returns a `Decision` directly from code.
 
 Required output schema:
 
@@ -252,17 +223,19 @@ Rules:
   cooldown expiry.
 - `brain_unhealthy`: current brain is crashing/timing out/rejecting before it
   can answer. User-visible notification required if tied to a user event.
-  Brain switch should be considered.
+  The brain may be marked temporarily unavailable; the event is not replayed or
+  switched by watchdog.
 - `long_running`: a running event exceeded the notice threshold but there is no
-  clear failure. Send a progress message; do not switch yet by default.
+  clear failure. Record the decision for visibility; do not send a progress
+  message and do not switch.
 - `transient_slow`: network/provider slowness or one-off timeout. User-visible
-  notification optional unless the event has already crossed threshold.
+  notification is not handled by watchdog.
 - `healthy`: no action.
 - `unknown`: log only unless a deterministic rule says otherwise.
 
-Heuristics may short-circuit obvious cases before the LLM call, but any
-ambiguous case must be triage-evaluated. The watchdog log should record
-whether a decision came from `heuristic` or `triage_model`.
+The watchdog log should record deterministic decisions with `source:
+heuristic`. Ambiguous cases should remain `unknown`/observe-only instead of
+being escalated to an LLM.
 
 ---
 
@@ -294,48 +267,22 @@ notify the configured operator chat.
 
 ### 7.2 Long-Running Message
 
-After `long_running_notice_seconds` (default 180s), the watchdog asks the
-triage model whether a human would send a progress note. The default
-`long_running_notice_requires_triage: true` means no generic timer-based
-message is sent when triage is unavailable or undecided.
+After `long_running_notice_seconds` (default 180s), the watchdog records a
+`long_running` decision for visibility only. It must not send a generic chat
+message such as "taking longer than usual" and must not ask an LLM to invent a
+progress note.
 
-If triage decides a notice is useful, it must provide a natural chat message
-that references the actual request and visible work. Do not mention event ids,
-queue state, brain/model names, or the old static template.
-
-```text
-Sto cercando proprio il video della vacanza estiva; ci metto ancora un attimo.
-```
-
-Do not claim tool activity that is not known. Avoid "I am spawning a worker"
-unless there is a real worker id in state.
-
-Optional second notice, disabled by default:
-
-```yaml
-watchdog:
-  long_running_repeat_seconds: 600
-```
-
-When enabled, repeat no more than once every repeat interval, and only if the
-event is still running.
+Specific human progress messages belong in the active brain/runtime flow, where
+the system has real task context. If that flow cannot prove what work is being
+done, it should say nothing rather than send static filler.
 
 ### 7.3 Brain-Unhealthy Message
 
-When a brain failure is tied to a specific event and an alternate brain is
-available:
+When a brain failure is tied to a specific active event:
 
 ```text
 I could not get a clean answer for "<request preview>" because the current brain
-hit a runtime/auth issue. I am retrying it with <fallback brain> now.
-```
-
-When no alternate is available:
-
-```text
-I could not get a clean answer for "<request preview>" because the current brain
-hit a runtime/auth issue. I notified the operator and will retry when the
-session is healthy again.
+hit a runtime/auth issue. I notified the operator.
 ```
 
 Messages must be sent directly through `deliver_response()` or channel clients,
@@ -343,67 +290,17 @@ not through a brain.
 
 ---
 
-## 8. Brain Switching
+## 8. Brain Health Cooldown
 
-### 8.1 Availability
-
-A brain is available only if:
-
-- it is configured/enabled for this instance;
-- its adapter validates locally;
-- it is not marked `unavailable` in watchdog intelligence state;
-- it supports the event's required capabilities;
-- it is not the same brain that just failed;
-- it is allowed by operator policy.
-
-New config:
+Watchdog may mark a brain temporarily unavailable when active runtime/auth
+evidence is clear. This state is advisory for watchdog decisions and operator
+visibility; it is not a replay or switching mechanism.
 
 ```yaml
 watchdog:
   intelligent: true
-  brain_switch_enabled: true
-  brain_switch_cooldown_seconds: 900
-  brain_fallbacks:
-    claude: ["codex", "gemini", "opencode"]
-    codex: ["claude", "gemini"]
-    gemini: ["claude", "codex"]
-    opencode: ["claude", "codex"]
+  brain_health_cooldown_seconds: 900
 ```
-
-Fallback candidates are ordered. The triage evaluator decides whether a switch
-is appropriate; config decides which candidates are legal.
-
-### 8.2 Switching A Pending Event
-
-For a failed event:
-
-1. patch `event.meta.brain_override` to the selected fallback brain;
-2. add `event.meta.watchdog_switch`:
-   ```json
-   {
-     "from": "claude",
-     "to": "codex",
-     "reason": "auth_expired",
-     "at": "2026-05-12T10:07:00Z"
-   }
-   ```
-3. retry the same event once with the fallback brain.
-
-Queued events are not switched by watchdog; they are still controlled by the
-gateway retry loop. Events already marked by gateway recovery are not switched
-by watchdog.
-3. call `queue.retry_now(conn, event.id)`.
-
-For a currently running event:
-
-- Do not run the same event concurrently in two brains by default.
-- If the evaluator says `auth_expired` or `brain_unhealthy` and the current
-  adapter process has already failed/returned, use the failed-event path above.
-- If the process is merely long-running, notify only.
-- A future implementation may support a hard cancellation path, but that needs
-  process ownership tracking and is out of scope for v1.
-
-### 8.3 Brain Cooldown
 
 On `auth_expired` or repeated `brain_unhealthy` decisions, mark the current
 brain unavailable:
@@ -412,8 +309,8 @@ brain unavailable:
 {"state":"unavailable","reason":"auth_expired","until":"..."}
 ```
 
-The cooldown prevents immediate re-routing back to a known-bad brain. Recovery
-success, `jc watchdog reset`, or cooldown expiry clears the mark.
+The cooldown prevents repeated watchdog notices for the same broken brain.
+`jc watchdog reset`, or cooldown expiry clears the mark.
 
 ---
 
@@ -425,13 +322,10 @@ redemption.
 
 Instead:
 
-1. watchdog detects evidence of auth expiry in logs/failed events;
+1. watchdog detects evidence of auth expiry in logs for active running events;
 2. evaluator classifies `auth_expired`;
 3. watchdog marks the brain unavailable and sends user-visible status;
-4. watchdog invokes or reuses the existing recovery/session-expired path to
-   notify the operator privately;
-5. when recovery succeeds, queued events are retried and the brain health mark
-   is cleared.
+4. watchdog notifies the operator privately.
 
 Codex-specific expiry must be supported too. If the failed brain is `codex` or
 `codex_api`, the operator action should point at `jc codex-auth refresh` or the
@@ -439,11 +333,8 @@ configured Codex auth recovery path, not `claude /login`.
 
 v1 behavior:
 
-- When a fallback brain is selected, the event is switched and retried; the
-  operator still receives an auth-specific message for the failed brain.
-- When no fallback is selected, watchdog creates/reuses the existing
-  `auth_pending` row so the normal recovery token-redemption flow can replay
-  the event after operator action.
+- Watchdog never switches or retries failed events.
+- Watchdog never creates `auth_pending` rows for replay.
 - Group chats receive only a generic status message; token/login instructions
   go to the configured operator DM.
 
@@ -455,9 +346,8 @@ Add structured log kinds:
 
 - `watchdog_intelligence_snapshot`
 - `watchdog_intelligence_decision`
-- `watchdog_long_running_notice`
+- `watchdog_long_running_observed`
 - `watchdog_brain_unhealthy`
-- `watchdog_brain_switch`
 - `watchdog_brain_cooldown`
 - `watchdog_notify_failed`
 
@@ -482,19 +372,14 @@ jc watchdog reset-brain claude
 
 - Do not send secrets, login URLs, or token instructions to a group chat.
 - Do not ask the stuck brain to explain its own stuck state.
-- Do not send more than one first long-running notice per event. Persist the
-  dedupe both in watchdog state and event metadata so losing the watchdog state
-  file does not create chat spam.
-- Do not switch an event more than once unless an operator explicitly enables
-  multi-switch retries.
-- Do not switch queued events or recovery-owned events; that creates competing
-  retry owners.
-- Do not switch to a brain that lacks required capabilities, especially image
-  support.
+- Do not send watchdog long-running progress messages. Static progress filler is
+  worse than silence.
+- Do not switch, retry, or replay user message events from watchdog.
+- Do not scan terminal failed rows as a source of unanswered-message recovery.
 - Do not mark a brain globally unavailable from one soft timeout. Require
   either high-confidence auth/session evidence or repeated failures.
-- Do not hide the original failure. Log the old brain, new brain, evaluator
-  output, and event id.
+- Do not hide the original failure. Log the brain, evaluator output, and event
+  id.
 
 ---
 
@@ -503,30 +388,30 @@ jc watchdog reset-brain claude
 ### Phase 1 — Snapshot and Status
 
 - Add `lib/watchdog/intelligence/snapshot.py`.
-- Read queue running/failed rows and recent gateway logs.
+- Read queue running rows and recent gateway logs.
 - Add `jc watchdog intelligence --json`.
-- No notifications, no brain switching.
+- No notifications, no replay.
 
 ### Phase 2 — Long-Running Notices
 
 - Add state dedupe.
-- Add direct channel notification for running events older than 180s.
-- Use evaluator for ambiguous "slow vs unhealthy" classification.
-- Tests verify one first notice per event and no notice after event completion.
+- Record running events older than 180s.
+- Do not send direct channel notification for long-running events.
+- Tests verify long-running events are observed without user-visible actions.
 
 ### Phase 3 — Brain Health Evaluation
 
-- Add evaluator prompt/schema using configured triage provider.
+- Add deterministic evaluator rules for clear runtime/auth evidence.
 - Classify recent failure/log snapshots.
 - Mark brain `suspect` / `unavailable` with cooldowns.
-- Integrate with existing recovery/session-expired operator flow.
+- Notify the operator for active auth/runtime issues without creating replay
+  state.
 
-### Phase 4 — Brain Switch
+### Phase 4 — Failed-Event Replay Removal
 
-- Add fallback config and candidate selection.
-- Patch event meta with `brain_override` and `watchdog_switch`.
-- Retry terminal failed events on fallback brain.
-- Notify originating chat.
+- Remove failed-row scanning from watchdog.
+- Remove fallback config and candidate selection from watchdog.
+- Ensure watchdog never calls `queue.retry_now()` or creates `auth_pending`.
 
 ### Phase 5 — V2 Supervisor Integration
 
@@ -542,37 +427,33 @@ jc watchdog reset-brain claude
 ### Unit
 
 - Snapshot reads running events older than threshold.
-- Snapshot ignores failed events older than the recovery age window, queued
-  retries, recovery-managed events, and events superseded by newer messages in
-  the same conversation.
+- Snapshot does not read terminal failed events for recovery.
 - Snapshot parses bounded JSON log windows and ignores malformed lines.
-- Evaluator parses valid JSON and rejects invalid/unknown kinds safely.
-- Dedupe state plus event metadata prevents duplicate long-running notices.
-- Candidate selection skips unavailable and capability-incompatible brains.
-- Brain switch patches `meta.brain_override` and preserves existing meta.
-- Auth failure without fallback creates/reuses `auth_pending`.
+- Evaluator classifies auth/runtime failures deterministically.
+- Long-running events produce no user-visible watchdog action.
+- Failed auth events remain failed and are not retried/switched by watchdog.
 - Brain cooldown expiry clears stale unavailable marks.
 
 ### Integration
 
-- Running Telegram event older than 180s sends one Telegram progress message.
+- Running Telegram event older than 180s records a decision but sends no
+  Telegram progress message.
 - Group event with auth expiry sends generic group notice plus private operator
   DM.
-- Claude auth-expired failure marks `claude` unavailable and retries on `codex`
-  when configured.
+- Claude auth evidence on an active running event marks `claude` unavailable and
+  sends notification without replaying the event.
 - Codex auth-expired failure points operator at Codex auth recovery, not Claude
   login.
-- No fallback configured: event is not switched; user/operator still notified.
-- Long-running event that later completes does not receive repeat notices.
+- Failed events are not scanned, switched, or replayed by watchdog.
+- Long-running event that later completes does not receive watchdog notices.
 
 ### Manual Smoke On Ada
 
-1. Configure `watchdog.intelligent: true` and fallback brains.
-2. Inject a fake running event older than 180s; run watchdog tick; confirm one
-   user-visible progress message.
-3. Force a Claude auth error using a controlled adapter fixture or expired test
-   session; run watchdog tick; confirm private operator alert and fallback
-   routing.
+1. Configure `watchdog.intelligent: true`.
+2. Inject a fake running event older than 180s; run watchdog tick; confirm a
+   recorded `long_running` decision and no user-visible progress message.
+3. Force a Claude auth log on an active running event; run watchdog tick;
+   confirm private operator alert and no event retry/switch.
 4. Confirm normal healthy gateway tick produces no user-visible messages.
 
 ---
@@ -582,14 +463,12 @@ jc watchdog reset-brain claude
 Resolved for v1:
 
 1. The first long-running evaluation uses the same 180s default for all chats,
-   but triage decides whether a user-visible notice is warranted. Operators can
-   tune this with `watchdog.long_running_notice_seconds` and can opt out of the
-   triage requirement with `watchdog.long_running_notice_requires_triage: false`.
-2. Brain switching is enabled by default when a configured fallback validates.
-   Operators can disable it with `watchdog.brain_switch_enabled: false`.
-3. v1 does not kill a still-running adapter process. It may notify on
-   long-running work, but switches only terminal failed events and leaves queued
-   or recovery-managed rows to their existing owner to avoid double execution.
+   but watchdog is observe-only for long-running work. Operators can tune this
+   with `watchdog.long_running_notice_seconds`.
+2. Watchdog does not switch, retry, or replay terminal failed events. Gateway
+   recovery owns adapter-failure replay.
+3. v1 does not kill a still-running adapter process. It may notify on clear
+   runtime/auth failures and marks brain health cooldowns only.
 
 Open for v2:
 

@@ -43,16 +43,14 @@ def build_snapshot(
     logs = read_gateway_logs(instance_dir, max_lines=cfg.log_window_lines)
     brain_by_event = _brain_map(logs)
     running = _read_running(instance_dir, cfg, brain_by_event=brain_by_event, now=now)
-    failed = _read_failed(instance_dir, cfg, brain_by_event=brain_by_event, now=now)
-    recent = _read_recent(instance_dir, cfg, brain_by_event=brain_by_event, now=now)
-    event_ids = {item.event.id for item in [*running, *failed]}
+    event_ids = {item.event.id for item in running}
     relevant_logs = [
         entry
         for entry in logs
         if (entry.event_id in event_ids if entry.event_id is not None else False)
         or any(keyword in (entry.msg or entry.raw).lower() for keyword in KEYWORDS)
     ][-cfg.log_window_lines :]
-    return Snapshot(running=running, failed=failed, recent=recent, logs=relevant_logs)
+    return Snapshot(running=running, logs=relevant_logs)
 
 
 def read_gateway_logs(instance_dir: Path, *, max_lines: int) -> list[LogEntry]:
@@ -97,84 +95,6 @@ def _read_running(
         if age < cfg.long_running_notice_seconds:
             continue
         out.append(_summary(event, age=age, brain_by_event=brain_by_event))
-    return out
-
-
-def _read_failed(
-    instance_dir: Path,
-    cfg: IntelligenceConfig,
-    *,
-    brain_by_event: dict[int, tuple[str, str | None]],
-    now: datetime,
-) -> list[EventSummary]:
-    conn = queue.connect(instance_dir)
-    try:
-        rows = conn.execute(
-            """
-            SELECT * FROM events
-            WHERE status='failed'
-              AND error IS NOT NULL
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (cfg.failed_event_limit,),
-        ).fetchall()
-        recent_rows = conn.execute(
-            """
-            SELECT * FROM events
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (max(200, cfg.failed_event_limit * 4),),
-        ).fetchall()
-    finally:
-        conn.close()
-    latest_by_conversation = _latest_by_conversation(recent_rows)
-    out: list[EventSummary] = []
-    for row in rows:
-        event = queue.row_to_event(row)
-        if event is None:
-            continue
-        meta = _decode_meta(event)
-        if _is_recovery_managed(event, meta):
-            continue
-        key = _conversation_key(event, meta)
-        if key and latest_by_conversation.get(key, event.id) != event.id:
-            continue
-        age = _event_age(event, now=now)
-        if cfg.failed_event_max_age_seconds > 0 and age > cfg.failed_event_max_age_seconds:
-            continue
-        out.append(_summary(event, age=age, brain_by_event=brain_by_event))
-    return out
-
-
-def _read_recent(
-    instance_dir: Path,
-    cfg: IntelligenceConfig,
-    *,
-    brain_by_event: dict[int, tuple[str, str | None]],
-    now: datetime,
-) -> list[EventSummary]:
-    conn = queue.connect(instance_dir)
-    try:
-        rows = conn.execute(
-            """
-            SELECT * FROM events
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (max(20, cfg.failed_event_limit),),
-        ).fetchall()
-    finally:
-        conn.close()
-    out: list[EventSummary] = []
-    for row in rows:
-        event = queue.row_to_event(row)
-        if event is None:
-            continue
-        out.append(
-            _summary(event, age=_event_age(event, now=now), brain_by_event=brain_by_event)
-        )
     return out
 
 
@@ -265,33 +185,6 @@ def _decode_meta(event: queue.Event) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def _latest_by_conversation(rows: list[Any]) -> dict[tuple[str, str], int]:
-    latest: dict[tuple[str, str], int] = {}
-    for row in rows:
-        event = queue.row_to_event(row)
-        if event is None:
-            continue
-        key = _conversation_key(event, _decode_meta(event))
-        if key and key not in latest:
-            latest[key] = event.id
-    return latest
-
-
-def _conversation_key(event: queue.Event, meta: dict[str, Any]) -> tuple[str, str] | None:
-    conversation = event.conversation_id or meta.get("chat_id") or event.user_id
-    if conversation is None or str(conversation) == "":
-        return None
-    return (event.source, str(conversation))
-
-
-def _is_recovery_managed(event: queue.Event, meta: dict[str, Any]) -> bool:
-    if meta.get("recovery_deferred") or meta.get("session_missing_redispatch"):
-        return True
-    if str(event.source_message_id or "").startswith("recovery:"):
-        return True
-    return str(event.error or "").lower().startswith("recovery:")
 
 
 def _int_or_none(value: Any) -> int | None:
