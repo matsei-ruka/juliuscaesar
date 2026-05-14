@@ -28,11 +28,43 @@ def apply_artifacts(
             continue
         if classified.risk_class == "SENSITIVE":
             _stage(instance_dir, classified)
+            _raise_dream_approval(instance_dir, classified)
             out.append(AppliedArtifact(classified, "STAGED", "awaiting operator approval"))
             continue
         note = _write_artifact(instance_dir, classified)
         out.append(AppliedArtifact(classified, "AUTO_APPLIED", note))
     return out
+
+
+def _raise_dream_approval(instance_dir: Path, artifact: ProposedArtifact) -> None:
+    """Best-effort: register a SENSITIVE dream diff in the unified approvals table."""
+    try:
+        from approvals.service import find_by_source, raise_
+    except Exception:
+        return
+    source_ref = f"dream:{artifact.diff_id}"
+    if find_by_source(instance_dir, "dream", source_ref) is not None:
+        return
+    excerpt = (artifact.content or "")[:400]
+    try:
+        raise_(
+            instance_dir,
+            kind="dream_diff",
+            title=f"{artifact.kind}: {artifact.title or artifact.path}",
+            body=excerpt,
+            payload={
+                "diff_id": artifact.diff_id,
+                "artifact_path": artifact.path,
+                "artifact_kind": artifact.kind,
+                "content_excerpt": excerpt,
+                "risk_class": artifact.risk_class,
+            },
+            callback_payload={"diff_id": artifact.diff_id},
+            producer="dream",
+            source_ref=source_ref,
+        )
+    except Exception:
+        return
 
 
 def approve(instance_dir: Path, diff_id: str) -> Path:

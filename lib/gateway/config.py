@@ -117,6 +117,14 @@ class ReliabilityConfig:
 
 
 @dataclass(frozen=True)
+class PrincipalConfig:
+    telegram_chat_id: str | None = None
+    telegram_user_id: str | None = None
+    email: str | None = None
+    email_domain: str | None = None
+
+
+@dataclass(frozen=True)
 class CodexAuthConfig:
     auth_file: str = "~/.codex/auth.json"
     client_id_override: str | None = None
@@ -139,6 +147,7 @@ class GatewayConfig:
     brains: dict[str, BrainOverrideConfig] = field(default_factory=dict)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     codex_auth: CodexAuthConfig = field(default_factory=CodexAuthConfig)
+    principal: PrincipalConfig = field(default_factory=PrincipalConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -468,6 +477,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "claude_triage_port",
         "company",
         "codex_auth",
+        "principal",
     }
     for key in data:
         if key not in allowed_top:
@@ -859,6 +869,29 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 if value is not None and not isinstance(value, (list, tuple)):
                     errors.append(f"company.{key}: must be a list")
 
+    principal_raw = data.get("principal")
+    if principal_raw is not None:
+        if not isinstance(principal_raw, dict):
+            errors.append("principal: must be a mapping")
+        else:
+            allowed_principal = {
+                "telegram_chat_id",
+                "telegram_user_id",
+                "email",
+                "email_domain",
+            }
+            for key in principal_raw:
+                if key not in allowed_principal:
+                    errors.append(f"principal.{key}: unknown field")
+            for key in ("telegram_chat_id", "telegram_user_id"):
+                value = principal_raw.get(key)
+                if value is not None and not isinstance(value, (str, int)):
+                    errors.append(f"principal.{key}: must be a string or integer")
+            for key in ("email", "email_domain"):
+                value = principal_raw.get(key)
+                if value is not None and not isinstance(value, str):
+                    errors.append(f"principal.{key}: must be a string")
+
     codex_auth_raw = data.get("codex_auth")
     if codex_auth_raw is not None:
         if not isinstance(codex_auth_raw, dict):
@@ -1032,6 +1065,23 @@ def _load_reply_footer(data: dict[str, Any]) -> ReplyFooterConfig:
     )
 
 
+def _load_principal(data: dict[str, Any]) -> PrincipalConfig:
+    raw = data.get("principal") if isinstance(data.get("principal"), dict) else {}
+
+    def _str_or_none(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    return PrincipalConfig(
+        telegram_chat_id=_str_or_none(raw.get("telegram_chat_id")),
+        telegram_user_id=_str_or_none(raw.get("telegram_user_id")),
+        email=_str_or_none(raw.get("email")),
+        email_domain=_str_or_none(raw.get("email_domain")),
+    )
+
+
 def _load_codex_auth(data: dict[str, Any]) -> CodexAuthConfig:
     raw = data.get("codex_auth") if isinstance(data.get("codex_auth"), dict) else {}
     return CodexAuthConfig(
@@ -1159,6 +1209,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         brains=_load_brains(data),
         reliability=_load_reliability(data),
         codex_auth=_load_codex_auth(data),
+        principal=_load_principal(data),
     )
 
 

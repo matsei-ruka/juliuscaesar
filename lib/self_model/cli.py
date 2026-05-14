@@ -103,27 +103,73 @@ def cmd_list(
 
 
 def cmd_approve(instance_dir: Path, proposal_id: str) -> int:
-    """Apply a proposal. The applier enforces DKIM gate for RULES/IDENTITY."""
+    """Apply a proposal via the unified approvals table.
+
+    JOURNAL.md is auto-apply scope and bypasses the approvals gate.
+    Other targets must flow through `approvals.raise_` + a Telegram or
+    DKIM-signed-email decide.
+    """
     from .applier import apply_proposal, ApplierError
     from .store import load_proposals, move_proposal
 
-    for proposal in load_proposals(instance_dir, "staging"):
-        if proposal.id == proposal_id:
-            try:
-                apply_proposal(instance_dir, proposal)
-                move_proposal(instance_dir, proposal_id, "staging", "applied")
-                print(f"Applied {proposal_id} -> {proposal.target_file}")
-                return 0
-            except ApplierError as e:
-                print(f"Error: {e}", file=sys.stderr)
+    proposal = None
+    for candidate in load_proposals(instance_dir, "staging"):
+        if candidate.id == proposal_id:
+            proposal = candidate
+            break
+    if proposal is None:
+        print(f"Proposal not found in staging: {proposal_id}", file=sys.stderr)
+        return 1
+
+    is_journal = proposal.target_file == "memory/L1/JOURNAL.md"
+
+    if not is_journal:
+        try:
+            from approvals.service import find_by_source, raise_
+
+            existing = find_by_source(
+                instance_dir, "self_model", f"self_model:{proposal_id}"
+            )
+            if existing is None:
+                raise_(
+                    instance_dir,
+                    kind="self_model_diff",
+                    title=f"{proposal.type} {proposal.target_section or proposal.target_file}",
+                    body=proposal.reasoning,
+                    payload={
+                        "proposal_id": proposal.id,
+                        "target_file": proposal.target_file,
+                        "target_section": proposal.target_section or "",
+                        "diff": proposal.proposed_content,
+                        "risk_class": "SENSITIVE",
+                    },
+                    callback_payload={"proposal_id": proposal.id},
+                    producer="self_model",
+                    source_ref=f"self_model:{proposal_id}",
+                )
                 print(
-                    "Hint: RULES.md / IDENTITY.md changes require a DKIM-signed approval "
-                    "email from filippo.perta@scovai.com referencing the proposal id.",
-                    file=sys.stderr,
+                    f"Raised approval for {proposal_id}. Decide via Telegram or "
+                    f"DKIM-signed email — the CLI cannot approve SENSITIVE rows."
+                )
+                return 0
+            if existing.status != "approved":
+                print(
+                    f"Approval for {proposal_id} is {existing.status}. Decide via "
+                    f"Telegram or DKIM-signed email — the CLI cannot approve "
+                    f"SENSITIVE rows."
                 )
                 return 1
-    print(f"Proposal not found in staging: {proposal_id}", file=sys.stderr)
-    return 1
+        except ImportError:
+            pass
+
+    try:
+        apply_proposal(instance_dir, proposal)
+        move_proposal(instance_dir, proposal_id, "staging", "applied")
+        print(f"Applied {proposal_id} -> {proposal.target_file}")
+        return 0
+    except ApplierError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_reject(
