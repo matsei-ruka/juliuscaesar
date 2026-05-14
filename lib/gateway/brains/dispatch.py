@@ -20,6 +20,7 @@ from .codex_api import CodexApiBrain
 from .gemini import GeminiBrain
 from .opencode import OpencodeBrain
 from .openrouter import OpenRouterBrain
+from .pi import PiBrain
 
 
 _BRAIN_REGISTRY: dict[str, type[Brain]] = {
@@ -30,6 +31,7 @@ _BRAIN_REGISTRY: dict[str, type[Brain]] = {
     "opencode": OpencodeBrain,
     "openrouter": OpenRouterBrain,
     "aider": AiderBrain,
+    "pi": PiBrain,
 }
 
 

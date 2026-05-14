@@ -30,6 +30,12 @@ SHORT_NAME_ALIASES: dict[str, str] = {
     "gemini20": "gemini:gemini-2.0-flash",
     "opencode": "opencode",
     "aider": "aider",
+    "pi": "pi",
+    "pi-sonnet": "pi:sonnet",
+    "pi-opus": "pi:opus",
+    "pi-haiku": "pi:haiku",
+    "pi-gpt5": "pi:gpt-5.4",
+    "pi-mini": "pi:gpt-5.4-mini",
 }
 
 
