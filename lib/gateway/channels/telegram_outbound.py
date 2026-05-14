@@ -16,11 +16,17 @@ from ._http import http_json
 from .base import LogFn
 
 
-def send_typing(*, token: str, chat_id: str, message_thread_id: int | None = None) -> None:
-    """POST `sendChatAction` with `action=typing`. Best-effort; no return."""
+def send_typing(
+    *,
+    token: str,
+    chat_id: str,
+    message_thread_id: int | None = None,
+    action: str = "typing",
+) -> None:
+    """POST `sendChatAction`. Best-effort; no return."""
     if not token or not chat_id:
         return
-    payload: dict[str, Any] = {"chat_id": str(chat_id), "action": "typing"}
+    payload: dict[str, Any] = {"chat_id": str(chat_id), "action": action}
     if message_thread_id:
         payload["message_thread_id"] = message_thread_id
     http_json(

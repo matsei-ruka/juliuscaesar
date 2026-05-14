@@ -76,6 +76,11 @@ def typing_loop(
             pass
 
 
+def telegram_chat_action_for_meta(meta: dict[str, Any]) -> str:
+    """Return the Telegram chat action that matches the expected reply shape."""
+    return "record_voice" if meta.get("was_voice") else "typing"
+
+
 def decode_meta(event: queue.Event) -> dict[str, Any]:
     if not event.meta:
         return {}
@@ -810,11 +815,19 @@ class GatewayRuntime:
         if not telegram_channel.ready():
             return stop
         thread_id = meta.get("message_thread_id")
+        chat_action = telegram_chat_action_for_meta(meta)
 
         def loop() -> None:
             try:
+                def send_action(chat_id: str, message_thread_id: int | None) -> None:
+                    telegram_channel.send_typing(
+                        chat_id,
+                        message_thread_id=message_thread_id,
+                        action=chat_action,
+                    )
+
                 typing_loop(
-                    telegram_channel.send_typing,
+                    send_action,
                     stop,
                     chat_id=str(chat_id),
                     message_thread_id=thread_id,

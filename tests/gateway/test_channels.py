@@ -779,9 +779,39 @@ class TelegramSendTypingTests(unittest.TestCase):
             self.assertEqual(call["data"]["action"], "typing")
             self.assertEqual(call["data"]["message_thread_id"], 7)
 
+    def test_send_typing_can_post_voice_recording_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            cfg = ChannelConfig(enabled=True, token_env="TELEGRAM_BOT_TOKEN")
+            channel = TelegramChannel(instance, cfg, _silent_log)
+            channel.token = "test-token"
+
+            seen: list[dict[str, Any]] = []
+
+            def fake_http_json(url, *, data=None, timeout=15, **_):
+                seen.append({"url": url, "data": data, "timeout": timeout})
+                return {"ok": True, "result": True}
+
+            orig = telegram_outbound.http_json
+            telegram_outbound.http_json = fake_http_json
+            try:
+                channel.send_typing("28547271", action="record_voice")
+            finally:
+                telegram_outbound.http_json = orig
+
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0]["data"]["action"], "record_voice")
+
 
 class TypingLoopTests(unittest.TestCase):
     """`typing_loop` is the testable core of the runtime typing thread."""
+
+    def test_voice_meta_uses_record_voice_action(self):
+        self.assertEqual(
+            runtime_module.telegram_chat_action_for_meta({"was_voice": True}),
+            "record_voice",
+        )
+        self.assertEqual(runtime_module.telegram_chat_action_for_meta({}), "typing")
 
     def test_calls_immediately_and_after_each_interval(self):
         stop = threading.Event()

@@ -1099,11 +1099,12 @@ class TelegramChannel:
         self,
         chat_id: str,
         message_thread_id: int | None = None,
+        action: str = "typing",
     ) -> None:
-        """POST `sendChatAction` with `action=typing`. Best-effort; no return.
+        """POST `sendChatAction`. Best-effort; no return.
 
-        Telegram displays the indicator for ~5s, so callers refresh on a
-        ~4s cadence while a long-running operation is in flight.
+        Telegram displays indicators for ~5s, so callers refresh on a ~4s
+        cadence while a long-running operation is in flight.
         """
         if not self.ready() or not chat_id:
             return
@@ -1111,6 +1112,7 @@ class TelegramChannel:
             token=self.token,
             chat_id=str(chat_id),
             message_thread_id=message_thread_id,
+            action=action,
         )
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
