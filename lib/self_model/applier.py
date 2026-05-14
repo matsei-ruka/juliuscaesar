@@ -1,4 +1,4 @@
-"""Apply proposals to memory files with atomic writes + backups + DKIM gate."""
+"""Apply self_model proposals to memory files with atomic writes + backups."""
 
 from __future__ import annotations
 
@@ -24,7 +24,12 @@ def apply_proposal(instance_dir: Path, proposal: Proposal) -> None:
       1. Path security (no escape from memory/).
       2. Frozen-section list (regex match on target_section).
       3. HTML marker scan (<!-- IMMUTABILE --> immediately under heading).
-      4. DKIM verification (skipped only for JOURNAL.md append).
+      4. Unified approval row (skipped only for JOURNAL.md append).
+
+    The approval gate is enforced by `lib/approvals/`: callers must either
+    invoke this via the approvals dispatcher (which only fires once a row is
+    approved by Telegram or DKIM-signed email) or stage the proposal and let
+    `jc approvals approve` flip it.
     """
     target_path = instance_dir / proposal.target_file
     if not target_path.exists():
@@ -34,17 +39,18 @@ def apply_proposal(instance_dir: Path, proposal: Proposal) -> None:
     if not str(target_path.resolve()).startswith(str((instance_dir / "memory").resolve())):
         raise ApplierError(f"path escape attempt: {proposal.target_file}")
 
-    # JOURNAL.md is auto-apply scope (append-only) — skip DKIM/frozen checks for append.
     is_journal = proposal.target_file == "memory/L1/JOURNAL.md"
 
     if not is_journal:
-        if not _verify_dkim_approval(instance_dir, proposal.id):
+        if not _has_approved_approval(instance_dir, proposal.id):
             raise ApplierError(
-                "DKIM email approval required for RULES/IDENTITY changes; not found"
+                "approval required for RULES/IDENTITY changes; raise via "
+                "approvals.raise_(kind='self_model_diff') and decide via "
+                "Telegram or DKIM-signed email"
             )
         if frozen_sections.is_section_frozen(proposal.target_file, proposal.target_section):
             raise ApplierError(
-                f"section IMMUTABILE — only Filippo via DKIM email can modify: "
+                f"section IMMUTABILE — protected from autonomous edits: "
                 f"{proposal.target_section}"
             )
         if _section_marker_immutable(target_path, proposal.target_section):
@@ -62,16 +68,17 @@ def apply_proposal(instance_dir: Path, proposal: Proposal) -> None:
         raise ApplierError(f"unknown proposal type: {proposal.type}")
 
 
-def _verify_dkim_approval(instance_dir: Path, proposal_id: str) -> bool:
-    """Check inbox for a DKIM-signed Filippo email approving this proposal_id.
-
-    TODO: read inbox via `ops/email-check.py --json`, look for a Message-ID with body
-    referencing `proposal_id`, verify DKIM-signed by `filippo.perta@scovai.com`. The
-    approval marker should be a terse confirmation ("OK enact" or equivalent) tied to
-    the proposal id. Until implemented, this returns False and only JOURNAL.md auto-
-    apply works.
-    """
-    return False
+def _has_approved_approval(instance_dir: Path, proposal_id: str) -> bool:
+    """True iff an `approvals` row tied to this proposal is approved."""
+    try:
+        from approvals.models import ApprovalStatus
+        from approvals.service import find_by_source
+    except Exception:
+        return False
+    record = find_by_source(instance_dir, "self_model", f"self_model:{proposal_id}")
+    if record is None:
+        return False
+    return record.status == ApprovalStatus.APPROVED.value
 
 
 def _section_marker_immutable(target_path: Path, target_section: str | None) -> bool:

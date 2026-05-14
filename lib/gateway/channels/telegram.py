@@ -72,6 +72,7 @@ class TelegramChannel:
     # Inline-keyboard callback_data prefixes.
     _AUTH_CALLBACK_PREFIX = "chat_auth:"
     _EMAIL_CALLBACK_PREFIX = "jcemail:"
+    _APPROVAL_CALLBACK_PREFIX = "apv:"
 
     def __init__(self, instance_dir: Path, cfg: ChannelConfig, log: LogFn):
         self.instance_dir = instance_dir
@@ -373,10 +374,63 @@ class TelegramChannel:
             self.log(
                 f"telegram auth prompt sent chat_id={chat_id} title={title!r}"
             )
+            self._mirror_sender_approval(
+                chat_id=chat_id,
+                chat=chat,
+                added_by=added_by,
+                message_preview=message_preview,
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             self.log(f"telegram auth prompt failed chat_id={chat_id}: {exc}")
             return False
+
+    def _mirror_sender_approval(
+        self,
+        *,
+        chat_id: str,
+        chat: dict,
+        added_by: dict | None,
+        message_preview: str | None,
+    ) -> None:
+        """Best-effort: register the sender prompt in the unified approvals table."""
+        try:
+            from approvals.service import find_by_source, raise_
+        except Exception:
+            return
+        kind = "group_authorize" if added_by else "sender_authorize"
+        source_ref = (
+            f"{'group' if added_by else 'sender'}:{chat_id}"
+        )
+        try:
+            if find_by_source(self.instance_dir, "gateway:telegram", source_ref):
+                return
+            chat_type = chat.get("type") or "?"
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "chat_type": chat_type,
+                "title": chat.get("title") or "",
+                "username": chat.get("username") or "",
+                "message_preview": message_preview or "",
+                "member_count": self._cached_member_count(chat_id),
+            }
+            if added_by:
+                payload["added_by"] = (
+                    added_by.get("username") or added_by.get("first_name") or ""
+                )
+            raise_(
+                self.instance_dir,
+                kind=kind,
+                title=f"{kind}: {chat.get('title') or chat_id}",
+                payload=payload,
+                callback_payload={"chat_id": chat_id, "leave_on_reject": True},
+                producer="gateway:telegram",
+                source_ref=source_ref,
+                notify_telegram=False,
+                notify_email=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"approvals mirror raise failed chat_id={chat_id}: {exc}")
 
     def _maybe_send_sender_approval_prompt(
         self,
@@ -420,6 +474,9 @@ class TelegramChannel:
         if data.startswith(self._EMAIL_CALLBACK_PREFIX):
             self._handle_email_callback(cq_id, data, from_user, msg)
             return
+        if data.startswith(self._APPROVAL_CALLBACK_PREFIX):
+            self._handle_approval_callback(cq_id, data, from_user, msg)
+            return
         if not data.startswith(self._AUTH_CALLBACK_PREFIX):
             return
         # Only the operator may authorize.
@@ -454,6 +511,7 @@ class TelegramChannel:
             return
         if action == "deny":
             self._leave_chat(target_chat_id)
+        self._mirror_chat_auth_decision(target_chat_id, action, from_user)
         # Edit the original prompt to reflect the decision.
         edit_text = (
             f"✅ Allowed — {title}"
@@ -473,6 +531,68 @@ class TelegramChannel:
             f"telegram auth flipped chat_id={target_chat_id} action={action} "
             f"(config-only)"
         )
+
+    def _handle_approval_callback(
+        self, cq_id: Any, data: str, from_user: dict, msg: dict
+    ) -> None:
+        """Route `apv:` callback taps to the unified approvals adapter."""
+        from approvals.channels import telegram as approvals_tg
+
+        result = approvals_tg.handle_callback_query(
+            self.instance_dir,
+            callback_data=data,
+            from_user_id=str(from_user.get("id", "")),
+        )
+        if not result.get("ok"):
+            error = result.get("error", "error")
+            self._answer_callback(cq_id, error[:60])
+            self.log(f"approvals callback {error}: data={data}")
+            return
+        record = result["approval"]
+        action = result["action"]
+        label = "✅ Approved" if action == "approve" else "❌ Rejected"
+        text = f"{label} — {record.kind} ({record.short_id})"
+        self._edit_message_text(
+            chat_id=msg.get("chat", {}).get("id"),
+            message_id=msg.get("message_id"),
+            text=text,
+        )
+        self._answer_callback(cq_id, "approved" if action == "approve" else "rejected")
+        self.log(
+            f"approvals decided id={record.approval_id[:8]} kind={record.kind} "
+            f"action={action} status={record.status}"
+        )
+
+    def _mirror_chat_auth_decision(
+        self, chat_id: str, action: str, from_user: dict
+    ) -> None:
+        """Resolve the unified approval row a legacy chat_auth: tap implies."""
+        try:
+            from approvals.models import ApprovalConflict, ApprovalNotFound
+            from approvals.service import decide, find_by_source
+        except Exception:
+            return
+        decide_action = "approve" if action == "allow" else "reject"
+        for source_ref in (f"sender:{chat_id}", f"group:{chat_id}"):
+            try:
+                existing = find_by_source(
+                    self.instance_dir, "gateway:telegram", source_ref
+                )
+                if existing is None or existing.status != "pending":
+                    continue
+                try:
+                    decide(
+                        self.instance_dir,
+                        existing.approval_id,
+                        action=decide_action,
+                        decided_by=f"tg:{from_user.get('id', '')}",
+                        decision_channel="telegram",
+                        run_callback=False,
+                    )
+                except (ApprovalConflict, ApprovalNotFound):
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"approvals mirror decide failed chat_id={chat_id}: {exc}")
 
     def _handle_email_callback(
         self, cq_id: Any, data: str, from_user: dict, msg: dict

@@ -90,27 +90,75 @@ def cmd_review(instance_dir: Path, proposal_id: str | None = None, limit: int = 
 
 
 def cmd_apply(instance_dir: Path, proposal_id: str) -> int:
-    """Apply a proposal."""
-    from .applier import apply_proposal, ApplierError
-    from .store import load_proposals, move_proposal
-    for proposal in load_proposals(instance_dir, "staging"):
-        if proposal.id == proposal_id:
-            try:
-                apply_proposal(instance_dir, proposal)
-                move_proposal(instance_dir, proposal_id, "staging", "applied")
-                print(f"Applied {proposal_id}")
-                return 0
-            except ApplierError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                return 1
-    print(f"Proposal not found: {proposal_id}", file=sys.stderr)
-    return 1
+    """Raise a unified approval for a proposal; SENSITIVE rows must decide via TG/email."""
+    from .store import load_proposals
+
+    proposal = None
+    for candidate in load_proposals(instance_dir, "staging"):
+        if candidate.id == proposal_id:
+            proposal = candidate
+            break
+    if proposal is None:
+        print(f"Proposal not found: {proposal_id}", file=sys.stderr)
+        return 1
+
+    try:
+        from approvals.service import find_by_source, raise_
+    except ImportError:
+        print("approvals subsystem unavailable", file=sys.stderr)
+        return 1
+
+    source_ref = f"user_model:{proposal_id}"
+    existing = find_by_source(instance_dir, "user_model", source_ref)
+    if existing is None:
+        raise_(
+            instance_dir,
+            kind="user_model_diff",
+            title=f"{proposal.type} {proposal.target_section or proposal.target_file}",
+            body=proposal.reasoning,
+            payload={
+                "proposal_id": proposal.id,
+                "target_file": proposal.target_file,
+                "target_section": proposal.target_section or "",
+                "diff": proposal.proposed_content,
+                "risk_class": "SENSITIVE",
+            },
+            callback_payload={"proposal_id": proposal.id},
+            producer="user_model",
+            source_ref=source_ref,
+        )
+        print(
+            f"Raised approval for {proposal_id}. Decide via Telegram or "
+            f"DKIM-signed email — the CLI cannot approve SENSITIVE rows."
+        )
+        return 0
+
+    print(f"Approval already exists for {proposal_id}: status={existing.status}")
+    return 0 if existing.status == "approved" else 1
 
 
 def cmd_reject(instance_dir: Path, proposal_id: str, reason: str = "") -> int:
-    """Reject a proposal."""
+    """Reject a proposal: mirror local staging move and any open approval row."""
     from .store import move_proposal
+
     move_proposal(instance_dir, proposal_id, "staging", "rejected")
+    try:
+        from approvals.service import decide, find_by_source
+
+        existing = find_by_source(
+            instance_dir, "user_model", f"user_model:{proposal_id}"
+        )
+        if existing is not None and existing.status == "pending":
+            decide(
+                instance_dir,
+                existing.approval_id,
+                action="reject",
+                decided_by="cli",
+                decision_channel="cli",
+                note=reason or None,
+            )
+    except Exception:
+        pass
     print(f"Rejected {proposal_id}")
     return 0
 
