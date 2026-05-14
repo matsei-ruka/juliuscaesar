@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -164,33 +166,41 @@ def cmd_reject(instance_dir: Path, proposal_id: str, reason: str = "") -> int:
 
 
 def cmd_install(instance_dir: Path, cadence: str) -> int:
-    """Install cron task."""
+    """Install (or replace) the user-model cron task for this instance."""
     import subprocess
-    binary = "jc-user-model"
-    cron_line = f"{cadence} {binary} run-now --instance-dir {instance_dir}  # jc-user-model for {instance_dir}"
-    proc = subprocess.run(
-        ["bash", "-c", f"(crontab -l 2>/dev/null || true) | grep -v '{binary}' | crontab - && crontab -l | grep -q '{binary}' || (crontab -l 2>/dev/null; echo '{cron_line}') | crontab -"],
-        capture_output=True,
-        text=True,
+    binary = shutil.which("jc-user-model") or "jc-user-model"
+    instance_dir = instance_dir.resolve()
+    marker = f"# jc-user-model for {instance_dir}"
+    cron_line = (
+        f"{cadence} {binary} run-now --instance-dir {instance_dir}  {marker}"
     )
+    script = (
+        f"(crontab -l 2>/dev/null || true) "
+        f"| grep -vF {shlex.quote(marker)} "
+        f"| (cat; echo {shlex.quote(cron_line)}) "
+        f"| crontab -"
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     if proc.returncode == 0:
-        print(f"Cron task installed")
+        print("Cron task installed")
         return 0
     print(f"Failed to install cron: {proc.stderr}", file=sys.stderr)
     return 1
 
 
 def cmd_uninstall(instance_dir: Path) -> int:
-    """Remove cron task."""
+    """Remove the user-model cron task for this instance only."""
     import subprocess
-    binary = "jc-user-model"
-    proc = subprocess.run(
-        ["bash", "-c", f"(crontab -l 2>/dev/null || true) | grep -v '{binary}' | crontab -"],
-        capture_output=True,
-        text=True,
+    instance_dir = instance_dir.resolve()
+    marker = f"# jc-user-model for {instance_dir}"
+    script = (
+        f"(crontab -l 2>/dev/null || true) "
+        f"| grep -vF {shlex.quote(marker)} "
+        f"| crontab -"
     )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     if proc.returncode == 0:
-        print(f"Cron task removed")
+        print("Cron task removed")
         return 0
     print(f"Failed to uninstall cron: {proc.stderr}", file=sys.stderr)
     return 1
