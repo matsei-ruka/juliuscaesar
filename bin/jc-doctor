@@ -850,6 +850,30 @@ while IFS= read -r line; do
     esac
 done <<<"$ACCOUNTABILITIES_REPORT"
 
+# --- Entities ---
+
+section "Entities"
+
+ENTITIES_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from health.entities_check import check_entities
+
+for item in check_entities(Path(sys.argv[1])):
+    print(f"{item.level.upper()}:{item.message}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        ERROR:*) fail "${line#ERROR:}" ;;
+        Traceback*) fail "entities check crashed: $line" ;;
+    esac
+done <<<"$ENTITIES_REPORT"
+
 # --- Summary ---
 
 echo ""
