@@ -25,7 +25,15 @@ from zoneinfo import ZoneInfo
 _CACHE: dict[Path, "_CachedPreamble"] = {}
 _CACHE_LOCK = threading.Lock()
 
-L1_FILES = ("IDENTITY.md", "STYLE.md", "USER.md", "RULES.md", "HOT.md", "CHATS.md")
+L1_FILES = (
+    "IDENTITY.md",
+    "STYLE.md",
+    "USER.md",
+    "RULES.md",
+    "accountabilities-manifest.md",
+    "HOT.md",
+    "CHATS.md",
+)
 MAX_BYTES_PER_FILE = 8000
 _VOICE_ANCHOR_LINE_RE = re.compile(r"^>\s*(.+)$", re.MULTILINE)
 _SECTION_RE_TEMPLATE = r"^#{{1,6}}\s+{heading}\s*$"

@@ -81,5 +81,58 @@ class ScaffoldAccountabilitiesTests(unittest.TestCase):
             self.assertTrue(l2_dir.is_dir(), f"missing dir {l2_dir}")
 
 
+class ScaffoldCLAUDEPatchTests(unittest.TestCase):
+    def _scaffold(self, instance: Path) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scaffold_accountabilities(instance)
+        return buf.getvalue()
+
+    def _write_claude_md(self, instance: Path, content: str) -> None:
+        (instance / "CLAUDE.md").write_text(content, encoding="utf-8")
+
+    def test_patches_before_hot_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_claude_md(
+                instance,
+                "@memory/L1/IDENTITY.md\n@memory/L1/HOT.md\n@memory/L1/CHATS.md\n",
+            )
+            self._scaffold(instance)
+            lines = (instance / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
+            hot_idx = lines.index("@memory/L1/HOT.md")
+            manifest_idx = lines.index("@memory/L1/accountabilities-manifest.md")
+            self.assertLess(manifest_idx, hot_idx)
+
+    def test_patches_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_claude_md(
+                instance,
+                "@memory/L1/accountabilities-manifest.md\n@memory/L1/HOT.md\n",
+            )
+            self._scaffold(instance)
+            text = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertEqual(text.count("@memory/L1/accountabilities-manifest.md"), 1)
+
+    def test_fallback_no_hot_md_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_claude_md(
+                instance,
+                "@memory/L1/IDENTITY.md\n@memory/L1/RULES.md\n",
+            )
+            self._scaffold(instance)
+            text = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertIn("@memory/L1/accountabilities-manifest.md", text)
+
+    def test_skips_gracefully_when_claude_md_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            output = self._scaffold(instance)
+            self.assertNotIn("[write] CLAUDE.md", output)
+            self.assertIn("[skip]", output)
+
+
 if __name__ == "__main__":
     unittest.main()

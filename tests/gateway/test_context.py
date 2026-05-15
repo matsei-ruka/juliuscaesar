@@ -100,6 +100,21 @@ class PreambleContentTests(unittest.TestCase):
             self.assertIn("(No L1 memory files found.)", text)
             self.assertIn("jc memory", text)
 
+    def test_preamble_includes_manifest_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(
+                tmp, {"accountabilities-manifest.md": "# Manifest\n\nsome content"}
+            )
+            text = context.render_preamble(instance)
+            self.assertIn("## accountabilities-manifest.md", text)
+            self.assertIn("some content", text)
+
+    def test_preamble_omits_manifest_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            text = context.render_preamble(instance)
+            self.assertNotIn("accountabilities-manifest.md", text)
+
 
 class CacheInvalidationTests(unittest.TestCase):
     def setUp(self):
