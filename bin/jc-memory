@@ -52,6 +52,7 @@ from memory import (  # type: ignore  # noqa: E402
 from memory.db import _slug_from_path  # type: ignore  # noqa: E402
 from memory.scaffolding import (  # type: ignore  # noqa: E402
     scaffold_accountabilities,
+    scaffold_adaptive_discovery,
     scaffold_entities,
     scaffold_inter_agent,
 )
@@ -410,6 +411,11 @@ def cmd_scaffold_inter_agent(_args: argparse.Namespace, instance: Path) -> int:
     return 0
 
 
+def cmd_scaffold_adaptive_discovery(_args: argparse.Namespace, instance: Path) -> int:
+    scaffold_adaptive_discovery(instance)
+    return 0
+
+
 # --- main --------------------------------------------------------------------
 
 
@@ -488,6 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Copy authority-map template into memory/L1 + patch CLAUDE.md import",
     )
     psc_ia.set_defaults(func=cmd_scaffold_inter_agent)
+
+    psc_ad = psc_sub.add_parser(
+        "adaptive-discovery",
+        help="Print the adaptive-discovery RULES.md snippet for paste",
+    )
+    psc_ad.set_defaults(func=cmd_scaffold_adaptive_discovery)
 
     return p
 

@@ -4,6 +4,7 @@ Supports the scaffolding flows described in:
 - docs/specs/accountabilities.md §Phase 3 (`scaffold_accountabilities`)
 - docs/specs/relational-awareness-layer.md §Phase 3 (`scaffold_entities`)
 - docs/specs/inter-agent-protocol.md §Phase 3 (`scaffold_inter_agent`)
+- docs/specs/adaptive-discovery.md §Phase 3 (`scaffold_adaptive_discovery`)
 
 Each helper copies template files into the operator's instance dir (where
 applicable) and prints the constitutional snippet to stdout for manual paste
@@ -326,3 +327,33 @@ def scaffold_inter_agent(
         "Paste the inter-agent protocol snippet into your memory/L1/RULES.md "
         "under your next free §-number."
     )
+
+def scaffold_adaptive_discovery(
+    instance_dir: Path,
+    templates_dir: Path | None = None,
+) -> None:
+    """Print the adaptive-discovery constitutional snippet for paste into RULES.md.
+
+    No file copies — the discipline has no L1/L2 dedicated file beyond the
+    entity records owned by the relational awareness layer. Running twice is
+    fine; the operator owns `RULES.md`.
+    """
+    templates = templates_dir if templates_dir is not None else _DEFAULT_TEMPLATES_DIR
+    snippet_src = templates / _ADAPTIVE_DISCOVERY_SNIPPET_SRC
+    if not snippet_src.exists():
+        raise FileNotFoundError(f"template missing: {snippet_src}")
+
+    # Touch instance_dir to keep the signature meaningful — surfaces a clear
+    # error if the operator pointed at a non-existent path.
+    if not instance_dir.exists():
+        raise FileNotFoundError(f"instance_dir missing: {instance_dir}")
+
+    print("--- BEGIN RULES.md snippet ---")
+    print(snippet_src.read_text(encoding="utf-8"), end="")
+    print("--- END RULES.md snippet ---")
+    print()
+    print(
+        "Paste the adaptive discovery snippet into your memory/L1/RULES.md "
+        "under your next free §-number."
+    )
+

@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from memory.scaffolding import (  # noqa: E402
     scaffold_accountabilities,
+    scaffold_adaptive_discovery,
     scaffold_entities,
     scaffold_inter_agent,
 )
@@ -305,6 +306,36 @@ class ScaffoldInterAgentTests(unittest.TestCase):
             self.assertIn("INTER-AGENT PROTOCOL", output)
             self.assertIn("Authority symmetry", output)
             self.assertIn("RULES.md", output)
+
+
+
+class ScaffoldAdaptiveDiscoveryTests(unittest.TestCase):
+    def _scaffold(self, instance: Path) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scaffold_adaptive_discovery(instance)
+        return buf.getvalue()
+
+    def test_scaffold_prints_snippet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = self._scaffold(Path(tmp))
+            self.assertIn("AUTHORITY AWARENESS AND ADAPTIVE DISCOVERY", output)
+            self.assertIn("declared", output)
+            self.assertIn("inferred", output)
+            self.assertIn("RULES.md", output)
+
+    def test_scaffold_writes_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._scaffold(instance)
+            self.assertEqual(list(instance.iterdir()), [])
+
+    def test_scaffold_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            first = self._scaffold(instance)
+            second = self._scaffold(instance)
+            self.assertEqual(first, second)
 
 
 if __name__ == "__main__":
