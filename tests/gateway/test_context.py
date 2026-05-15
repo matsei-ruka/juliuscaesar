@@ -270,6 +270,57 @@ class AuthorityBlockTests(unittest.TestCase):
             self.assertIn("refuse every enactment", block)
 
 
+class EntitiesBlockTests(unittest.TestCase):
+    def setUp(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def tearDown(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def _write_gateway_yaml(self, instance: Path, body: str) -> None:
+        ops = instance / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        (ops / "gateway.yaml").write_text(body, encoding="utf-8")
+        gateway_config.clear_config_cache()
+
+    def test_entities_block_empty_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(instance, "entities:\n  enabled: false\n")
+            self.assertEqual(context.render_entities_block(instance), "")
+
+    def test_entities_block_empty_when_config_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(context.render_entities_block(Path(tmp)), "")
+
+    def test_entities_block_renders_pointer_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(instance, "entities:\n  enabled: true\n")
+            block = context.render_entities_block(instance)
+            self.assertEqual(
+                block,
+                "Entities directory: memory/L2/entities/ "
+                "(six categories, see _categories.md).",
+            )
+
+    def test_preamble_includes_entities_pointer_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(instance, "entities:\n  enabled: true\n")
+            text = context.render_preamble(instance)
+            self.assertIn("Entities directory: memory/L2/entities/", text)
+
+    def test_preamble_omits_entities_pointer_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(instance, "entities:\n  enabled: false\n")
+            text = context.render_preamble(instance)
+            self.assertNotIn("Entities directory:", text)
+
+
 class CacheInvalidationTests(unittest.TestCase):
     def setUp(self):
         context.clear_cache()

@@ -166,6 +166,37 @@ def render_accountabilities_manifest_block(instance_dir: Path) -> str:
     return _read_l1_section(_l1_dir(instance_dir), ACCOUNTABILITIES_MANIFEST_FILE)
 
 
+def _load_gateway_config(instance_dir: Path):
+    try:
+        from .config import load_config
+    except Exception:
+        return None
+    try:
+        return load_config(instance_dir)
+    except Exception:
+        return None
+
+
+def render_entities_block(instance_dir: Path) -> str:
+    """Return the entities-directory pointer when relational awareness is on.
+
+    Per docs/specs/relational-awareness-layer.md §Phase 4: a single line so
+    the agent knows the directory exists without paying tokens for every
+    record. Returns "" when disabled or config cannot be loaded.
+    """
+
+    cfg = _load_gateway_config(instance_dir)
+    if cfg is None:
+        return ""
+    entities = getattr(cfg, "entities", None)
+    if entities is None or not getattr(entities, "enabled", False):
+        return ""
+    return (
+        "Entities directory: memory/L2/entities/ "
+        "(six categories, see _categories.md)."
+    )
+
+
 def _style_path(instance_dir: Path) -> Path:
     return _l1_dir(instance_dir) / "STYLE.md"
 
@@ -242,6 +273,9 @@ def render_preamble(instance_dir: Path) -> str:
             sections.append(section)
         if name == "RULES.md":
             _append_accountabilities_manifest(sections, instance_dir, l1_dir)
+            entities_block = render_entities_block(instance_dir)
+            if entities_block:
+                sections.append(entities_block)
     memory_block = "\n\n".join(sections) if sections else "(No L1 memory files found.)"
     parts = [
         _ROLE_PREAMBLE,

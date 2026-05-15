@@ -14,6 +14,7 @@ from ..context import (
     render_accountabilities_manifest_block,
     render_authority_block,
     render_clock_inline,
+    render_entities_block,
     render_voice_anchor,
 )
 from ..queue import Event
@@ -40,12 +41,15 @@ class ClaudeBrain(Brain):
         anchor = render_voice_anchor(self.instance_dir)
         manifest_block = render_accountabilities_manifest_block(self.instance_dir)
         authority_block = render_authority_block(self.instance_dir)
+        entities_block = render_entities_block(self.instance_dir)
         body = event.content or ""
         parts = [clock_line]
         if anchor:
             parts.append(f"[Voice: {anchor}]")
         if manifest_block:
             parts.append(manifest_block)
+        if entities_block:
+            parts.append(entities_block)
         if authority_block:
             parts.append(authority_block)
         if body:
