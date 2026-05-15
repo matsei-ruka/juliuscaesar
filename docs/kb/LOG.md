@@ -82,3 +82,5 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-13] update | subsystem/installation-and-cli-routing.md — bumped current release hook anchor to 2026.05.13.01 hotfix
 ## [2026-05-13] update | subsystem/watchdog-runtime.md — removed watchdog LLM triage; long-running detection is observe-only
 ## [2026-05-13] update | subsystem/watchdog-runtime.md — removed watchdog failed-event replay and brain switching
+## [2026-05-15] new | subsystem/accountabilities.md — accountabilities system P1–P5, 31 tests, branch spec/accountabilities
+## [2026-05-15] update | subsystem/accountabilities.md — documented enabled-gated manifest injection, telegram primary id authority, and escaped-pipe audit parsing

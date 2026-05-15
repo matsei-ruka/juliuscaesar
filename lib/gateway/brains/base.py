@@ -23,7 +23,12 @@ from typing import Callable, Iterable
 from .. import chats as chats_module
 from .. import transcripts as transcripts_module
 from ..config import BrainOverrideConfig, GatewayConfig, load_config_cached
-from ..context import render_clock, render_preamble, render_voice_anchor
+from ..context import (
+    render_authority_block,
+    render_clock,
+    render_preamble,
+    render_voice_anchor,
+)
 from ..queue import Event
 
 
@@ -137,6 +142,12 @@ class Brain:
             chats_section = self._render_known_chats_section()
             if chats_section:
                 preamble = f"{preamble}\n\n{chats_section}" if preamble else chats_section
+        if self.needs_l1_preamble:
+            authority_block = render_authority_block(self.instance_dir)
+            if authority_block:
+                preamble = (
+                    f"{preamble}\n\n{authority_block}" if preamble else authority_block
+                )
         voice_instruction = ""
         if meta.get("was_voice"):
             voice_instruction = """

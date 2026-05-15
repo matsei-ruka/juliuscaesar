@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import context  # noqa: E402
+from gateway import config as gateway_config  # noqa: E402
 
 
 def _make_instance(tmp: str, files: dict[str, str] | None = None) -> Path:
@@ -36,6 +37,17 @@ def _make_instance(tmp: str, files: dict[str, str] | None = None) -> Path:
 class PreambleContentTests(unittest.TestCase):
     def setUp(self):
         context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def tearDown(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def _write_gateway_yaml(self, instance: Path, body: str) -> None:
+        ops = instance / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        (ops / "gateway.yaml").write_text(body, encoding="utf-8")
+        gateway_config.clear_config_cache()
 
     def test_preamble_includes_chats_md_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +111,163 @@ class PreambleContentTests(unittest.TestCase):
             text = context.render_preamble(instance)
             self.assertIn("(No L1 memory files found.)", text)
             self.assertIn("jc memory", text)
+
+    def test_preamble_includes_manifest_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(
+                tmp, {"accountabilities-manifest.md": "# Manifest\n\nsome content"}
+            )
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: telegram-primary\n",
+            )
+            text = context.render_preamble(instance)
+            self.assertIn("## accountabilities-manifest.md", text)
+            self.assertIn("some content", text)
+
+    def test_preamble_omits_manifest_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(
+                tmp, {"accountabilities-manifest.md": "# Manifest\n\nsome content"}
+            )
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: false\n",
+            )
+            text = context.render_preamble(instance)
+            self.assertNotIn("accountabilities-manifest.md", text)
+            self.assertNotIn("some content", text)
+
+    def test_preamble_omits_manifest_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            text = context.render_preamble(instance)
+            self.assertNotIn("accountabilities-manifest.md", text)
+
+    def test_gateway_config_toggle_invalidates_preamble_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(
+                tmp,
+                {
+                    "IDENTITY.md": "id",
+                    "accountabilities-manifest.md": "# Manifest\n\nsome content",
+                },
+            )
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: false\n",
+            )
+            first = context.render_preamble(instance)
+            self.assertNotIn("accountabilities-manifest.md", first)
+
+            config_path = instance / "ops" / "gateway.yaml"
+            config_path.write_text(
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: telegram-primary\n",
+                encoding="utf-8",
+            )
+            future = time.time() + 5
+            os.utime(config_path, (future, future))
+            gateway_config.clear_config_cache()
+
+            second = context.render_preamble(instance)
+            self.assertIn("accountabilities-manifest.md", second)
+            self.assertIn("some content", second)
+
+
+class AuthorityBlockTests(unittest.TestCase):
+    def setUp(self):
+        from gateway import config as gateway_config
+
+        gateway_config.clear_config_cache()
+
+    def tearDown(self):
+        from gateway import config as gateway_config
+
+        gateway_config.clear_config_cache()
+
+    def _write_gateway_yaml(self, instance: Path, body: str) -> None:
+        ops = instance / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        (ops / "gateway.yaml").write_text(body, encoding="utf-8")
+        gateway_config.clear_config_cache()
+
+    def test_authority_block_empty_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance, "accountabilities:\n  enabled: false\n"
+            )
+            self.assertEqual(context.render_authority_block(instance), "")
+
+    def test_authority_block_empty_when_config_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(context.render_authority_block(Path(tmp)), "")
+
+    def test_authority_block_renders_token_and_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: telegram-primary\n"
+                "  enactment_token: MAKE IT SO\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("authority_channel: `telegram-primary`", block)
+            self.assertIn("enactment_token: `MAKE IT SO`", block)
+            self.assertIn("Casual agreement", block)
+
+    def test_authority_block_telegram_primary_includes_primary_chat_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "channels:\n"
+                "  telegram:\n"
+                "    chat_ids: [\"111\", \"222\"]\n"
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: telegram-primary\n"
+                "  enactment_token: OK enact\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("telegram_primary_chat_id: `111`", block)
+            self.assertIn("metadata must match `telegram_primary_chat_id`", block)
+
+    def test_authority_block_email_includes_sender(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: email\n"
+                "  enactment_token: OK enact\n"
+                "  authority_email_sender: ceo@example.com\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("authority_email_sender: `ceo@example.com`", block)
+
+    def test_authority_block_channel_none_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: none\n"
+                "  enactment_token: OK enact\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("authority_channel: `none`", block)
+            self.assertIn("refuse every enactment", block)
 
 
 class CacheInvalidationTests(unittest.TestCase):

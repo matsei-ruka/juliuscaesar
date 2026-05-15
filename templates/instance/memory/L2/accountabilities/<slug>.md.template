@@ -1,0 +1,64 @@
+<!-- Rename this file to <your-accountability-slug>.md and fill in each section -->
+---
+slug: <slug>                              # kebab-case, must match the filename without `.md`
+title: <human-readable title>             # e.g. "Vendor negotiation"
+layer: L2
+type: accountability-detail
+state: active                             # active | draft | archived
+parent: accountabilities-manifest         # leave as-is
+default_level: Inside                     # Inside | Adjacent | Outside | Delegated
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+tags: [accountability, <free-form>]
+---
+
+# <Title>
+
+## Scope (what's inside)
+
+<!-- REVIEWABLE -->
+…
+
+## Out of scope (perimeter — explicit)
+
+<!-- REVIEWABLE -->
+…
+
+## Outputs
+
+<!-- REVIEWABLE -->
+…
+
+## Stakeholders
+
+<!-- REVIEWABLE -->
+…
+
+## Cadence
+
+<!-- REVIEWABLE -->
+…
+
+## Decision boundary
+
+<!-- REVIEWABLE -->
+…
+
+## Adjacency notes
+
+<!-- REVIEWABLE -->
+…
+
+## Self-check pre-action
+
+<!-- REVIEWABLE -->
+
+1. …
+2. …
+
+## Connections to existing constitution
+
+<!-- REVIEWABLE -->
+
+- RULES.md §<section> — …
+- RULES_TECH.md (if present) — …

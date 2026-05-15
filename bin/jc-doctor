@@ -826,6 +826,30 @@ else
     info "state/workers.db not yet created (first spawn creates it)"
 fi
 
+# --- Accountabilities ---
+
+section "Accountabilities"
+
+ACCOUNTABILITIES_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from health.accountabilities_check import check_accountabilities
+
+for item in check_accountabilities(Path(sys.argv[1])):
+    print(f"{item.level.upper()}:{item.message}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        ERROR:*) fail "${line#ERROR:}" ;;
+        Traceback*) fail "accountabilities check crashed: $line" ;;
+    esac
+done <<<"$ACCOUNTABILITIES_REPORT"
+
 # --- Summary ---
 
 echo ""
