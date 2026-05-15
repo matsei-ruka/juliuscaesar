@@ -1,0 +1,76 @@
+"""Scaffold opt-in memory features into an instance directory.
+
+Currently supports the accountability manifest scaffolding flow described in
+docs/specs/accountabilities.md §Phase 3. Copies template files into the
+operator's instance dir and prints the constitutional snippet to stdout for
+manual paste into `memory/L1/RULES.md`.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+_DEFAULT_TEMPLATES_DIR = (
+    Path(__file__).resolve().parents[2] / "templates" / "instance"
+)
+
+_MANIFEST_SRC = "memory/L1/accountabilities-manifest.md.template"
+_MANIFEST_DST = "memory/L1/accountabilities-manifest.md"
+
+_README_SRC = "memory/L2/accountabilities/_README.md"
+_README_DST = "memory/L2/accountabilities/_README.md"
+
+_RULES_SNIPPET_SRC = "memory/L1/RULES.md.accountability-section.template"
+
+
+def _copy_if_missing(src: Path, dst: Path) -> bool:
+    if dst.exists():
+        print(f"[skip] {dst} already exists — not overwriting")
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"[write] {dst}")
+    return True
+
+
+def scaffold_accountabilities(
+    instance_dir: Path,
+    templates_dir: Path | None = None,
+) -> None:
+    """Copy accountability templates into instance_dir; print RULES snippet.
+
+    Idempotent: existing files are skipped with a warning. The L2
+    accountabilities/ directory is created implicitly via the README copy.
+
+    The constitutional RULES.md snippet is printed to stdout (NOT written) so
+    the operator can paste it under their next free §-number — the framework
+    refuses to mutate the operator's constitution unprompted.
+    """
+    templates = templates_dir if templates_dir is not None else _DEFAULT_TEMPLATES_DIR
+
+    manifest_src = templates / _MANIFEST_SRC
+    readme_src = templates / _README_SRC
+    snippet_src = templates / _RULES_SNIPPET_SRC
+
+    for src in (manifest_src, readme_src, snippet_src):
+        if not src.exists():
+            raise FileNotFoundError(f"template missing: {src}")
+
+    _copy_if_missing(manifest_src, instance_dir / _MANIFEST_DST)
+    _copy_if_missing(readme_src, instance_dir / _README_DST)
+
+    # Ensure the L2 accountabilities dir exists even if the README was already
+    # present (defensive — README copy normally creates it).
+    (instance_dir / "memory" / "L2" / "accountabilities").mkdir(
+        parents=True, exist_ok=True
+    )
+
+    print()
+    print("--- BEGIN RULES.md snippet ---")
+    print(snippet_src.read_text(encoding="utf-8"), end="")
+    print("--- END RULES.md snippet ---")
+    print()
+    print(
+        "Paste the accountability section snippet into your memory/L1/RULES.md "
+        "under your next free §-number."
+    )
