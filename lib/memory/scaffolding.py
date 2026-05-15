@@ -20,6 +20,9 @@ _MANIFEST_DST = "memory/L1/accountabilities-manifest.md"
 _README_SRC = "memory/L2/accountabilities/_README.md"
 _README_DST = "memory/L2/accountabilities/_README.md"
 
+_DETAIL_TEMPLATE_SRC = "memory/L2/accountabilities/<slug>.md.template"
+_DETAIL_TEMPLATE_DST = "memory/L2/accountabilities/<slug>.md.template"
+
 _RULES_SNIPPET_SRC = "memory/L1/RULES.md.accountability-section.template"
 
 _CLAUDE_MD_IMPORT = "@memory/L1/accountabilities-manifest.md"
@@ -99,14 +102,16 @@ def scaffold_accountabilities(
 
     manifest_src = templates / _MANIFEST_SRC
     readme_src = templates / _README_SRC
+    detail_template_src = templates / _DETAIL_TEMPLATE_SRC
     snippet_src = templates / _RULES_SNIPPET_SRC
 
-    for src in (manifest_src, readme_src, snippet_src):
+    for src in (manifest_src, readme_src, detail_template_src, snippet_src):
         if not src.exists():
             raise FileNotFoundError(f"template missing: {src}")
 
     _copy_if_missing(manifest_src, instance_dir / _MANIFEST_DST)
     _copy_if_missing(readme_src, instance_dir / _README_DST)
+    _copy_if_missing(detail_template_src, instance_dir / _DETAIL_TEMPLATE_DST)
 
     # Ensure the L2 accountabilities dir exists even if the README was already
     # present (defensive — README copy normally creates it).

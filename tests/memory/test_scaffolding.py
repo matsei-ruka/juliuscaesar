@@ -41,6 +41,32 @@ class ScaffoldAccountabilitiesTests(unittest.TestCase):
             self.assertIn("Accountability Manifest", manifest.read_text(encoding="utf-8"))
             self.assertIn("9-section structure", readme.read_text(encoding="utf-8"))
 
+    def test_scaffold_copies_detail_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._scaffold(instance)
+            template = (
+                instance
+                / "memory"
+                / "L2"
+                / "accountabilities"
+                / "<slug>.md.template"
+            )
+            self.assertTrue(template.exists(), f"missing {template}")
+            body = template.read_text(encoding="utf-8")
+            for section in (
+                "## Scope",
+                "## Out of scope",
+                "## Outputs",
+                "## Stakeholders",
+                "## Cadence",
+                "## Decision boundary",
+                "## Adjacency notes",
+                "## Self-check pre-action",
+                "## Connections to existing constitution",
+            ):
+                self.assertIn(section, body, f"detail template missing {section}")
+
     def test_scaffold_idempotent_skips_existing(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
