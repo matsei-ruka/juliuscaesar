@@ -116,6 +116,78 @@ class PreambleContentTests(unittest.TestCase):
             self.assertNotIn("accountabilities-manifest.md", text)
 
 
+class AuthorityBlockTests(unittest.TestCase):
+    def setUp(self):
+        from gateway import config as gateway_config
+
+        gateway_config.clear_config_cache()
+
+    def tearDown(self):
+        from gateway import config as gateway_config
+
+        gateway_config.clear_config_cache()
+
+    def _write_gateway_yaml(self, instance: Path, body: str) -> None:
+        ops = instance / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        (ops / "gateway.yaml").write_text(body, encoding="utf-8")
+
+    def test_authority_block_empty_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance, "accountabilities:\n  enabled: false\n"
+            )
+            self.assertEqual(context.render_authority_block(instance), "")
+
+    def test_authority_block_empty_when_config_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(context.render_authority_block(Path(tmp)), "")
+
+    def test_authority_block_renders_token_and_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: telegram-primary\n"
+                "  enactment_token: MAKE IT SO\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("authority_channel: `telegram-primary`", block)
+            self.assertIn("enactment_token: `MAKE IT SO`", block)
+            self.assertIn("Casual agreement", block)
+
+    def test_authority_block_email_includes_sender(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: email\n"
+                "  enactment_token: OK enact\n"
+                "  authority_email_sender: ceo@example.com\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("authority_email_sender: `ceo@example.com`", block)
+
+    def test_authority_block_channel_none_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_gateway_yaml(
+                instance,
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: none\n"
+                "  enactment_token: OK enact\n",
+            )
+            block = context.render_authority_block(instance)
+            self.assertIn("authority_channel: `none`", block)
+            self.assertIn("refuse every enactment", block)
+
+
 class CacheInvalidationTests(unittest.TestCase):
     def setUp(self):
         context.clear_cache()

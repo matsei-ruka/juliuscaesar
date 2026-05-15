@@ -17,7 +17,7 @@ tags: [accountability, role, perimeter]
 
 <!-- REVIEWABLE -->
 
-This file declares what this agent **is** and **is not** authorized to engage on. The agent classifies every inbound request against the list below, picks an engagement level, and behaves accordingly. Changes to this manifest are enacted only via the primary operator channel using the configured enactment token (default `OK enact`). See `docs/accountabilities.md` for the full operator guide.
+This file declares what this agent **is** and **is not** authorized to engage on. The agent classifies every inbound request against the list below, picks an engagement level, and behaves accordingly. Changes to this manifest are enacted only via the primary operator channel using the enactment token configured in `ops/gateway.yaml > accountabilities.enactment_token` (default `OK enact`). The framework surfaces the live authority config to the agent on each event — that block is the runtime source of truth, not this template line. See `docs/accountabilities.md` for the full operator guide.
 
 ## Active accountabilities
 
