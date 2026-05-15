@@ -295,5 +295,104 @@ class EntitiesSchemaTests(unittest.TestCase):
             self.assertIn("entities.enabled", str(ctx.exception))
 
 
+class InterAgentProtocolSchemaTests(unittest.TestCase):
+    """Covers docs/specs/inter-agent-protocol.md §Phase 2 — Config schema."""
+
+    def test_inter_agent_block_missing_defaults_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "default_brain: claude\n")
+            cfg = load_config(instance)
+            self.assertFalse(cfg.inter_agent_protocol.enabled)
+            self.assertEqual(
+                cfg.inter_agent_protocol.authority_map_path,
+                "memory/L1/authority-map.md",
+            )
+            self.assertTrue(cfg.inter_agent_protocol.require_self_declaration)
+
+    def test_inter_agent_enabled_full_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  authority_map_path: memory/L1/custom-map.md\n"
+                "  require_self_declaration: false\n",
+            )
+            cfg = load_config(instance)
+            self.assertTrue(cfg.inter_agent_protocol.enabled)
+            self.assertEqual(
+                cfg.inter_agent_protocol.authority_map_path,
+                "memory/L1/custom-map.md",
+            )
+            self.assertFalse(cfg.inter_agent_protocol.require_self_declaration)
+
+    def test_inter_agent_unknown_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  bogus: value\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("inter_agent_protocol.bogus", str(ctx.exception))
+
+    def test_inter_agent_non_mapping_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "inter_agent_protocol: scalar\n")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("inter_agent_protocol", str(ctx.exception))
+
+    def test_inter_agent_non_boolean_enabled_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: not-bool\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("inter_agent_protocol.enabled", str(ctx.exception))
+
+    def test_inter_agent_non_boolean_self_declaration_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  require_self_declaration: nope\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "inter_agent_protocol.require_self_declaration",
+                str(ctx.exception),
+            )
+
+    def test_inter_agent_empty_authority_map_path_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  authority_map_path: ''\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "inter_agent_protocol.authority_map_path",
+                str(ctx.exception),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

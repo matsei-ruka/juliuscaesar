@@ -151,6 +151,13 @@ class EntitiesConfig:
 
 
 @dataclass(frozen=True)
+class InterAgentProtocolConfig:
+    enabled: bool = False
+    authority_map_path: str = "memory/L1/authority-map.md"
+    require_self_declaration: bool = True
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
@@ -169,6 +176,9 @@ class GatewayConfig:
     principal: PrincipalConfig = field(default_factory=PrincipalConfig)
     accountabilities: AccountabilitiesConfig = field(default_factory=AccountabilitiesConfig)
     entities: EntitiesConfig = field(default_factory=EntitiesConfig)
+    inter_agent_protocol: InterAgentProtocolConfig = field(
+        default_factory=InterAgentProtocolConfig
+    )
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -501,6 +511,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "principal",
         "accountabilities",
         "entities",
+        "inter_agent_protocol",
     }
     for key in data:
         if key not in allowed_top:
@@ -997,6 +1008,31 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 if value is not None and not isinstance(value, bool):
                     errors.append(f"entities.{key}: must be boolean")
 
+    inter_agent_raw = data.get("inter_agent_protocol")
+    if inter_agent_raw is not None:
+        if not isinstance(inter_agent_raw, dict):
+            errors.append("inter_agent_protocol: must be a mapping")
+        else:
+            allowed_inter_agent = {
+                "enabled",
+                "authority_map_path",
+                "require_self_declaration",
+            }
+            for key in inter_agent_raw:
+                if key not in allowed_inter_agent:
+                    errors.append(f"inter_agent_protocol.{key}: unknown field")
+            for key in ("enabled", "require_self_declaration"):
+                value = inter_agent_raw.get(key)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"inter_agent_protocol.{key}: must be boolean")
+            path_value = inter_agent_raw.get("authority_map_path")
+            if path_value is not None and (
+                not isinstance(path_value, str) or not path_value.strip()
+            ):
+                errors.append(
+                    "inter_agent_protocol.authority_map_path: must be a non-empty string"
+                )
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1209,6 +1245,24 @@ def _load_entities(data: dict[str, Any]) -> EntitiesConfig:
     )
 
 
+def _load_inter_agent_protocol(data: dict[str, Any]) -> InterAgentProtocolConfig:
+    raw = (
+        data.get("inter_agent_protocol")
+        if isinstance(data.get("inter_agent_protocol"), dict)
+        else {}
+    )
+    defaults = InterAgentProtocolConfig()
+    return InterAgentProtocolConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        authority_map_path=str(
+            raw.get("authority_map_path") or defaults.authority_map_path
+        ),
+        require_self_declaration=bool(
+            raw.get("require_self_declaration", defaults.require_self_declaration)
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1322,6 +1376,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         principal=_load_principal(data),
         accountabilities=_load_accountabilities(data),
         entities=_load_entities(data),
+        inter_agent_protocol=_load_inter_agent_protocol(data),
     )
 
 
