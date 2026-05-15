@@ -161,6 +161,93 @@ class CheckAccountabilitiesTests(unittest.TestCase):
             self.assertTrue(audit_items)
             self.assertEqual(audit_items[0].level, "ok")
 
+    def test_manifest_no_frontmatter_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _enable_config(instance)
+            _write_manifest(instance, body="# Manifest\n\nNo frontmatter at all.\n")
+            items = check_accountabilities(instance)
+            manifest_items = [i for i in items if "manifest" in i.message]
+            self.assertEqual(manifest_items[0].level, "warn")
+            self.assertIn("no YAML frontmatter delimiters", manifest_items[0].message)
+
+    def test_manifest_malformed_yaml_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _enable_config(instance)
+            _write_manifest(
+                instance,
+                body="---\nslug: accountabilities-manifest\n  bad: [unclosed\n---\n\n# Manifest\n",
+            )
+            items = check_accountabilities(instance)
+            manifest_items = [i for i in items if "manifest" in i.message]
+            self.assertEqual(manifest_items[0].level, "warn")
+            self.assertIn("malformed YAML", manifest_items[0].message)
+
+    def test_manifest_missing_required_fields_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _enable_config(instance)
+            _write_manifest(
+                instance,
+                body="---\nslug: accountabilities-manifest\ntitle: x\n---\n\n# Manifest\n",
+            )
+            items = check_accountabilities(instance)
+            manifest_items = [i for i in items if "manifest" in i.message]
+            self.assertEqual(manifest_items[0].level, "warn")
+            self.assertIn("missing required fields", manifest_items[0].message)
+            self.assertIn("layer", manifest_items[0].message)
+            self.assertIn("state", manifest_items[0].message)
+
+    def test_manifest_wrong_slug_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _enable_config(instance)
+            _write_manifest(
+                instance,
+                body=(
+                    "---\nslug: wrong-slug\ntitle: x\nlayer: L1\n"
+                    "type: manifest\nstate: active\nversion: 1.0.0\n---\n"
+                ),
+            )
+            items = check_accountabilities(instance)
+            manifest_items = [i for i in items if "manifest" in i.message]
+            self.assertEqual(manifest_items[0].level, "warn")
+            self.assertIn("slug must be", manifest_items[0].message)
+
+    def test_manifest_invalid_state_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _enable_config(instance)
+            _write_manifest(
+                instance,
+                body=(
+                    "---\nslug: accountabilities-manifest\ntitle: x\nlayer: L1\n"
+                    "type: manifest\nstate: bogus\nversion: 1.0.0\n---\n"
+                ),
+            )
+            items = check_accountabilities(instance)
+            manifest_items = [i for i in items if "manifest" in i.message]
+            self.assertEqual(manifest_items[0].level, "warn")
+            self.assertIn("state must be", manifest_items[0].message)
+
+    def test_manifest_wrong_layer_or_type_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _enable_config(instance)
+            _write_manifest(
+                instance,
+                body=(
+                    "---\nslug: accountabilities-manifest\ntitle: x\nlayer: L2\n"
+                    "type: detail\nstate: active\nversion: 1.0.0\n---\n"
+                ),
+            )
+            items = check_accountabilities(instance)
+            manifest_items = [i for i in items if "manifest" in i.message]
+            self.assertEqual(manifest_items[0].level, "warn")
+            self.assertIn("layer must be", manifest_items[0].message)
+            self.assertIn("type must be", manifest_items[0].message)
+
 
 if __name__ == "__main__":
     unittest.main()
