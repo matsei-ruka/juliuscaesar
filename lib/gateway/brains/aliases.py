@@ -36,6 +36,10 @@ SHORT_NAME_ALIASES: dict[str, str] = {
     "pi-haiku": "pi:haiku",
     "pi-gpt5": "pi:gpt-5.4",
     "pi-mini": "pi:gpt-5.4-mini",
+    "pi-google": "pi:gemini-2.5-pro",
+    "pi-gemini": "pi:gemini-2.5-pro",
+    "pi-gemini25": "pi:gemini-2.5-pro",
+    "pi-gemini20": "pi:gemini-2.0-flash",
 }
 
 

@@ -229,6 +229,9 @@ qualified `provider/model` IDs.
 | `gpt-5.4` | `openai/gpt-5.4` |
 | `gpt-5.4-mini` | `openai/gpt-5.4-mini` |
 | `gemini-2.5-pro` | `google/gemini-2.5-pro` |
+| `gemini25` | `google/gemini-2.5-pro` |
+| `gemini-2.0-flash` | `google/gemini-2.0-flash` |
+| `gemini20` | `google/gemini-2.0-flash` |
 | `provider/model` | passed through as-is |
 
 **JC aliases** (`lib/gateway/brains/aliases.py`):
@@ -240,6 +243,10 @@ qualified `provider/model` IDs.
 "pi-haiku": "pi:haiku",
 "pi-gpt5": "pi:gpt-5.4",
 "pi-mini": "pi:gpt-5.4-mini",
+"pi-google": "pi:gemini-2.5-pro",
+"pi-gemini": "pi:gemini-2.5-pro",
+"pi-gemini25": "pi:gemini-2.5-pro",
+"pi-gemini20": "pi:gemini-2.0-flash",
 ```
 
 ### Tools
@@ -579,6 +586,7 @@ Required test cases:
 - `channels.telegram.brain: pi` passes config validation
 - `default_brain: pi:sonnet` preserves model
 - `/brain pi-sonnet` resolves to `pi:sonnet`
+- `/brain pi-google` resolves to `pi:gemini-2.5-pro`
 - `pi` appears in `supported_brains()` output
 - `brains.pi.no_tools: false` loads correctly
 - `brains.pi.thinking: high` loads correctly

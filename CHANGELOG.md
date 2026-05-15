@@ -20,6 +20,21 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 - Operator opt-out: `JC_RESEARCH_DISABLED=1` in an instance `.env` makes
   every CLI entry exit 17 immediately.
 
+## 2026.05.15.01
+
+Release for pi.dev as a first-class gateway brain.
+
+- Added the `pi` brain wrapper, shell adapter, model aliases, config support,
+  capability matrix entry, and focused gateway tests.
+- pi gateway runs now inject relevant provider API keys from instance `.env`,
+  including `GEMINI_API_KEY` for Google/Gemini models, while keeping API keys
+  off the command line.
+- The pi adapter disables context-file, extension, skill, prompt-template, and
+  theme discovery by default so gateway prompts remain deterministic.
+- Added pi-friendly aliases for Claude, OpenAI, and Google/Gemini models,
+  including `pi-google`, `pi-gemini25`, and `pi-gemini20`.
+- `jc doctor` now reports the optional `pi` CLI dependency.
+
 ## 2026.05.12.01
 
 Commercial v1 for offline self-improvement.

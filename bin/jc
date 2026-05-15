@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-VERSION="2026.05.14.01"
+VERSION="2026.05.15.01"
 
 usage() {
     cat <<EOF
