@@ -394,5 +394,123 @@ class InterAgentProtocolSchemaTests(unittest.TestCase):
             )
 
 
+class AdaptiveDiscoverySchemaTests(unittest.TestCase):
+    """Covers docs/specs/adaptive-discovery.md §Phase 2 — Config schema."""
+
+    def test_adaptive_discovery_block_missing_defaults_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "default_brain: claude\n")
+            cfg = load_config(instance)
+            self.assertFalse(cfg.adaptive_discovery.enabled)
+            self.assertEqual(
+                cfg.adaptive_discovery.default_unknown_posture, "conservative"
+            )
+            self.assertEqual(
+                cfg.adaptive_discovery.high_stakes_escalation_channel, "authority"
+            )
+
+    def test_adaptive_discovery_enabled_with_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  default_unknown_posture: conservative\n"
+                "  high_stakes_escalation_channel: authority\n",
+            )
+            cfg = load_config(instance)
+            self.assertTrue(cfg.adaptive_discovery.enabled)
+            self.assertEqual(
+                cfg.adaptive_discovery.default_unknown_posture, "conservative"
+            )
+            self.assertEqual(
+                cfg.adaptive_discovery.high_stakes_escalation_channel, "authority"
+            )
+
+    def test_adaptive_discovery_explicit_channel_slug_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: telegram\n",
+            )
+            cfg = load_config(instance)
+            self.assertEqual(
+                cfg.adaptive_discovery.high_stakes_escalation_channel, "telegram"
+            )
+
+    def test_adaptive_discovery_invalid_posture_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  default_unknown_posture: aggressive\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "adaptive_discovery.default_unknown_posture",
+                str(ctx.exception),
+            )
+
+    def test_adaptive_discovery_invalid_channel_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: pigeon\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "adaptive_discovery.high_stakes_escalation_channel",
+                str(ctx.exception),
+            )
+
+    def test_adaptive_discovery_unknown_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  forbid_high_inferred: true\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "adaptive_discovery.forbid_high_inferred",
+                str(ctx.exception),
+            )
+
+    def test_adaptive_discovery_non_mapping_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "adaptive_discovery: scalar\n")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("adaptive_discovery", str(ctx.exception))
+
+    def test_adaptive_discovery_non_boolean_enabled_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: yesplease\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("adaptive_discovery.enabled", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
