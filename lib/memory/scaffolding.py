@@ -25,9 +25,6 @@ _DETAIL_TEMPLATE_DST = "memory/L2/accountabilities/<slug>.md.template"
 
 _RULES_SNIPPET_SRC = "memory/L1/RULES.md.accountability-section.template"
 
-_CLAUDE_MD_IMPORT = "@memory/L1/accountabilities-manifest.md"
-_CLAUDE_MD_ANCHOR = "@memory/L1/HOT.md"
-
 
 def _copy_if_missing(src: Path, dst: Path) -> bool:
     if dst.exists():
@@ -37,52 +34,6 @@ def _copy_if_missing(src: Path, dst: Path) -> bool:
     dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
     print(f"[write] {dst}")
     return True
-
-
-def _patch_claude_md(instance_dir: Path) -> None:
-    """Insert the accountabilities-manifest import into CLAUDE.md.
-
-    Inserts before @memory/L1/HOT.md when found. Falls back to after the last
-    @memory/L1/ import, or appends at end. Idempotent.
-    """
-    claude_md = instance_dir / "CLAUDE.md"
-    if not claude_md.exists():
-        print(
-            f"[skip] CLAUDE.md not found — add {_CLAUDE_MD_IMPORT} manually "
-            "before @memory/L1/HOT.md"
-        )
-        return
-
-    text = claude_md.read_text(encoding="utf-8")
-
-    if _CLAUDE_MD_IMPORT in text:
-        print(f"[skip] CLAUDE.md already imports accountabilities-manifest.md")
-        return
-
-    if _CLAUDE_MD_ANCHOR in text:
-        patched = text.replace(
-            _CLAUDE_MD_ANCHOR,
-            f"{_CLAUDE_MD_IMPORT}\n{_CLAUDE_MD_ANCHOR}",
-            1,
-        )
-    else:
-        lines = text.splitlines(keepends=True)
-        last_import_idx = -1
-        for i, line in enumerate(lines):
-            if line.strip().startswith("@memory/L1/"):
-                last_import_idx = i
-        if last_import_idx >= 0:
-            lines.insert(last_import_idx + 1, f"{_CLAUDE_MD_IMPORT}\n")
-            patched = "".join(lines)
-        else:
-            patched = text.rstrip("\n") + f"\n{_CLAUDE_MD_IMPORT}\n"
-            print(
-                f"[warn] @memory/L1/HOT.md not found in CLAUDE.md — "
-                f"appended {_CLAUDE_MD_IMPORT} at end"
-            )
-
-    claude_md.write_text(patched, encoding="utf-8")
-    print(f"[write] CLAUDE.md — inserted {_CLAUDE_MD_IMPORT}")
 
 
 def scaffold_accountabilities(
@@ -128,4 +79,3 @@ def scaffold_accountabilities(
         "Paste the accountability section snippet into your memory/L1/RULES.md "
         "under your next free §-number."
     )
-    _patch_claude_md(instance_dir)

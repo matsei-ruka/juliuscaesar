@@ -23,6 +23,7 @@ from health.accountabilities_check import (  # noqa: E402
     _detail_has_all_sections,
     check_accountabilities,
 )
+from memory.accountabilities_audit import AuditEntry, append_audit_entry  # noqa: E402
 
 
 MANIFEST_BODY = """---
@@ -356,6 +357,23 @@ class AuditContractTests(unittest.TestCase):
             item = self._audit_item(self._run(instance))
             self.assertEqual(item.level, "warn")
             self.assertIn("malformed", item.message)
+
+    def test_audit_row_with_escaped_pipe_ok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            append_audit_entry(
+                instance,
+                AuditEntry(
+                    timestamp="2026-05-15T11:00",
+                    change="added A | B",
+                    source_chat_id="28547271",
+                    source_message_id="7000",
+                    token_observed="OK enact",
+                ),
+            )
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "ok")
+            self.assertIn("1 entries", item.message)
 
     def test_audit_truncated_to_frontmatter_only_warns(self):
         with tempfile.TemporaryDirectory() as tmp:

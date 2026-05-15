@@ -3,10 +3,14 @@ title: Accountabilities system
 section: subsystem
 status: active
 last_verified: 2026-05-15
-verified_by: Rachel Zane
+verified_by: Matsei Ruka
 code_anchors:
   - path: lib/gateway/config.py
     symbol: AccountabilitiesConfig
+  - path: lib/gateway/context.py
+    symbol: render_accountabilities_manifest_block
+  - path: lib/gateway/brains/claude.py
+    symbol: render_accountabilities_manifest_block
   - path: lib/memory/accountabilities_audit.py
     symbol: append_audit_entry
   - path: lib/health/accountabilities_check.py
@@ -28,14 +32,14 @@ sources:
 
 ## What it is
 
-Opt-in governance layer that lets an instance operator define and track discrete **accountabilities** — named areas of responsibility with explicit scope, stakeholders, cadence, and decision boundaries. Manifests live in L1 memory; detail files in L2. Changes are authority-gated and append-only-audited. `jc-doctor` surfaces health at a glance.
+Opt-in governance layer that lets an instance operator define and track discrete **accountabilities** — named areas of responsibility with explicit scope, stakeholders, cadence, and decision boundaries. Manifests live in L1 memory; detail files in L2. The gateway injects the manifest into brain context only while `accountabilities.enabled: true`. Changes are authority-gated and append-only-audited. `jc-doctor` surfaces health at a glance.
 
 Shipped across 5 phases on branch `spec/accountabilities` (commit `b7148dc`). 31 tests green. P6 (classification telemetry) deferred; P7 (e2e smoke) is manual operator work.
 
 ## Key invariants
 
-1. **Feature is opt-in.** `accountabilities.enabled` defaults to `false`. When disabled, every check returns a single `INFO` item — no warns, no noise.
-2. **Audit log is append-only, create-on-first.** `append_audit_entry` creates `memory/L2/accountabilities/_audit.md` with frontmatter + table header on first call, then appends one row per subsequent call. Never overwrites.
+1. **Feature is opt-in and context-gated.** `accountabilities.enabled` defaults to `false`. When disabled, every check returns a single `INFO` item, `render_authority_block()` is empty, and `accountabilities-manifest.md` is not injected into Claude or non-Claude brain context.
+2. **Audit log is append-only, create-on-first.** `append_audit_entry` creates `memory/L2/accountabilities/_audit.md` with frontmatter + table header on first call, then appends one row per subsequent call. Literal pipes in cells are escaped as `\|`; the doctor parser treats escaped pipes as cell content.
 3. **`tests/health/` must NOT contain `__init__.py`.** pytest prepend mode adds the test subdirectory to `sys.path`; a package init there shadows `lib/health/` and causes silent import of the wrong module. `tests/gateway/` and `tests/memory/` follow the same rule.
 4. **Detail files require all 9 sections.** `_detail_has_all_sections()` checks for: Scope, Out of scope, Outputs, Stakeholders, Cadence, Decision boundary, Adjacency notes, Self-check pre-action, Connections to existing constitution. Missing any → `WARN`.
 5. **RULES.md check requires "Accountability Principle" AND ≥2 of the 4 engagement levels.** ("Inside", "Adjacent", "Outside", "Delegated"). Rationale: avoids false-OK on empty headers.
@@ -52,6 +56,11 @@ ops/gateway.yaml
          │
          ▼
 lib/gateway/config.py → AccountabilitiesConfig (frozen dataclass)
+         │
+         ├── lib/gateway/context.py
+         │     render_accountabilities_manifest_block(instance_dir)
+         │     render_authority_block(instance_dir)
+         │     → conditional prompt context for all brains
          │
          ├── lib/memory/accountabilities_audit.py
          │     append_audit_entry(instance_dir, AuditEntry)
@@ -104,6 +113,7 @@ memory/L2/accountabilities/_audit.md        ← append-only audit log
 - **`__init__.py` in test subdir masks lib package.** If `tests/health/__init__.py` exists, pytest treats it as the `health` package → `from health.accountabilities_check import ...` imports the test dir, not `lib/health/`. Delete it if it appears.
 - **Config cache must be cleared between tests.** `gateway_config.clear_config_cache()` in `setUp`/`tearDown` prevents state bleed from one test's `gateway.yaml` leaking into the next.
 - **`authority_email_sender` only validated when `authority_channel == "email"`.** Empty string is valid for all other channels. See `_load_accountabilities()` in `config.py`.
+- **`telegram-primary` must render an actionable id.** The authority block includes `telegram_primary_chat_id` from `channels.telegram.chat_ids[0]`; if absent, agents must refuse Telegram enactments until configured.
 - **Manifest link regex is strict.** `_MANIFEST_DETAIL_LINK` matches `[text](../L2/accountabilities/<slug>.md)` — exactly that path prefix. Links with different casing or extra path components won't be parsed as accountability references.
 
 ## Open questions / known stale

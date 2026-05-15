@@ -27,7 +27,7 @@ The system has been running on one operator's COO-role instance since 2026-05-13
 
 A single instance ("Mario") runs this scheme in production. Structure observed:
 
-- `memory/L1/accountabilities-manifest.md` — declarative roster of 19 accountabilities, each tagged with a default level. Auto-loaded at session start via `CLAUDE.md`.
+- `memory/L1/accountabilities-manifest.md` — declarative roster of 19 accountabilities, each tagged with a default level. Loaded by the gateway only while `accountabilities.enabled: true`.
 - `memory/L2/accountabilities/<slug>.md` × 19 — one detail file per accountability, all using the same 9-section template.
 - `memory/L1/RULES.md §26 — ACCOUNTABILITY PRINCIPLE` — constitutional section that defines the four levels, the precaution rule (most-restrictive wins, default Outside), self-check sequence, and interaction with anti-submission rules.
 - `memory/L1/RULES_TECH.md` — instance-specific hard floor: forbidden commands, preflight gates, role-specific safeguards. Stays in the instance; framework does not template it.
@@ -39,7 +39,7 @@ The model:
 3. If none match → defaults to Outside.
 4. Acts according to the level (see below).
 
-No JC framework code references the manifest today. The agent reads it through normal L1 auto-load + CLAUDE.md imports.
+Current reference instances may load the manifest through local `CLAUDE.md` imports. The generic framework path is runtime injection, gated by `ops/gateway.yaml > accountabilities.enabled`, so disabling the feature removes the manifest from brain context.
 
 ## Desired behavior
 
@@ -52,7 +52,7 @@ No JC framework code references the manifest today. The agent reads it through n
 
 ### Manifest format (L1)
 
-A YAML-frontmatter Markdown file at `memory/L1/accountabilities-manifest.md`. Auto-loaded by the instance's `CLAUDE.md` via `@memory/L1/accountabilities-manifest.md`. Required frontmatter:
+A YAML-frontmatter Markdown file at `memory/L1/accountabilities-manifest.md`. When `accountabilities.enabled: true`, the gateway injects it into brain context for both Claude and non-Claude brains; when disabled, it is not injected even if the file exists. Required frontmatter:
 
 ```yaml
 ---
@@ -193,7 +193,7 @@ accountabilities:
   authority_email_sender: ""              # required if authority_channel = email
 ```
 
-- `authority_channel: telegram-primary` (default) — the primary chat_id is the only source.
+- `authority_channel: telegram-primary` (default) — the primary chat_id is the only source. The live authority block rendered to the agent includes `channels.telegram.chat_ids[0]` as `telegram_primary_chat_id` so the abstract channel name maps to an actionable event metadata check.
 - `authority_channel: email` — only emails from `authority_email_sender` count as enactment authority. Requires the email channel to be enabled and the operator to have configured DKIM or equivalent verification at the email-provider layer (out of scope for this spec).
 - `authority_channel: none` — the agent does not enact runtime manifest changes via any channel; the manifest is operator-edited only via file writes + gateway restart. Useful for read-only instances.
 
@@ -233,7 +233,7 @@ This keeps the spec minimal at the framework boundary. The intelligence lives wh
 
 JC instances today have:
 
-- `memory/L1/{IDENTITY,STYLE,USER,RULES,HOT,CHATS}.md` auto-loaded via CLAUDE.md.
+- `memory/L1/{IDENTITY,STYLE,USER,RULES,HOT,CHATS}.md` auto-loaded via CLAUDE.md or gateway preamble. `accountabilities-manifest.md` is a conditional runtime injection controlled by `accountabilities.enabled`.
 - Sender-approval flow gating new chat IDs (`lib/gateway/sender_approval/*`).
 - `chat_ids` allowlist per channel.
 - No notion of per-accountability scope. The agent engages on whatever the user asks, constrained only by global RULES.md content.
@@ -289,7 +289,8 @@ pytest tests/gateway/test_config_env.py -k accountabilities
 
 ```bash
 jc memory scaffold accountabilities --instance-dir /tmp/test-instance
-# Creates: L1/accountabilities-manifest.md, L2/accountabilities/_README.md
+# Creates: L1/accountabilities-manifest.md, L2/accountabilities/_README.md,
+#          L2/accountabilities/<slug>.md.template
 # Prints: "Paste the §-numbered snippet into your RULES.md under your next free section."
 ```
 
@@ -302,7 +303,7 @@ Operator must edit `RULES.md` by hand to wire in the §-numbered section — the
 - `lib/memory/accountabilities_audit.py` — writes to `memory/L2/accountabilities/_audit.md`.
 - `tests/memory/test_accountabilities_audit.py` — appending preserves order, frontmatter intact, schema is parseable.
 
-The audit writer exposes a Python API the agent can call (e.g., via a future tool or via direct memory writes). For now, the agent invokes it through standard file writes following the documented audit format.
+The audit writer exposes a Python API the agent can call (e.g., via a future tool or via direct memory writes). For now, the agent invokes it through standard file writes following the documented audit format. Table cells escape literal pipes as `\|`; `jc-doctor` parses escaped pipes as cell content, not separators.
 
 **Audit format:**
 

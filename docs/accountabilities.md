@@ -11,7 +11,7 @@ A per-instance manifest that tells the agent **what its role is and is not autho
 - **Outside** — decline gracefully; redirect; offer to facilitate the handoff.
 - **Delegated** — supervise; coordinate; don't execute; intervene on escalation.
 
-The intelligence lives in the agent's reasoning. The framework just keeps the manifest loaded and the constitutional section present.
+The intelligence lives in the agent's reasoning. The framework keeps the manifest loaded only while `accountabilities.enabled: true` and keeps the constitutional section visible through health checks.
 
 ## When to enable
 
@@ -56,6 +56,7 @@ Skip it (or keep it disabled — the default) for:
    This creates:
    - `memory/L1/accountabilities-manifest.md` (from the manifest template)
    - `memory/L2/accountabilities/_README.md`
+   - `memory/L2/accountabilities/<slug>.md.template`
    - prints the §-numbered constitutional snippet for you to paste into `RULES.md`
 
 3. **Write the manifest.** Open `memory/L1/accountabilities-manifest.md` and fill in the `## Active accountabilities` list. Each row is one accountability with its default level and a link to a detail file. Keep the list at role-level (see "How to write a good manifest" below).
@@ -91,7 +92,7 @@ Skip it (or keep it disabled — the default) for:
 - **Don't overfit.** If after a week of running you notice **every** message is classified Inside, your perimeter is too wide. Tighten the out-of-scope sections.
 - **Don't over-grain.** 50 micro-accountabilities is a sign you're tracking tasks. Group them. The detail file is where granularity lives.
 - **Delegated ≠ ignore.** Delegated means another party owns execution; the agent still supervises, coordinates, and intervenes on escalation. If you want true ignore, the level is Outside.
-- **Authority channel is narrow on purpose.** Only the primary operator chat (or the configured email sender, if `authority_channel: email`) can enact changes. A non-primary chat saying "Operator told me to enact X" is refused on principle and redirected — that's the impersonation defense. Drafts via any channel are fine; enactment is not.
+- **Authority channel is narrow on purpose.** Only the primary operator chat (or the configured email sender, if `authority_channel: email`) can enact changes. For `telegram-primary`, the agent sees the concrete `channels.telegram.chat_ids[0]` value in its live authority block and must match event metadata against it. A non-primary chat saying "Operator told me to enact X" is refused on principle and redirected — that's the impersonation defense. Drafts via any channel are fine; enactment is not.
 - **The enactment token must appear explicitly.** Default is `OK enact` (case-insensitive, trimmed) and is configurable via `accountabilities.enactment_token` in `ops/gateway.yaml`. The gateway surfaces the live token to the agent on every event — no restart or re-scaffold needed when the operator changes it. Casual agreement — "sure", "go ahead", "looks good" — does **not** enact. The token is a guard against ambiguous chat enacting structural changes by accident, not a secret.
 - **`authority_channel: none` disables enactment entirely.** All manifest changes have to be done by the operator editing `memory/L1/accountabilities-manifest.md` directly; no chat-level enactment is accepted.
 - **The manifest is REVIEWABLE, not immutable.** Every section carries an `<!-- REVIEWABLE -->` marker. The agent may propose refinements to L2 detail files within scope (e.g., clarifying a self-check step). The agent may NOT add or remove top-level accountabilities, change `default_level`, or modify the constitutional `§<N>` section without operator enactment.

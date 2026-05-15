@@ -6,6 +6,7 @@ Covers docs/specs/accountabilities.md §Phase 3:
 - The constitutional RULES snippet is printed (not written).
 - A paste instruction is printed pointing the operator at RULES.md.
 - The L2 accountabilities directory is created.
+- CLAUDE.md is not patched; runtime injection is gated by ops/gateway.yaml.
 """
 
 from __future__ import annotations
@@ -108,56 +109,19 @@ class ScaffoldAccountabilitiesTests(unittest.TestCase):
 
 
 class ScaffoldCLAUDEPatchTests(unittest.TestCase):
-    def _scaffold(self, instance: Path) -> str:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            scaffold_accountabilities(instance)
-        return buf.getvalue()
-
-    def _write_claude_md(self, instance: Path, content: str) -> None:
-        (instance / "CLAUDE.md").write_text(content, encoding="utf-8")
-
-    def test_patches_before_hot_md(self):
+    def test_scaffold_leaves_claude_md_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            self._write_claude_md(
-                instance,
-                "@memory/L1/IDENTITY.md\n@memory/L1/HOT.md\n@memory/L1/CHATS.md\n",
-            )
-            self._scaffold(instance)
-            lines = (instance / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
-            hot_idx = lines.index("@memory/L1/HOT.md")
-            manifest_idx = lines.index("@memory/L1/accountabilities-manifest.md")
-            self.assertLess(manifest_idx, hot_idx)
+            claude_md = instance / "CLAUDE.md"
+            original = "@memory/L1/IDENTITY.md\n@memory/L1/HOT.md\n"
+            claude_md.write_text(original, encoding="utf-8")
 
-    def test_patches_idempotent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            self._write_claude_md(
-                instance,
-                "@memory/L1/accountabilities-manifest.md\n@memory/L1/HOT.md\n",
-            )
-            self._scaffold(instance)
-            text = (instance / "CLAUDE.md").read_text(encoding="utf-8")
-            self.assertEqual(text.count("@memory/L1/accountabilities-manifest.md"), 1)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                scaffold_accountabilities(instance)
 
-    def test_fallback_no_hot_md_anchor(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            self._write_claude_md(
-                instance,
-                "@memory/L1/IDENTITY.md\n@memory/L1/RULES.md\n",
-            )
-            self._scaffold(instance)
-            text = (instance / "CLAUDE.md").read_text(encoding="utf-8")
-            self.assertIn("@memory/L1/accountabilities-manifest.md", text)
-
-    def test_skips_gracefully_when_claude_md_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            output = self._scaffold(instance)
-            self.assertNotIn("[write] CLAUDE.md", output)
-            self.assertIn("[skip]", output)
+            self.assertEqual(claude_md.read_text(encoding="utf-8"), original)
+            self.assertNotIn("CLAUDE.md", buf.getvalue())
 
 
 if __name__ == "__main__":

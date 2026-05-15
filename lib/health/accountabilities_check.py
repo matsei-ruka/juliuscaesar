@@ -240,7 +240,24 @@ def _parse_audit_row(line: str) -> list[str] | None:
     if not stripped.startswith("|") or not stripped.endswith("|"):
         return None
     inner = stripped[1:-1]
-    cells = [c.strip() for c in inner.split("|")]
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in inner:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    cells.append("".join(current).strip())
     return cells
 
 
