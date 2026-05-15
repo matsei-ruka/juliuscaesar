@@ -413,6 +413,115 @@ class AuthorityMapBlockTests(unittest.TestCase):
             self.assertIn("Inter-agent authority map", second)
 
 
+class AdaptiveDiscoveryBlockTests(unittest.TestCase):
+    def setUp(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def tearDown(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def _write_gateway_yaml(self, instance: Path, body: str) -> None:
+        ops = instance / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        (ops / "gateway.yaml").write_text(body, encoding="utf-8")
+        gateway_config.clear_config_cache()
+
+    def test_adaptive_block_empty_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "adaptive_discovery:\n  enabled: false\n"
+            )
+            self.assertEqual(context.render_adaptive_discovery_block(instance), "")
+
+    def test_adaptive_block_empty_when_config_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                context.render_adaptive_discovery_block(Path(tmp)), ""
+            )
+
+    def test_adaptive_block_uses_authority_channel_when_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: authority\n"
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: telegram-primary\n",
+            )
+            block = context.render_adaptive_discovery_block(instance)
+            self.assertIn("escalate via telegram-primary", block)
+            self.assertTrue(block.startswith("# Adaptive discovery — live reminder\n"))
+
+    def test_adaptive_block_uses_explicit_channel_slug(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: telegram\n",
+            )
+            block = context.render_adaptive_discovery_block(instance)
+            self.assertIn("escalate via telegram", block)
+
+    def test_adaptive_block_fallback_when_accountabilities_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: authority\n"
+                "accountabilities:\n"
+                "  enabled: false\n",
+            )
+            block = context.render_adaptive_discovery_block(instance)
+            self.assertIn("escalate via the human authority", block)
+
+    def test_adaptive_block_fallback_when_authority_channel_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: authority\n"
+                "accountabilities:\n"
+                "  enabled: true\n"
+                "  authority_channel: none\n",
+            )
+            block = context.render_adaptive_discovery_block(instance)
+            self.assertIn("escalate via the human authority", block)
+
+    def test_preamble_includes_adaptive_block_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n",
+            )
+            text = context.render_preamble(instance)
+            self.assertIn("Adaptive discovery — live reminder", text)
+            self.assertIn("Knowledge states:", text)
+            self.assertIn("Unknown default:", text)
+
+    def test_preamble_omits_adaptive_block_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "adaptive_discovery:\n  enabled: false\n"
+            )
+            text = context.render_preamble(instance)
+            self.assertNotIn("Adaptive discovery", text)
+
+
 class CacheInvalidationTests(unittest.TestCase):
     def setUp(self):
         context.clear_cache()

@@ -228,6 +228,46 @@ def render_authority_map_block(instance_dir: Path) -> str:
     return f"# Inter-agent authority map\n{body[:MAX_BYTES_PER_FILE]}"
 
 
+def render_adaptive_discovery_block(instance_dir: Path) -> str:
+    """Return the live adaptive-discovery reminder block when enabled.
+
+    Per docs/specs/adaptive-discovery.md §Phase 4: injects a three-line
+    reminder with the configured escalation channel substituted in.
+    When high_stakes_escalation_channel is "authority", resolves to the
+    accountabilities authority_channel (or "the human authority" if that
+    feature is off/none). Returns "" when disabled or config fails.
+    """
+
+    cfg = _load_gateway_config(instance_dir)
+    if cfg is None:
+        return ""
+    ad = getattr(cfg, "adaptive_discovery", None)
+    if ad is None or not getattr(ad, "enabled", False):
+        return ""
+
+    from .config import ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS
+
+    raw_channel = getattr(ad, "high_stakes_escalation_channel", ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS)
+    if raw_channel == ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS:
+        acc = getattr(cfg, "accountabilities", None)
+        if acc is not None and getattr(acc, "enabled", False):
+            auth_ch = getattr(acc, "authority_channel", "none")
+            channel = auth_ch if auth_ch != "none" else "the human authority"
+        else:
+            channel = "the human authority"
+    else:
+        channel = raw_channel
+
+    return (
+        "# Adaptive discovery — live reminder\n"
+        "Knowledge states: declared (fact), inferred (hypothesis). "
+        "Mark every load-bearing claim.\n"
+        f"Stakes threshold: low → inferred OK; medium → confirm; "
+        f"high → escalate via {channel}.\n"
+        "Unknown default: formal, no commitments, observe."
+    )
+
+
 def _style_path(instance_dir: Path) -> Path:
     return _l1_dir(instance_dir) / "STYLE.md"
 
@@ -310,6 +350,9 @@ def render_preamble(instance_dir: Path) -> str:
             authority_map_block = render_authority_map_block(instance_dir)
             if authority_map_block:
                 sections.append(authority_map_block)
+            adaptive_block = render_adaptive_discovery_block(instance_dir)
+            if adaptive_block:
+                sections.append(adaptive_block)
     memory_block = "\n\n".join(sections) if sections else "(No L1 memory files found.)"
     parts = [
         _ROLE_PREAMBLE,
