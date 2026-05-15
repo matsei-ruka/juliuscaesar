@@ -898,6 +898,30 @@ while IFS= read -r line; do
     esac
 done <<<"$INTER_AGENT_REPORT"
 
+# --- Adaptive discovery ---
+
+section "Adaptive discovery"
+
+ADAPTIVE_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from health.adaptive_discovery_check import check_adaptive_discovery
+
+for item in check_adaptive_discovery(Path(sys.argv[1])):
+    print(f"{item.level.upper()}:{item.message}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        ERROR:*) fail "${line#ERROR:}" ;;
+        Traceback*) fail "adaptive-discovery check crashed: $line" ;;
+    esac
+done <<<"$ADAPTIVE_REPORT"
+
 # --- Summary ---
 
 echo ""
