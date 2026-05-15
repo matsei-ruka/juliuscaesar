@@ -137,7 +137,20 @@ def _referenced_detail_slugs(manifest_text: str) -> list[str]:
 
 
 def _detail_has_all_sections(text: str) -> tuple[bool, list[str]]:
-    missing = [s for s in REQUIRED_DETAIL_SECTIONS if s not in text]
+    """Verify each required section appears as an actual `## Section` heading.
+
+    The section name must be the leading text of a level-2 heading; trailing
+    parenthetical descriptors (e.g. `## Scope (what's inside)`) are allowed.
+    Substring matches in prose do not count.
+    """
+    missing: list[str] = []
+    for section in REQUIRED_DETAIL_SECTIONS:
+        pattern = re.compile(
+            r"^##\s+" + re.escape(section) + r"(?:\s|\(|$)",
+            re.MULTILINE,
+        )
+        if not pattern.search(text):
+            missing.append(section)
     return (not missing, missing)
 
 

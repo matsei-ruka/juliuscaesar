@@ -18,7 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import config as gateway_config  # noqa: E402
-from health.accountabilities_check import check_accountabilities  # noqa: E402
+from health.accountabilities_check import (  # noqa: E402
+    REQUIRED_DETAIL_SECTIONS,
+    _detail_has_all_sections,
+    check_accountabilities,
+)
 
 
 MANIFEST_BODY = """---
@@ -247,6 +251,58 @@ class CheckAccountabilitiesTests(unittest.TestCase):
             self.assertEqual(manifest_items[0].level, "warn")
             self.assertIn("layer must be", manifest_items[0].message)
             self.assertIn("type must be", manifest_items[0].message)
+
+
+class DetailSectionsTests(unittest.TestCase):
+    def _make_body(self, sections: tuple[str, ...]) -> str:
+        parts = ["# Detail file\n"]
+        for s in sections:
+            parts.append(f"## {s}\n\nbody\n")
+        return "\n".join(parts)
+
+    def test_all_sections_as_headings_passes(self):
+        body = self._make_body(REQUIRED_DETAIL_SECTIONS)
+        ok, missing = _detail_has_all_sections(body)
+        self.assertTrue(ok, f"unexpectedly missing: {missing}")
+
+    def test_headings_with_trailing_parenthetical_pass(self):
+        body = (
+            "## Scope (what's inside)\n\n"
+            "## Out of scope (perimeter — explicit)\n\n"
+            "## Outputs\n## Stakeholders\n## Cadence\n## Decision boundary\n"
+            "## Adjacency notes\n## Self-check pre-action\n"
+            "## Connections to existing constitution\n"
+        )
+        ok, missing = _detail_has_all_sections(body)
+        self.assertTrue(ok, f"unexpectedly missing: {missing}")
+
+    def test_prose_substring_does_not_count(self):
+        body = (
+            "# Detail\n\n"
+            "This file is missing the following: Scope, Out of scope, Outputs, "
+            "Stakeholders, Cadence, Decision boundary, Adjacency notes, "
+            "Self-check pre-action, Connections to existing constitution.\n"
+        )
+        ok, missing = _detail_has_all_sections(body)
+        self.assertFalse(ok)
+        self.assertEqual(set(missing), set(REQUIRED_DETAIL_SECTIONS))
+
+    def test_h1_heading_does_not_count(self):
+        body = "\n".join(f"# {s}\nbody\n" for s in REQUIRED_DETAIL_SECTIONS)
+        ok, missing = _detail_has_all_sections(body)
+        self.assertFalse(ok)
+        self.assertEqual(set(missing), set(REQUIRED_DETAIL_SECTIONS))
+
+    def test_one_missing_heading_listed(self):
+        body = self._make_body(REQUIRED_DETAIL_SECTIONS[:-1])
+        ok, missing = _detail_has_all_sections(body)
+        self.assertFalse(ok)
+        self.assertEqual(missing, [REQUIRED_DETAIL_SECTIONS[-1]])
+
+    def test_scope_does_not_match_out_of_scope(self):
+        body = self._make_body(("Out of scope",))
+        ok, missing = _detail_has_all_sections(body)
+        self.assertIn("Scope", missing)
 
 
 if __name__ == "__main__":
