@@ -37,7 +37,14 @@ case "$MODEL" in
     *)                          ;;  # pass through as-is (provider/model already)
 esac
 
-ARGS=("-p" "--no-context-files" "--no-extensions")
+ARGS=(
+    "-p"
+    "--no-context-files"
+    "--no-extensions"
+    "--no-skills"
+    "--no-prompt-templates"
+    "--no-themes"
+)
 
 # Tools: --no-tools is default for gateway chat.
 # Allow override via JC_PI_NO_TOOLS=0 for workers/coding tasks.

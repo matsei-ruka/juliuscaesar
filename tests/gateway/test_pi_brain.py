@@ -224,13 +224,9 @@ class PiBrainExtraEnvTests(unittest.TestCase):
 
     def test_jc_pi_no_tools_respects_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            # no_tools is not a BrainOverrideConfig field yet, so patch the property
-            brain = PiBrain(Path(tmp), override=BrainOverrideConfig())
-            with mock.patch.object(
-                PiBrain, "_no_tools", mock.PropertyMock(return_value=False)
-            ):
-                env = brain.extra_env()
-                self.assertEqual(env["JC_PI_NO_TOOLS"], "0")
+            brain = PiBrain(Path(tmp), override=BrainOverrideConfig(no_tools=False))
+            env = brain.extra_env()
+            self.assertEqual(env["JC_PI_NO_TOOLS"], "0")
 
     def test_injects_api_keys_from_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,6 +240,17 @@ class PiBrainExtraEnvTests(unittest.TestCase):
             env = brain.extra_env()
             self.assertEqual(env.get("ANTHROPIC_API_KEY"), "sk-ant-test")
             self.assertEqual(env.get("OPENAI_API_KEY"), "sk-openai-test")
+
+    def test_injects_gemini_api_key_name_used_by_pi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".env").write_text(
+                "GEMINI_API_KEY=sk-gemini-test\n",
+                encoding="utf-8",
+            )
+            brain = PiBrain(instance, override=BrainOverrideConfig())
+            env = brain.extra_env()
+            self.assertEqual(env.get("GEMINI_API_KEY"), "sk-gemini-test")
 
     def test_does_not_inject_missing_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,12 +268,9 @@ class PiBrainExtraArgsTests(unittest.TestCase):
 
     def test_thinking_passed_when_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            brain = PiBrain(Path(tmp), override=BrainOverrideConfig())
-            with mock.patch.object(
-                PiBrain, "_thinking", mock.PropertyMock(return_value="high")
-            ):
-                args = brain.extra_args_for_event(_event())
-                self.assertEqual(args, ("--thinking", "high"))
+            brain = PiBrain(Path(tmp), override=BrainOverrideConfig(thinking="high"))
+            args = brain.extra_args_for_event(_event())
+            self.assertEqual(args, ("--thinking", "high"))
 
 
 class PiBrainPromptTests(unittest.TestCase):
@@ -337,6 +341,12 @@ class PiShellAdapterTests(unittest.TestCase):
         self.assertIn("-p", argv)
         self.assertIn("--no-context-files", argv)
         self.assertIn("--no-extensions", argv)
+
+    def test_default_argv_disables_prompt_discovery_surfaces(self) -> None:
+        argv, stdout, rc = self._run_adapter()
+        self.assertIn("--no-skills", argv)
+        self.assertIn("--no-prompt-templates", argv)
+        self.assertIn("--no-themes", argv)
 
     def test_default_argv_includes_no_tools(self) -> None:
         argv, stdout, rc = self._run_adapter()

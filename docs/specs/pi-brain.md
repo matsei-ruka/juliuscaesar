@@ -27,7 +27,7 @@ These were tested before writing this revision. Do not treat as open questions.
 
 1. **`pi -p` (no positional arg) reads stdin as the prompt.** No ARG_MAX
    limit. Preferred invocation pattern: pipe the prompt. Tested with:
-   `echo "Say hello" | pi -p --no-context-files --no-extensions`
+   `echo "Say hello" | pi -p --no-context-files --no-extensions --no-skills --no-prompt-templates --no-themes`
 
 2. **`pi -p` always writes a session file**, even with `--no-session`. Session
    files are JSONL in `~/.pi/agent/sessions/<cwd-slug>/` with format
@@ -80,7 +80,7 @@ Key features relevant to subprocess invocation:
 | **Tools control** | `pi --no-tools` to disable all; `pi --tools <list>` to allowlist |
 | **Session resume** | `pi --session <uuid>` to continue a session |
 | **Context files** | Auto-loads `CLAUDE.md` / `AGENTS.md`; `--no-context-files` / `-nc` disables |
-| **Extensions off** | `pi --no-extensions` disables extensions, skills, prompt templates |
+| **Prompt discovery off** | `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes` disable operator-side prompt/code discovery |
 | **System prompt** | `pi --append-system-prompt <text>` to append to system prompt |
 | **Auth** | Subscription OAuth (`/login`) or API keys via environment variables |
 
@@ -110,6 +110,9 @@ ARG_MAX limit. This is the invocation pattern:
 echo "$PROMPT" | pi -p \
    --no-context-files \
    --no-extensions \
+   --no-skills \
+   --no-prompt-templates \
+   --no-themes \
    ${MODEL:+--model "$MODEL"} \
    ${SESSION:+--session "$SESSION"} \
    ${THINKING:+--thinking "$THINKING"} \
@@ -264,13 +267,14 @@ worker needs tools while the main chat doesn't, the operator sets
 uses a different brain for workers. A per-invocation tools config is out of
 scope for this spec.
 
-### Extensions
+### Operator discovery surfaces
 
-`--no-extensions` is always passed to disable pi's TypeScript extension,
-skill, and prompt template loading. This keeps gateway invocations
-deterministic. Operators who want extensions can pass them via
-`brains.pi.extra_args` (e.g. `-e ./my-ext.ts`), which appends after the
-fixed args.
+`--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes`
+are always passed to disable pi's TypeScript extension, skill, prompt
+template, and theme discovery. This keeps gateway invocations deterministic.
+Operators who want one of these surfaces can pass explicit override args via
+`brains.pi.extra_args` (e.g. `-e ./my-ext.ts`), which appends after the fixed
+args.
 
 ### Thinking level
 
@@ -331,7 +335,14 @@ if ! command -v pi >/dev/null 2>&1; then
     exit 127
 fi
 
-ARGS=("-p" "--no-context-files" "--no-extensions")
+ARGS=(
+    "-p"
+    "--no-context-files"
+    "--no-extensions"
+    "--no-skills"
+    "--no-prompt-templates"
+    "--no-themes"
+)
 
 # Tools: --no-tools is default for gateway chat.
 # Allow override via JC_PI_NO_TOOLS=0.
@@ -433,8 +444,9 @@ class PiBrain(Brain):
         # The gateway starts with env -i, so os.environ won't have them.
         from ..config import env_value
         for key_name in (
-            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
-            "DEEPSEEK_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
+            "OPENROUTER_API_KEY",
         ):
             key_value = env_value(self.instance_dir, key_name)
             if key_value:
@@ -624,8 +636,9 @@ jc gateway work-once               # pi resumes session, recalls "hello"
   accept or forward `--api-key`.
 - pi's auth state (OAuth tokens in `~/.pi/auth.json`, API keys in env)
   must be readable by the gateway process user.
-- `--no-extensions` is always passed to prevent arbitrary operator extension
-  code from running in gateway context.
+- `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and
+  `--no-themes` are always passed to prevent arbitrary operator prompt/code
+  discovery from changing gateway context.
 - If `brains.pi.bin` is set to a custom path, `Brain.validate()`
   (inherited from base) checks it's executable at invocation time.
 
@@ -666,7 +679,8 @@ pi is production-ready as a gateway brain when:
 - Session capture returns correct UUID or `None` safely; multi-turn
   conversation continuity works (either native resume or transcript priming).
 - `brains.pi` config overrides (bin, no_tools, thinking, extra_args) work.
-- `--no-context-files` and `--no-extensions` are always passed.
+- `--no-context-files`, `--no-extensions`, `--no-skills`,
+  `--no-prompt-templates`, and `--no-themes` are always passed.
 - `--no-tools` is default for gateway chat; `JC_PI_NO_TOOLS=1` env var
   controls it.
 - Output contract injection works; `BrainOutput` parser handles pi's stdout.
