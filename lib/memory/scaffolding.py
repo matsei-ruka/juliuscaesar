@@ -1,13 +1,17 @@
 """Scaffold opt-in memory features into an instance directory.
 
-Currently supports the accountability manifest scaffolding flow described in
-docs/specs/accountabilities.md §Phase 3. Copies template files into the
-operator's instance dir and prints the constitutional snippet to stdout for
-manual paste into `memory/L1/RULES.md`.
+Supports the scaffolding flows described in:
+- docs/specs/accountabilities.md §Phase 3 (`scaffold_accountabilities`)
+- docs/specs/relational-awareness-layer.md §Phase 3 (`scaffold_entities`)
+
+Each helper copies template files into the operator's instance dir (where
+applicable) and prints the constitutional snippet to stdout for manual paste
+into `memory/L1/RULES.md`.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 _DEFAULT_TEMPLATES_DIR = (
@@ -24,6 +28,22 @@ _DETAIL_TEMPLATE_SRC = "memory/L2/accountabilities/<slug>.md.template"
 _DETAIL_TEMPLATE_DST = "memory/L2/accountabilities/<slug>.md.template"
 
 _RULES_SNIPPET_SRC = "memory/L1/RULES.md.accountability-section.template"
+
+# Relational awareness — entities/
+_ENTITIES_DIR = "memory/L2/entities"
+_ENTITY_TEMPLATE_FILES = ("<slug>.md.template", "_README.md", "_categories.md")
+_PEOPLE_DIR = "memory/L2/people"
+_ARCHIVE_PARENT = "memory/L2/_archive"
+
+# Inter-agent protocol
+_AUTHORITY_MAP_SRC = "memory/L1/authority-map.md.template"
+_AUTHORITY_MAP_DST = "memory/L1/authority-map.md"
+_INTER_AGENT_SNIPPET_SRC = "memory/L1/RULES.md.inter-agent-section.template"
+
+# Adaptive discovery
+_ADAPTIVE_DISCOVERY_SNIPPET_SRC = (
+    "memory/L1/RULES.md.adaptive-discovery-section.template"
+)
 
 
 def _copy_if_missing(src: Path, dst: Path) -> bool:
@@ -79,3 +99,142 @@ def scaffold_accountabilities(
         "Paste the accountability section snippet into your memory/L1/RULES.md "
         "under your next free §-number."
     )
+
+
+def _today_iso() -> str:
+    return date.today().isoformat()
+
+
+def _entity_slug_from_path(path: Path) -> str:
+    return path.stem
+
+
+def _entity_stub(slug: str, today: str) -> str:
+    return (
+        "---\n"
+        f"slug: {slug}\n"
+        f"entity_id: {slug}\n"
+        "entity_type: human\n"
+        "entity_category: unknown\n"
+        f"display_name: {slug}\n"
+        "human_authority: \"\"\n"
+        "accountabilities_pointer: TBD\n"
+        "knowledge_state: inferred\n"
+        "classification_confidence: low\n"
+        "confidence_basis: migrated from memory/L2/people/ — not yet reviewed\n"
+        f"created: {today}\n"
+        f"updated: {today}\n"
+        f"last_verified: {today}\n"
+        "tags: [entities, unknown, migrated]\n"
+        "---\n"
+        "\n"
+        f"# {slug}\n"
+        "\n"
+        "<!-- Migrated stub. Review and promote when evidence resolves the classification. -->\n"
+        "<!-- Original record archived at "
+        f"{_ARCHIVE_PARENT}/people-pre-{today}/{slug}.md -->\n"
+        "\n"
+        "## Identity\n\n…\n\n"
+        "## Relationship\n\n…\n\n"
+        "## Communication\n\n…\n\n"
+        "## Open items\n\n…\n\n"
+        "## Notes\n\n…\n"
+    )
+
+
+def _archive_readme(today: str, migrated: list[str]) -> str:
+    body = (
+        "# people/ archive — pre-entities migration\n"
+        "\n"
+        f"Captured on {today} by `jc memory scaffold entities --migrate-people`.\n"
+        "\n"
+        "The previous `memory/L2/people/` directory has been moved here for audit and\n"
+        "rollback. The relational awareness layer now owns entity records at\n"
+        "`memory/L2/entities/`. Each file archived below has a stub entity record\n"
+        "generated at `memory/L2/entities/<slug>.md` with defaults:\n"
+        "\n"
+        "    entity_category: unknown\n"
+        "    knowledge_state: inferred\n"
+        "    classification_confidence: low\n"
+        "\n"
+        "Operators promote stubs by reviewing the archived original, copying the body\n"
+        "into the new record, then enacting a category change via the configured\n"
+        "`accountabilities.authority_channel`.\n"
+        "\n"
+        "## Migrated files\n"
+        "\n"
+    )
+    if migrated:
+        body += "\n".join(f"- {name}" for name in sorted(migrated)) + "\n"
+    else:
+        body += "(none — directory was empty at migration time)\n"
+    return body
+
+
+def scaffold_entities(
+    instance_dir: Path,
+    *,
+    migrate_people: bool = False,
+    templates_dir: Path | None = None,
+) -> None:
+    """Scaffold the relational awareness layer into instance_dir.
+
+    Copies the three entities templates into `memory/L2/entities/`. When
+    `migrate_people=True`, archives the existing `memory/L2/people/` directory
+    (one-shot — archive existence is the marker) and generates a stub entity
+    record per former people file with conservative defaults.
+
+    Idempotent on the template copy: existing files are skipped with `[skip]`.
+    Migration is one-shot — if the archive directory for today already exists,
+    no further people-file moves happen.
+    """
+    templates = templates_dir if templates_dir is not None else _DEFAULT_TEMPLATES_DIR
+    entities_src = templates / _ENTITIES_DIR
+
+    for name in _ENTITY_TEMPLATE_FILES:
+        src = entities_src / name
+        if not src.exists():
+            raise FileNotFoundError(f"template missing: {src}")
+
+    entities_dst = instance_dir / _ENTITIES_DIR
+    entities_dst.mkdir(parents=True, exist_ok=True)
+
+    for name in _ENTITY_TEMPLATE_FILES:
+        _copy_if_missing(entities_src / name, entities_dst / name)
+
+    if not migrate_people:
+        return
+
+    today = _today_iso()
+    archive_dir = instance_dir / _ARCHIVE_PARENT / f"people-pre-{today}"
+    if archive_dir.exists():
+        print(f"[skip] migration already ran — {archive_dir} exists")
+        return
+
+    people_dir = instance_dir / _PEOPLE_DIR
+    if not people_dir.exists():
+        print(f"[skip] no {_PEOPLE_DIR}/ directory to migrate")
+        return
+
+    people_files = sorted(p for p in people_dir.glob("*.md") if p.is_file())
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    migrated: list[str] = []
+
+    for src_path in people_files:
+        dst_path = archive_dir / src_path.name
+        src_path.rename(dst_path)
+        migrated.append(src_path.name)
+        print(f"[archive] {src_path.relative_to(instance_dir)} → "
+              f"{dst_path.relative_to(instance_dir)}")
+
+        slug = _entity_slug_from_path(src_path)
+        stub_path = entities_dst / f"{slug}.md"
+        if stub_path.exists():
+            print(f"[skip] {stub_path.relative_to(instance_dir)} already exists")
+            continue
+        stub_path.write_text(_entity_stub(slug, today), encoding="utf-8")
+        print(f"[write] {stub_path.relative_to(instance_dir)}")
+
+    readme_path = archive_dir / "_README.md"
+    readme_path.write_text(_archive_readme(today, migrated), encoding="utf-8")
+    print(f"[write] {readme_path.relative_to(instance_dir)}")
