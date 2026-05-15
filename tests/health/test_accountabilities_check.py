@@ -79,10 +79,27 @@ def _write_rules(instance: Path, body: str = RULES_BODY) -> None:
     target.write_text(body, encoding="utf-8")
 
 
-def _write_audit(instance: Path) -> None:
+AUDIT_BODY_EMPTY = """---
+slug: accountabilities-audit
+type: audit-log
+state: active
+---
+
+# Accountabilities audit log
+
+| Timestamp | Change | Source (chat_id, message_id) | Token observed |
+|---|---|---|---|
+"""
+
+AUDIT_BODY_WITH_ROW = AUDIT_BODY_EMPTY + (
+    "| 2026-05-15T11:00 | added X | 28547271, 7000 | OK enact |\n"
+)
+
+
+def _write_audit(instance: Path, body: str = AUDIT_BODY_EMPTY) -> None:
     target = instance / "memory" / "L2" / "accountabilities" / "_audit.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("---\nslug: accountabilities-audit\n---\n", encoding="utf-8")
+    target.write_text(body, encoding="utf-8")
 
 
 class CheckAccountabilitiesTests(unittest.TestCase):
@@ -251,6 +268,104 @@ class CheckAccountabilitiesTests(unittest.TestCase):
             self.assertEqual(manifest_items[0].level, "warn")
             self.assertIn("layer must be", manifest_items[0].message)
             self.assertIn("type must be", manifest_items[0].message)
+
+
+class AuditContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gateway_config.clear_config_cache()
+
+    def tearDown(self) -> None:
+        gateway_config.clear_config_cache()
+
+    def _run(self, instance: Path) -> list:
+        _enable_config(instance)
+        _write_manifest(instance)
+        _write_rules(instance)
+        return check_accountabilities(instance)
+
+    def _audit_item(self, items: list):
+        for item in items:
+            if "audit" in item.message:
+                return item
+        self.fail(f"no audit item in {items}")
+
+    def test_audit_empty_table_ok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_audit(instance, AUDIT_BODY_EMPTY)
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "ok")
+            self.assertIn("no entries yet", item.message)
+
+    def test_audit_with_rows_reports_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_audit(instance, AUDIT_BODY_WITH_ROW)
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "ok")
+            self.assertIn("1 entries", item.message)
+
+    def test_audit_wrong_slug_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_audit(
+                instance,
+                AUDIT_BODY_EMPTY.replace("accountabilities-audit", "wrong-slug"),
+            )
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "warn")
+            self.assertIn("slug must be", item.message)
+
+    def test_audit_missing_title_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_audit(
+                instance,
+                AUDIT_BODY_EMPTY.replace("# Accountabilities audit log", "# Wrong title"),
+            )
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "warn")
+            self.assertIn("title heading", item.message)
+
+    def test_audit_missing_table_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_audit(
+                instance,
+                "---\nslug: accountabilities-audit\n---\n\n"
+                "# Accountabilities audit log\n\n(operator wiped the table)\n",
+            )
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "warn")
+            self.assertIn("no table", item.message)
+
+    def test_audit_missing_separator_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            body = AUDIT_BODY_EMPTY.replace("|---|---|---|---|\n", "")
+            _write_audit(instance, body)
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "warn")
+            self.assertIn("separator", item.message)
+
+    def test_audit_malformed_row_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            body = AUDIT_BODY_EMPTY + "| only | three | columns |\n"
+            _write_audit(instance, body)
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "warn")
+            self.assertIn("malformed", item.message)
+
+    def test_audit_truncated_to_frontmatter_only_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_audit(
+                instance,
+                "---\nslug: accountabilities-audit\n---\n",
+            )
+            item = self._audit_item(self._run(instance))
+            self.assertEqual(item.level, "warn")
 
 
 class DetailSectionsTests(unittest.TestCase):

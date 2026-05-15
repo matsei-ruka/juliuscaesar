@@ -44,6 +44,10 @@ MANIFEST_EXPECTED_SLUG = "accountabilities-manifest"
 MANIFEST_EXPECTED_LAYER = "L1"
 MANIFEST_EXPECTED_TYPE = "manifest"
 
+AUDIT_EXPECTED_SLUG = "accountabilities-audit"
+AUDIT_EXPECTED_COLUMNS = ("Timestamp", "Change", "Source", "Token observed")
+AUDIT_TITLE = "# Accountabilities audit log"
+
 _MANIFEST_DETAIL_LINK = re.compile(
     r"\[[^\]]+\]\(\.\.\/L2\/accountabilities\/([A-Za-z0-9_-]+)\.md\)"
 )
@@ -230,6 +234,20 @@ def _check_rules(instance_dir: Path) -> HealthItem:
     return HealthItem("ok", "RULES.md contains the Accountability Principle section")
 
 
+def _parse_audit_row(line: str) -> list[str] | None:
+    """Return cell values for a Markdown table row, or None when not a row."""
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    inner = stripped[1:-1]
+    cells = [c.strip() for c in inner.split("|")]
+    return cells
+
+
+def _is_separator_row(cells: list[str]) -> bool:
+    return bool(cells) and all(set(c) <= set("-:") and c for c in cells)
+
+
 def _check_audit(instance_dir: Path) -> HealthItem:
     path = _audit_path(instance_dir)
     if not path.exists():
@@ -238,7 +256,70 @@ def _check_audit(instance_dir: Path) -> HealthItem:
             f"audit log missing: {path.relative_to(instance_dir)} "
             "(will be created on first enactment)",
         )
-    return HealthItem("ok", "audit log present")
+    text = path.read_text(encoding="utf-8")
+
+    data, fm_error = _parse_frontmatter(text)
+    if fm_error is not None:
+        return HealthItem("warn", f"audit log frontmatter unreadable: {fm_error}")
+    assert data is not None
+    if data.get("slug") != AUDIT_EXPECTED_SLUG:
+        return HealthItem(
+            "warn",
+            f"audit log slug must be `{AUDIT_EXPECTED_SLUG}` "
+            f"(got `{data.get('slug')}`)",
+        )
+
+    if AUDIT_TITLE not in text:
+        return HealthItem(
+            "warn",
+            f"audit log missing title heading `{AUDIT_TITLE}`",
+        )
+
+    rows = [
+        cells for line in text.splitlines()
+        if (cells := _parse_audit_row(line)) is not None
+    ]
+    if not rows:
+        return HealthItem(
+            "warn",
+            "audit log has no table; expected `| Timestamp | Change | Source | Token observed |` header",
+        )
+
+    header = rows[0]
+    if len(header) != len(AUDIT_EXPECTED_COLUMNS):
+        return HealthItem(
+            "warn",
+            f"audit log header has {len(header)} columns, expected "
+            f"{len(AUDIT_EXPECTED_COLUMNS)} ({', '.join(AUDIT_EXPECTED_COLUMNS)})",
+        )
+    for expected, got in zip(AUDIT_EXPECTED_COLUMNS, header):
+        if expected.lower() not in got.lower():
+            return HealthItem(
+                "warn",
+                f"audit log header column `{got}` does not match expected `{expected}`",
+            )
+
+    if len(rows) < 2 or not _is_separator_row(rows[1]):
+        return HealthItem(
+            "warn",
+            "audit log missing the `|---|---|---|---|` separator row beneath the header",
+        )
+
+    data_rows = rows[2:]
+    malformed = [
+        i for i, r in enumerate(data_rows, start=1)
+        if len(r) != len(AUDIT_EXPECTED_COLUMNS)
+    ]
+    if malformed:
+        return HealthItem(
+            "warn",
+            f"audit log has {len(malformed)} malformed row(s) "
+            f"(expected {len(AUDIT_EXPECTED_COLUMNS)} columns each)",
+        )
+
+    if not data_rows:
+        return HealthItem("ok", "audit log present (no entries yet)")
+    return HealthItem("ok", f"audit log present ({len(data_rows)} entries)")
 
 
 def check_accountabilities(instance_dir: Path) -> list[HealthItem]:
