@@ -131,6 +131,17 @@ class CodexAuthConfig:
     refresh_skew_seconds: int = 300
 
 
+ACCOUNTABILITIES_AUTHORITY_CHANNELS = ("telegram-primary", "email", "none")
+
+
+@dataclass(frozen=True)
+class AccountabilitiesConfig:
+    enabled: bool = False
+    authority_channel: str = "telegram-primary"
+    enactment_token: str = "OK enact"
+    authority_email_sender: str = ""
+
+
 @dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
@@ -148,6 +159,7 @@ class GatewayConfig:
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     codex_auth: CodexAuthConfig = field(default_factory=CodexAuthConfig)
     principal: PrincipalConfig = field(default_factory=PrincipalConfig)
+    accountabilities: AccountabilitiesConfig = field(default_factory=AccountabilitiesConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -478,6 +490,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "company",
         "codex_auth",
         "principal",
+        "accountabilities",
     }
     for key in data:
         if key not in allowed_top:
@@ -915,6 +928,42 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     codex_auth_raw["refresh_skew_seconds"],
                 )
 
+    accountabilities_raw = data.get("accountabilities")
+    if accountabilities_raw is not None:
+        if not isinstance(accountabilities_raw, dict):
+            errors.append("accountabilities: must be a mapping")
+        else:
+            allowed_accountabilities = {
+                "enabled",
+                "authority_channel",
+                "enactment_token",
+                "authority_email_sender",
+            }
+            for key in accountabilities_raw:
+                if key not in allowed_accountabilities:
+                    errors.append(f"accountabilities.{key}: unknown field")
+            enabled = accountabilities_raw.get("enabled", False)
+            if enabled is not None and not isinstance(enabled, bool):
+                errors.append("accountabilities.enabled: must be boolean")
+            if enabled is True:
+                channel = accountabilities_raw.get("authority_channel", "telegram-primary")
+                if not isinstance(channel, str) or channel not in ACCOUNTABILITIES_AUTHORITY_CHANNELS:
+                    supported = ", ".join(ACCOUNTABILITIES_AUTHORITY_CHANNELS)
+                    errors.append(
+                        f"accountabilities.authority_channel: must be one of {supported}"
+                    )
+                token = accountabilities_raw.get("enactment_token", "OK enact")
+                if not isinstance(token, str) or not token.strip():
+                    errors.append("accountabilities.enactment_token: must be a non-empty string")
+                sender = accountabilities_raw.get("authority_email_sender", "")
+                if sender is not None and not isinstance(sender, str):
+                    errors.append("accountabilities.authority_email_sender: must be a string")
+                if channel == "email" and (not isinstance(sender, str) or not sender.strip()):
+                    errors.append(
+                        "accountabilities.authority_email_sender: required when "
+                        "authority_channel is 'email'"
+                    )
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1099,6 +1148,21 @@ def _load_codex_auth(data: dict[str, Any]) -> CodexAuthConfig:
     )
 
 
+def _load_accountabilities(data: dict[str, Any]) -> AccountabilitiesConfig:
+    raw = data.get("accountabilities") if isinstance(data.get("accountabilities"), dict) else {}
+    defaults = AccountabilitiesConfig()
+    return AccountabilitiesConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        authority_channel=str(raw.get("authority_channel") or defaults.authority_channel),
+        enactment_token=str(raw.get("enactment_token") or defaults.enactment_token),
+        authority_email_sender=str(
+            raw.get("authority_email_sender")
+            if raw.get("authority_email_sender") is not None
+            else defaults.authority_email_sender
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1210,6 +1274,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         reliability=_load_reliability(data),
         codex_auth=_load_codex_auth(data),
         principal=_load_principal(data),
+        accountabilities=_load_accountabilities(data),
     )
 
 
