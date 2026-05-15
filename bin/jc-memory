@@ -50,7 +50,12 @@ from memory import (  # type: ignore  # noqa: E402
     upsert,
 )
 from memory.db import _slug_from_path  # type: ignore  # noqa: E402
-from memory.scaffolding import scaffold_accountabilities  # type: ignore  # noqa: E402
+from memory.scaffolding import (  # type: ignore  # noqa: E402
+    scaffold_accountabilities,
+    scaffold_adaptive_discovery,
+    scaffold_entities,
+    scaffold_inter_agent,
+)
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
 
@@ -396,6 +401,21 @@ def cmd_scaffold_accountabilities(_args: argparse.Namespace, instance: Path) -> 
     return 0
 
 
+def cmd_scaffold_entities(args: argparse.Namespace, instance: Path) -> int:
+    scaffold_entities(instance, migrate_people=args.migrate_people)
+    return 0
+
+
+def cmd_scaffold_inter_agent(_args: argparse.Namespace, instance: Path) -> int:
+    scaffold_inter_agent(instance)
+    return 0
+
+
+def cmd_scaffold_adaptive_discovery(_args: argparse.Namespace, instance: Path) -> int:
+    scaffold_adaptive_discovery(instance)
+    return 0
+
+
 # --- main --------------------------------------------------------------------
 
 
@@ -457,6 +477,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Copy accountability manifest templates into memory/L1 and memory/L2",
     )
     psc_acc.set_defaults(func=cmd_scaffold_accountabilities)
+
+    psc_ent = psc_sub.add_parser(
+        "entities",
+        help="Copy relational-awareness entity templates into memory/L2/entities",
+    )
+    psc_ent.add_argument(
+        "--migrate-people",
+        action="store_true",
+        help="Archive memory/L2/people/ and generate entity stubs (one-shot).",
+    )
+    psc_ent.set_defaults(func=cmd_scaffold_entities)
+
+    psc_ia = psc_sub.add_parser(
+        "inter-agent",
+        help="Copy authority-map template into memory/L1 + patch CLAUDE.md import",
+    )
+    psc_ia.set_defaults(func=cmd_scaffold_inter_agent)
+
+    psc_ad = psc_sub.add_parser(
+        "adaptive-discovery",
+        help="Print the adaptive-discovery RULES.md snippet for paste",
+    )
+    psc_ad.set_defaults(func=cmd_scaffold_adaptive_discovery)
 
     return p
 

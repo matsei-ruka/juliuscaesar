@@ -35,6 +35,7 @@ L1_FILES = (
     "CHATS.md",
 )
 ACCOUNTABILITIES_MANIFEST_FILE = "accountabilities-manifest.md"
+AUTHORITY_MAP_FILE = "authority-map.md"
 MAX_BYTES_PER_FILE = 8000
 _VOICE_ANCHOR_LINE_RE = re.compile(r"^>\s*(.+)$", re.MULTILINE)
 _SECTION_RE_TEMPLATE = r"^#{{1,6}}\s+{heading}\s*$"
@@ -101,6 +102,9 @@ def _fingerprint(instance_dir: Path) -> tuple[tuple[str, float], ...]:
     paths.append(
         (ACCOUNTABILITIES_MANIFEST_FILE, l1_dir / ACCOUNTABILITIES_MANIFEST_FILE)
     )
+    paths.append(
+        (AUTHORITY_MAP_FILE, l1_dir / AUTHORITY_MAP_FILE)
+    )
     paths.append(("ops/gateway.yaml", instance_dir / "ops" / "gateway.yaml"))
     fingerprint: list[tuple[str, float]] = []
     for name, path in paths:
@@ -164,6 +168,104 @@ def render_accountabilities_manifest_block(instance_dir: Path) -> str:
     if _accountabilities_config(instance_dir) is None:
         return ""
     return _read_l1_section(_l1_dir(instance_dir), ACCOUNTABILITIES_MANIFEST_FILE)
+
+
+def _load_gateway_config(instance_dir: Path):
+    try:
+        from .config import load_config
+    except Exception:
+        return None
+    try:
+        return load_config(instance_dir)
+    except Exception:
+        return None
+
+
+def render_entities_block(instance_dir: Path) -> str:
+    """Return the entities-directory pointer when relational awareness is on.
+
+    Per docs/specs/relational-awareness-layer.md §Phase 4: a single line so
+    the agent knows the directory exists without paying tokens for every
+    record. Returns "" when disabled or config cannot be loaded.
+    """
+
+    cfg = _load_gateway_config(instance_dir)
+    if cfg is None:
+        return ""
+    entities = getattr(cfg, "entities", None)
+    if entities is None or not getattr(entities, "enabled", False):
+        return ""
+    return (
+        "Entities directory: memory/L2/entities/ "
+        "(six categories, see _categories.md)."
+    )
+
+
+def render_authority_map_block(instance_dir: Path) -> str:
+    """Return Authority Map content when inter-agent protocol is enabled.
+
+    Per docs/specs/inter-agent-protocol.md §Phase 4: injects the full
+    frontmatter + body of memory/L1/authority-map.md under a fixed heading.
+    Returns "" when disabled, file absent, or config cannot be loaded.
+    The preamble cache fingerprint includes authority-map.md mtime so
+    edits surface on the next event without restart.
+    """
+
+    cfg = _load_gateway_config(instance_dir)
+    if cfg is None:
+        return ""
+    iap = getattr(cfg, "inter_agent_protocol", None)
+    if iap is None or not getattr(iap, "enabled", False):
+        return ""
+    map_rel = getattr(iap, "authority_map_path", AUTHORITY_MAP_FILE)
+    map_path = instance_dir / map_rel
+    if not map_path.exists():
+        return ""
+    try:
+        body = map_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return f"# Inter-agent authority map\n{body[:MAX_BYTES_PER_FILE]}"
+
+
+def render_adaptive_discovery_block(instance_dir: Path) -> str:
+    """Return the live adaptive-discovery reminder block when enabled.
+
+    Per docs/specs/adaptive-discovery.md §Phase 4: injects a three-line
+    reminder with the configured escalation channel substituted in.
+    When high_stakes_escalation_channel is "authority", resolves to the
+    accountabilities authority_channel (or "the human authority" if that
+    feature is off/none). Returns "" when disabled or config fails.
+    """
+
+    cfg = _load_gateway_config(instance_dir)
+    if cfg is None:
+        return ""
+    ad = getattr(cfg, "adaptive_discovery", None)
+    if ad is None or not getattr(ad, "enabled", False):
+        return ""
+
+    from .config import ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS
+
+    raw_channel = getattr(ad, "high_stakes_escalation_channel", ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS)
+    if raw_channel == ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS:
+        acc = getattr(cfg, "accountabilities", None)
+        if acc is not None and getattr(acc, "enabled", False):
+            auth_ch = getattr(acc, "authority_channel", "none")
+            channel = auth_ch if auth_ch != "none" else "the human authority"
+        else:
+            channel = "the human authority"
+    else:
+        channel = raw_channel
+
+    return (
+        "# Adaptive discovery — live reminder\n"
+        "Knowledge states: declared (fact), inferred (hypothesis). "
+        "Mark every load-bearing claim.\n"
+        f"Stakes threshold: low → inferred OK; medium → confirm; "
+        f"high → escalate via {channel}.\n"
+        "Unknown default: formal, no commitments, observe."
+    )
 
 
 def _style_path(instance_dir: Path) -> Path:
@@ -242,6 +344,15 @@ def render_preamble(instance_dir: Path) -> str:
             sections.append(section)
         if name == "RULES.md":
             _append_accountabilities_manifest(sections, instance_dir, l1_dir)
+            entities_block = render_entities_block(instance_dir)
+            if entities_block:
+                sections.append(entities_block)
+            authority_map_block = render_authority_map_block(instance_dir)
+            if authority_map_block:
+                sections.append(authority_map_block)
+            adaptive_block = render_adaptive_discovery_block(instance_dir)
+            if adaptive_block:
+                sections.append(adaptive_block)
     memory_block = "\n\n".join(sections) if sections else "(No L1 memory files found.)"
     parts = [
         _ROLE_PREAMBLE,

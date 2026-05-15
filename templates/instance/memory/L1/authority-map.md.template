@@ -1,0 +1,50 @@
+<!-- Copy this file to memory/L1/authority-map.md and fill in the Agents table + Self line -->
+---
+slug: authority-map
+title: Inter-Agent Authority Map
+layer: L1
+type: authority-map
+state: active                            # active | draft | archived
+version: 0.1.0
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+last_verified: YYYY-MM-DD
+tags: [authority-map, inter-agent, perimeter]
+---
+
+# Inter-Agent Authority Map
+
+<!-- REVIEWABLE -->
+
+This file declares the peer-agent ecosystem this instance operates inside. The framework auto-loads it via `CLAUDE.md` when `inter_agent_protocol.enabled: true` in `ops/gateway.yaml`. The agent reads the table at reasoning time to identify peers, respect perimeters, and resist lateral pressure. Changes to this file are enacted via the configured `accountabilities.authority_channel` + `accountabilities.enactment_token` (see `ops/gateway.yaml`); see `docs/inter-agent-protocol.md` for the operator guide.
+
+## Agents
+
+<!-- REVIEWABLE -->
+
+<!-- One row per agent in the principal's ecosystem, including this instance. -->
+<!-- `agent_id` is kebab-case and stable. `instance_id` is the JC instance directory name, or `external`. -->
+<!-- `accountabilities_pointer` is a relative path (or `TBD` until the peer ships a manifest). -->
+<!-- `channel` identifies the primary inbound channel for that peer (e.g. `telegram:@<bot-handle>`). -->
+
+| agent_id     | display_name   | role                  | human_authority   | accountabilities_pointer                  | channel                          | instance_id     |
+|--------------|----------------|-----------------------|-------------------|-------------------------------------------|----------------------------------|-----------------|
+| <!-- example: mario-leone | Mario Leone | COO | filippo-perta | memory/L1/accountabilities-manifest.md | telegram:@mario_leone_bot | mario_leone_coo --> |
+|              |                |                       |                   |                                           |                                  |                 |
+
+## Self
+
+<!-- REVIEWABLE -->
+
+<!-- The `agent_id` of THIS instance. Must match exactly one row above. -->
+<!-- The framework uses this line to know which row is "me" and which rows are peers. -->
+
+self: <agent_id>
+
+## Notes
+
+<!-- REVIEWABLE -->
+
+<!-- Operator commentary: how this ecosystem is wired, escalation patterns, anything a future reader needs. -->
+
+…

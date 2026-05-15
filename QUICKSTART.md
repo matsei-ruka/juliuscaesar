@@ -334,6 +334,9 @@ DM the Telegram bot or message the configured Slack app channel and the gateway 
 Per-instance add-ons that ship disabled by default and are opt-in.
 
 - **Accountability manifest** — declare what the agent is and is not authorized to engage on; the agent classifies each inbound request (Inside / Adjacent / Outside / Delegated) and behaves accordingly. Useful for role-shaped personas where capability creep would otherwise have the agent engaging on anything. See [docs/accountabilities.md](./docs/accountabilities.md) for the operator guide and [docs/specs/accountabilities.md](./docs/specs/accountabilities.md) for the full design.
+- **Relational awareness layer (entities)** — typed substrate at `memory/L2/entities/` for the humans, peer agents, organizations, and collectives the agent interacts with, with six categories and declared/inferred knowledge states. See [docs/entities.md](./docs/entities.md).
+- **Inter-agent protocol** — constitutional discipline plus `memory/L1/authority-map.md` so multiple JC instances sharing a principal can identify each other, respect perimeters, and escalate cleanly. See [docs/inter-agent-protocol.md](./docs/inter-agent-protocol.md).
+- **Adaptive discovery** — constitutional discipline for `declared` vs `inferred` knowledge and a bounded protocol for handling unfamiliar entities, with a stakes-proportional confirmation threshold. See [docs/adaptive-discovery.md](./docs/adaptive-discovery.md).
 
 ---
 

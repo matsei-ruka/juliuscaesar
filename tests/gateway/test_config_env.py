@@ -225,5 +225,292 @@ class AccountabilitiesSchemaTests(unittest.TestCase):
             self.assertIn("authority_channel", str(ctx.exception))
 
 
+class EntitiesSchemaTests(unittest.TestCase):
+    """Covers docs/specs/relational-awareness-layer.md §Phase 2 — Config schema."""
+
+    def test_entities_block_missing_defaults_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "default_brain: claude\n")
+            cfg = load_config(instance)
+            self.assertFalse(cfg.entities.enabled)
+            self.assertFalse(cfg.entities.migrate_legacy_people)
+
+    def test_entities_enabled_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: true\n"
+                "  migrate_legacy_people: true\n",
+            )
+            cfg = load_config(instance)
+            self.assertTrue(cfg.entities.enabled)
+            self.assertTrue(cfg.entities.migrate_legacy_people)
+
+    def test_entities_disabled_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: false\n",
+            )
+            cfg = load_config(instance)
+            self.assertFalse(cfg.entities.enabled)
+            self.assertFalse(cfg.entities.migrate_legacy_people)
+
+    def test_entities_unknown_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: true\n"
+                "  bogus_field: value\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("entities.bogus_field", str(ctx.exception))
+
+    def test_entities_non_mapping_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "entities: not-a-mapping\n")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("entities", str(ctx.exception))
+
+    def test_entities_non_boolean_enabled_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: maybe\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("entities.enabled", str(ctx.exception))
+
+
+class InterAgentProtocolSchemaTests(unittest.TestCase):
+    """Covers docs/specs/inter-agent-protocol.md §Phase 2 — Config schema."""
+
+    def test_inter_agent_block_missing_defaults_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "default_brain: claude\n")
+            cfg = load_config(instance)
+            self.assertFalse(cfg.inter_agent_protocol.enabled)
+            self.assertEqual(
+                cfg.inter_agent_protocol.authority_map_path,
+                "memory/L1/authority-map.md",
+            )
+            self.assertTrue(cfg.inter_agent_protocol.require_self_declaration)
+
+    def test_inter_agent_enabled_full_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  authority_map_path: memory/L1/custom-map.md\n"
+                "  require_self_declaration: false\n",
+            )
+            cfg = load_config(instance)
+            self.assertTrue(cfg.inter_agent_protocol.enabled)
+            self.assertEqual(
+                cfg.inter_agent_protocol.authority_map_path,
+                "memory/L1/custom-map.md",
+            )
+            self.assertFalse(cfg.inter_agent_protocol.require_self_declaration)
+
+    def test_inter_agent_unknown_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  bogus: value\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("inter_agent_protocol.bogus", str(ctx.exception))
+
+    def test_inter_agent_non_mapping_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "inter_agent_protocol: scalar\n")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("inter_agent_protocol", str(ctx.exception))
+
+    def test_inter_agent_non_boolean_enabled_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: not-bool\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("inter_agent_protocol.enabled", str(ctx.exception))
+
+    def test_inter_agent_non_boolean_self_declaration_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  require_self_declaration: nope\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "inter_agent_protocol.require_self_declaration",
+                str(ctx.exception),
+            )
+
+    def test_inter_agent_empty_authority_map_path_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "inter_agent_protocol:\n"
+                "  enabled: true\n"
+                "  authority_map_path: ''\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "inter_agent_protocol.authority_map_path",
+                str(ctx.exception),
+            )
+
+
+class AdaptiveDiscoverySchemaTests(unittest.TestCase):
+    """Covers docs/specs/adaptive-discovery.md §Phase 2 — Config schema."""
+
+    def test_adaptive_discovery_block_missing_defaults_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "default_brain: claude\n")
+            cfg = load_config(instance)
+            self.assertFalse(cfg.adaptive_discovery.enabled)
+            self.assertEqual(
+                cfg.adaptive_discovery.default_unknown_posture, "conservative"
+            )
+            self.assertEqual(
+                cfg.adaptive_discovery.high_stakes_escalation_channel, "authority"
+            )
+
+    def test_adaptive_discovery_enabled_with_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  default_unknown_posture: conservative\n"
+                "  high_stakes_escalation_channel: authority\n",
+            )
+            cfg = load_config(instance)
+            self.assertTrue(cfg.adaptive_discovery.enabled)
+            self.assertEqual(
+                cfg.adaptive_discovery.default_unknown_posture, "conservative"
+            )
+            self.assertEqual(
+                cfg.adaptive_discovery.high_stakes_escalation_channel, "authority"
+            )
+
+    def test_adaptive_discovery_explicit_channel_slug_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: telegram\n",
+            )
+            cfg = load_config(instance)
+            self.assertEqual(
+                cfg.adaptive_discovery.high_stakes_escalation_channel, "telegram"
+            )
+
+    def test_adaptive_discovery_invalid_posture_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  default_unknown_posture: aggressive\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "adaptive_discovery.default_unknown_posture",
+                str(ctx.exception),
+            )
+
+    def test_adaptive_discovery_invalid_channel_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: pigeon\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "adaptive_discovery.high_stakes_escalation_channel",
+                str(ctx.exception),
+            )
+
+    def test_adaptive_discovery_unknown_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  forbid_high_inferred: true\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn(
+                "adaptive_discovery.forbid_high_inferred",
+                str(ctx.exception),
+            )
+
+    def test_adaptive_discovery_non_mapping_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "adaptive_discovery: scalar\n")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("adaptive_discovery", str(ctx.exception))
+
+    def test_adaptive_discovery_non_boolean_enabled_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "adaptive_discovery:\n"
+                "  enabled: yesplease\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("adaptive_discovery.enabled", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

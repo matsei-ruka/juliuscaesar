@@ -145,6 +145,30 @@ class AccountabilitiesConfig:
 
 
 @dataclass(frozen=True)
+class EntitiesConfig:
+    enabled: bool = False
+    migrate_legacy_people: bool = False
+
+
+@dataclass(frozen=True)
+class InterAgentProtocolConfig:
+    enabled: bool = False
+    authority_map_path: str = "memory/L1/authority-map.md"
+    require_self_declaration: bool = True
+
+
+ADAPTIVE_DISCOVERY_UNKNOWN_POSTURES = ("conservative",)
+ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS = "authority"
+
+
+@dataclass(frozen=True)
+class AdaptiveDiscoveryConfig:
+    enabled: bool = False
+    default_unknown_posture: str = "conservative"
+    high_stakes_escalation_channel: str = ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
@@ -162,6 +186,13 @@ class GatewayConfig:
     codex_auth: CodexAuthConfig = field(default_factory=CodexAuthConfig)
     principal: PrincipalConfig = field(default_factory=PrincipalConfig)
     accountabilities: AccountabilitiesConfig = field(default_factory=AccountabilitiesConfig)
+    entities: EntitiesConfig = field(default_factory=EntitiesConfig)
+    inter_agent_protocol: InterAgentProtocolConfig = field(
+        default_factory=InterAgentProtocolConfig
+    )
+    adaptive_discovery: AdaptiveDiscoveryConfig = field(
+        default_factory=AdaptiveDiscoveryConfig
+    )
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -493,6 +524,9 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "codex_auth",
         "principal",
         "accountabilities",
+        "entities",
+        "inter_agent_protocol",
+        "adaptive_discovery",
     }
     for key in data:
         if key not in allowed_top:
@@ -975,6 +1009,84 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                         "authority_channel is 'email'"
                     )
 
+    entities_raw = data.get("entities")
+    if entities_raw is not None:
+        if not isinstance(entities_raw, dict):
+            errors.append("entities: must be a mapping")
+        else:
+            allowed_entities = {"enabled", "migrate_legacy_people"}
+            for key in entities_raw:
+                if key not in allowed_entities:
+                    errors.append(f"entities.{key}: unknown field")
+            for key in ("enabled", "migrate_legacy_people"):
+                value = entities_raw.get(key)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"entities.{key}: must be boolean")
+
+    inter_agent_raw = data.get("inter_agent_protocol")
+    if inter_agent_raw is not None:
+        if not isinstance(inter_agent_raw, dict):
+            errors.append("inter_agent_protocol: must be a mapping")
+        else:
+            allowed_inter_agent = {
+                "enabled",
+                "authority_map_path",
+                "require_self_declaration",
+            }
+            for key in inter_agent_raw:
+                if key not in allowed_inter_agent:
+                    errors.append(f"inter_agent_protocol.{key}: unknown field")
+            for key in ("enabled", "require_self_declaration"):
+                value = inter_agent_raw.get(key)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"inter_agent_protocol.{key}: must be boolean")
+            path_value = inter_agent_raw.get("authority_map_path")
+            if path_value is not None and (
+                not isinstance(path_value, str) or not path_value.strip()
+            ):
+                errors.append(
+                    "inter_agent_protocol.authority_map_path: must be a non-empty string"
+                )
+
+    adaptive_raw = data.get("adaptive_discovery")
+    if adaptive_raw is not None:
+        if not isinstance(adaptive_raw, dict):
+            errors.append("adaptive_discovery: must be a mapping")
+        else:
+            allowed_adaptive = {
+                "enabled",
+                "default_unknown_posture",
+                "high_stakes_escalation_channel",
+            }
+            for key in adaptive_raw:
+                if key not in allowed_adaptive:
+                    errors.append(f"adaptive_discovery.{key}: unknown field")
+            enabled_value = adaptive_raw.get("enabled")
+            if enabled_value is not None and not isinstance(enabled_value, bool):
+                errors.append("adaptive_discovery.enabled: must be boolean")
+            posture = adaptive_raw.get("default_unknown_posture")
+            if posture is not None:
+                if not isinstance(posture, str) or posture not in ADAPTIVE_DISCOVERY_UNKNOWN_POSTURES:
+                    supported = ", ".join(ADAPTIVE_DISCOVERY_UNKNOWN_POSTURES)
+                    errors.append(
+                        f"adaptive_discovery.default_unknown_posture: must be one of {supported}"
+                    )
+            channel = adaptive_raw.get("high_stakes_escalation_channel")
+            if channel is not None:
+                if not isinstance(channel, str) or not channel.strip():
+                    errors.append(
+                        "adaptive_discovery.high_stakes_escalation_channel: must be a non-empty string"
+                    )
+                elif channel != ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS and (
+                    _normalize_channel_key(channel) not in SUPPORTED_CHANNELS
+                ):
+                    supported = ", ".join(
+                        (ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS, *SUPPORTED_CHANNELS)
+                    )
+                    errors.append(
+                        f"adaptive_discovery.high_stakes_escalation_channel: must be one of {supported}"
+                    )
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1176,6 +1288,54 @@ def _load_accountabilities(data: dict[str, Any]) -> AccountabilitiesConfig:
     )
 
 
+def _load_entities(data: dict[str, Any]) -> EntitiesConfig:
+    raw = data.get("entities") if isinstance(data.get("entities"), dict) else {}
+    defaults = EntitiesConfig()
+    return EntitiesConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        migrate_legacy_people=bool(
+            raw.get("migrate_legacy_people", defaults.migrate_legacy_people)
+        ),
+    )
+
+
+def _load_inter_agent_protocol(data: dict[str, Any]) -> InterAgentProtocolConfig:
+    raw = (
+        data.get("inter_agent_protocol")
+        if isinstance(data.get("inter_agent_protocol"), dict)
+        else {}
+    )
+    defaults = InterAgentProtocolConfig()
+    return InterAgentProtocolConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        authority_map_path=str(
+            raw.get("authority_map_path") or defaults.authority_map_path
+        ),
+        require_self_declaration=bool(
+            raw.get("require_self_declaration", defaults.require_self_declaration)
+        ),
+    )
+
+
+def _load_adaptive_discovery(data: dict[str, Any]) -> AdaptiveDiscoveryConfig:
+    raw = (
+        data.get("adaptive_discovery")
+        if isinstance(data.get("adaptive_discovery"), dict)
+        else {}
+    )
+    defaults = AdaptiveDiscoveryConfig()
+    return AdaptiveDiscoveryConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        default_unknown_posture=str(
+            raw.get("default_unknown_posture") or defaults.default_unknown_posture
+        ),
+        high_stakes_escalation_channel=str(
+            raw.get("high_stakes_escalation_channel")
+            or defaults.high_stakes_escalation_channel
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1288,6 +1448,9 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         codex_auth=_load_codex_auth(data),
         principal=_load_principal(data),
         accountabilities=_load_accountabilities(data),
+        entities=_load_entities(data),
+        inter_agent_protocol=_load_inter_agent_protocol(data),
+        adaptive_discovery=_load_adaptive_discovery(data),
     )
 
 

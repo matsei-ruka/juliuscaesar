@@ -21,7 +21,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
-from memory.scaffolding import scaffold_accountabilities  # noqa: E402
+from memory.scaffolding import (  # noqa: E402
+    scaffold_accountabilities,
+    scaffold_adaptive_discovery,
+    scaffold_entities,
+    scaffold_inter_agent,
+)
 
 
 class ScaffoldAccountabilitiesTests(unittest.TestCase):
@@ -122,6 +127,215 @@ class ScaffoldCLAUDEPatchTests(unittest.TestCase):
 
             self.assertEqual(claude_md.read_text(encoding="utf-8"), original)
             self.assertNotIn("CLAUDE.md", buf.getvalue())
+
+
+class ScaffoldEntitiesTests(unittest.TestCase):
+    def _scaffold(self, instance: Path, *, migrate_people: bool = False) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scaffold_entities(instance, migrate_people=migrate_people)
+        return buf.getvalue()
+
+    def test_scaffold_copies_three_templates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._scaffold(instance)
+            entities_dir = instance / "memory" / "L2" / "entities"
+            for name in ("<slug>.md.template", "_README.md", "_categories.md"):
+                self.assertTrue(
+                    (entities_dir / name).exists(),
+                    f"missing {entities_dir / name}",
+                )
+
+    def test_scaffold_idempotent_skips_existing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._scaffold(instance)
+            readme = instance / "memory" / "L2" / "entities" / "_README.md"
+            readme.write_text("CUSTOM\n", encoding="utf-8")
+            output = self._scaffold(instance)
+            self.assertEqual(readme.read_text(encoding="utf-8"), "CUSTOM\n")
+            self.assertIn("[skip]", output)
+
+    def test_scaffold_no_migration_leaves_people_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            people = instance / "memory" / "L2" / "people"
+            people.mkdir(parents=True)
+            (people / "alice.md").write_text(
+                "---\nslug: people/alice\n---\nAlice\n", encoding="utf-8"
+            )
+            self._scaffold(instance, migrate_people=False)
+            self.assertTrue((people / "alice.md").exists())
+
+    def test_migration_moves_people_files_to_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            people = instance / "memory" / "L2" / "people"
+            people.mkdir(parents=True)
+            (people / "alice.md").write_text(
+                "---\nslug: people/alice\n---\nAlice\n", encoding="utf-8"
+            )
+            (people / "bob.md").write_text(
+                "---\nslug: people/bob\n---\nBob\n", encoding="utf-8"
+            )
+            self._scaffold(instance, migrate_people=True)
+
+            self.assertFalse((people / "alice.md").exists())
+            self.assertFalse((people / "bob.md").exists())
+
+            archives = list((instance / "memory" / "L2" / "_archive").glob(
+                "people-pre-*"
+            ))
+            self.assertEqual(len(archives), 1)
+            archive_dir = archives[0]
+            self.assertTrue((archive_dir / "alice.md").exists())
+            self.assertTrue((archive_dir / "bob.md").exists())
+            self.assertTrue((archive_dir / "_README.md").exists())
+            readme = (archive_dir / "_README.md").read_text(encoding="utf-8")
+            self.assertIn("alice.md", readme)
+            self.assertIn("bob.md", readme)
+
+    def test_migration_generates_stub_with_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            people = instance / "memory" / "L2" / "people"
+            people.mkdir(parents=True)
+            (people / "carol.md").write_text(
+                "---\nslug: people/carol\n---\nCarol\n", encoding="utf-8"
+            )
+            self._scaffold(instance, migrate_people=True)
+
+            stub = instance / "memory" / "L2" / "entities" / "carol.md"
+            self.assertTrue(stub.exists(), f"missing {stub}")
+            body = stub.read_text(encoding="utf-8")
+            self.assertIn("slug: carol", body)
+            self.assertIn("entity_category: unknown", body)
+            self.assertIn("knowledge_state: inferred", body)
+            self.assertIn("classification_confidence: low", body)
+
+    def test_migration_is_one_shot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            people = instance / "memory" / "L2" / "people"
+            people.mkdir(parents=True)
+            (people / "dave.md").write_text(
+                "---\nslug: people/dave\n---\nDave\n", encoding="utf-8"
+            )
+            self._scaffold(instance, migrate_people=True)
+
+            # Re-create a new people file; second migration call must skip.
+            people.mkdir(parents=True, exist_ok=True)
+            (people / "eve.md").write_text(
+                "---\nslug: people/eve\n---\nEve\n", encoding="utf-8"
+            )
+            output = self._scaffold(instance, migrate_people=True)
+            self.assertIn("[skip] migration already ran", output)
+            self.assertTrue((people / "eve.md").exists())  # untouched
+            self.assertFalse(
+                (instance / "memory" / "L2" / "entities" / "eve.md").exists()
+            )
+
+
+
+class ScaffoldInterAgentTests(unittest.TestCase):
+    def _scaffold(self, instance: Path) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scaffold_inter_agent(instance)
+        return buf.getvalue()
+
+    def _instance_with_claude(self, tmp: str) -> Path:
+        instance = Path(tmp)
+        (instance / "CLAUDE.md").write_text(
+            "@memory/L1/IDENTITY.md\n"
+            "@memory/L1/accountabilities-manifest.md\n"
+            "@memory/L1/HOT.md\n",
+            encoding="utf-8",
+        )
+        return instance
+
+    def test_scaffold_copies_authority_map_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            map_path = instance / "memory" / "L1" / "authority-map.md"
+            self.assertTrue(map_path.exists(), f"missing {map_path}")
+            self.assertIn(
+                "Inter-Agent Authority Map",
+                map_path.read_text(encoding="utf-8"),
+            )
+
+    def test_scaffold_idempotent_authority_map(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            map_path = instance / "memory" / "L1" / "authority-map.md"
+            map_path.write_text("CUSTOM\n", encoding="utf-8")
+            output = self._scaffold(instance)
+            self.assertEqual(map_path.read_text(encoding="utf-8"), "CUSTOM\n")
+            self.assertIn("[skip]", output)
+
+    def test_scaffold_patches_claude_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            text = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            lines = [line for line in text.splitlines() if line.startswith("@memory/L1/")]
+            self.assertIn("@memory/L1/authority-map.md", lines)
+            am_idx = lines.index("@memory/L1/authority-map.md")
+            hot_idx = lines.index("@memory/L1/HOT.md")
+            self.assertLess(am_idx, hot_idx)
+            acc_idx = lines.index("@memory/L1/accountabilities-manifest.md")
+            self.assertLess(acc_idx, am_idx)
+
+    def test_scaffold_patch_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            first = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            output = self._scaffold(instance)
+            second = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertEqual(first, second)
+            self.assertIn("[skip] CLAUDE.md already imports", output)
+
+    def test_scaffold_prints_rules_snippet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            output = self._scaffold(instance)
+            self.assertIn("INTER-AGENT PROTOCOL", output)
+            self.assertIn("Authority symmetry", output)
+            self.assertIn("RULES.md", output)
+
+
+
+class ScaffoldAdaptiveDiscoveryTests(unittest.TestCase):
+    def _scaffold(self, instance: Path) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scaffold_adaptive_discovery(instance)
+        return buf.getvalue()
+
+    def test_scaffold_prints_snippet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = self._scaffold(Path(tmp))
+            self.assertIn("AUTHORITY AWARENESS AND ADAPTIVE DISCOVERY", output)
+            self.assertIn("declared", output)
+            self.assertIn("inferred", output)
+            self.assertIn("RULES.md", output)
+
+    def test_scaffold_writes_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._scaffold(instance)
+            self.assertEqual(list(instance.iterdir()), [])
+
+    def test_scaffold_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            first = self._scaffold(instance)
+            second = self._scaffold(instance)
+            self.assertEqual(first, second)
 
 
 if __name__ == "__main__":
