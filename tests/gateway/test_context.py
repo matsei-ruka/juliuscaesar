@@ -321,6 +321,98 @@ class EntitiesBlockTests(unittest.TestCase):
             self.assertNotIn("Entities directory:", text)
 
 
+class AuthorityMapBlockTests(unittest.TestCase):
+    def setUp(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def tearDown(self):
+        context.clear_cache()
+        gateway_config.clear_config_cache()
+
+    def _write_gateway_yaml(self, instance: Path, body: str) -> None:
+        ops = instance / "ops"
+        ops.mkdir(parents=True, exist_ok=True)
+        (ops / "gateway.yaml").write_text(body, encoding="utf-8")
+        gateway_config.clear_config_cache()
+
+    def _write_authority_map(self, instance: Path, body: str) -> None:
+        l1 = instance / "memory" / "L1"
+        l1.mkdir(parents=True, exist_ok=True)
+        (l1 / "authority-map.md").write_text(body, encoding="utf-8")
+
+    def test_authority_map_block_empty_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "inter_agent_protocol:\n  enabled: false\n"
+            )
+            self.assertEqual(context.render_authority_map_block(instance), "")
+
+    def test_authority_map_block_empty_when_config_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(context.render_authority_map_block(Path(tmp)), "")
+
+    def test_authority_map_block_empty_when_file_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "inter_agent_protocol:\n  enabled: true\n"
+            )
+            self.assertEqual(context.render_authority_map_block(instance), "")
+
+    def test_authority_map_block_renders_content_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "inter_agent_protocol:\n  enabled: true\n"
+            )
+            self._write_authority_map(
+                instance,
+                "---\nslug: authority-map\n---\n\n## Agents\n\n| agent_id | channel |\n",
+            )
+            block = context.render_authority_map_block(instance)
+            self.assertTrue(block.startswith("# Inter-agent authority map\n"))
+            self.assertIn("## Agents", block)
+
+    def test_preamble_includes_authority_map_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "inter_agent_protocol:\n  enabled: true\n"
+            )
+            self._write_authority_map(instance, "## Agents\n\n| agent_id | channel |\n")
+            text = context.render_preamble(instance)
+            self.assertIn("# Inter-agent authority map", text)
+
+    def test_preamble_omits_authority_map_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "inter_agent_protocol:\n  enabled: false\n"
+            )
+            self._write_authority_map(instance, "## Agents\n\n| agent_id | channel |\n")
+            text = context.render_preamble(instance)
+            self.assertNotIn("Inter-agent authority map", text)
+
+    def test_authority_map_file_change_invalidates_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance, "inter_agent_protocol:\n  enabled: true\n"
+            )
+            first = context.render_preamble(instance)
+            self.assertNotIn("Inter-agent authority map", first)
+
+            self._write_authority_map(instance, "## Agents\n\n| agent_id | channel |\n")
+            map_path = instance / "memory" / "L1" / "authority-map.md"
+            future = time.time() + 5
+            os.utime(map_path, (future, future))
+
+            second = context.render_preamble(instance)
+            self.assertIn("Inter-agent authority map", second)
+
+
 class CacheInvalidationTests(unittest.TestCase):
     def setUp(self):
         context.clear_cache()

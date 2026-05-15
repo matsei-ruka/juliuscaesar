@@ -35,6 +35,7 @@ L1_FILES = (
     "CHATS.md",
 )
 ACCOUNTABILITIES_MANIFEST_FILE = "accountabilities-manifest.md"
+AUTHORITY_MAP_FILE = "authority-map.md"
 MAX_BYTES_PER_FILE = 8000
 _VOICE_ANCHOR_LINE_RE = re.compile(r"^>\s*(.+)$", re.MULTILINE)
 _SECTION_RE_TEMPLATE = r"^#{{1,6}}\s+{heading}\s*$"
@@ -100,6 +101,9 @@ def _fingerprint(instance_dir: Path) -> tuple[tuple[str, float], ...]:
     paths = [(name, l1_dir / name) for name in L1_FILES]
     paths.append(
         (ACCOUNTABILITIES_MANIFEST_FILE, l1_dir / ACCOUNTABILITIES_MANIFEST_FILE)
+    )
+    paths.append(
+        (AUTHORITY_MAP_FILE, l1_dir / AUTHORITY_MAP_FILE)
     )
     paths.append(("ops/gateway.yaml", instance_dir / "ops" / "gateway.yaml"))
     fingerprint: list[tuple[str, float]] = []
@@ -197,6 +201,33 @@ def render_entities_block(instance_dir: Path) -> str:
     )
 
 
+def render_authority_map_block(instance_dir: Path) -> str:
+    """Return Authority Map content when inter-agent protocol is enabled.
+
+    Per docs/specs/inter-agent-protocol.md §Phase 4: injects the full
+    frontmatter + body of memory/L1/authority-map.md under a fixed heading.
+    Returns "" when disabled, file absent, or config cannot be loaded.
+    The preamble cache fingerprint includes authority-map.md mtime so
+    edits surface on the next event without restart.
+    """
+
+    cfg = _load_gateway_config(instance_dir)
+    if cfg is None:
+        return ""
+    iap = getattr(cfg, "inter_agent_protocol", None)
+    if iap is None or not getattr(iap, "enabled", False):
+        return ""
+    map_rel = getattr(iap, "authority_map_path", AUTHORITY_MAP_FILE)
+    map_path = instance_dir / map_rel
+    if not map_path.exists():
+        return ""
+    try:
+        body = map_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return f"# Inter-agent authority map\n{body[:MAX_BYTES_PER_FILE]}"
+
+
 def _style_path(instance_dir: Path) -> Path:
     return _l1_dir(instance_dir) / "STYLE.md"
 
@@ -276,6 +307,9 @@ def render_preamble(instance_dir: Path) -> str:
             entities_block = render_entities_block(instance_dir)
             if entities_block:
                 sections.append(entities_block)
+            authority_map_block = render_authority_map_block(instance_dir)
+            if authority_map_block:
+                sections.append(authority_map_block)
     memory_block = "\n\n".join(sections) if sections else "(No L1 memory files found.)"
     parts = [
         _ROLE_PREAMBLE,

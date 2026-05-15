@@ -13,6 +13,7 @@ from pathlib import Path
 from ..context import (
     render_accountabilities_manifest_block,
     render_authority_block,
+    render_authority_map_block,
     render_clock_inline,
     render_entities_block,
     render_voice_anchor,
@@ -42,6 +43,7 @@ class ClaudeBrain(Brain):
         manifest_block = render_accountabilities_manifest_block(self.instance_dir)
         authority_block = render_authority_block(self.instance_dir)
         entities_block = render_entities_block(self.instance_dir)
+        authority_map_block = render_authority_map_block(self.instance_dir)
         body = event.content or ""
         parts = [clock_line]
         if anchor:
@@ -50,6 +52,8 @@ class ClaudeBrain(Brain):
             parts.append(manifest_block)
         if entities_block:
             parts.append(entities_block)
+        if authority_map_block:
+            parts.append(authority_map_block)
         if authority_block:
             parts.append(authority_block)
         if body:
