@@ -53,6 +53,7 @@ from memory.db import _slug_from_path  # type: ignore  # noqa: E402
 from memory.scaffolding import (  # type: ignore  # noqa: E402
     scaffold_accountabilities,
     scaffold_entities,
+    scaffold_inter_agent,
 )
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
@@ -404,6 +405,11 @@ def cmd_scaffold_entities(args: argparse.Namespace, instance: Path) -> int:
     return 0
 
 
+def cmd_scaffold_inter_agent(_args: argparse.Namespace, instance: Path) -> int:
+    scaffold_inter_agent(instance)
+    return 0
+
+
 # --- main --------------------------------------------------------------------
 
 
@@ -476,6 +482,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Archive memory/L2/people/ and generate entity stubs (one-shot).",
     )
     psc_ent.set_defaults(func=cmd_scaffold_entities)
+
+    psc_ia = psc_sub.add_parser(
+        "inter-agent",
+        help="Copy authority-map template into memory/L1 + patch CLAUDE.md import",
+    )
+    psc_ia.set_defaults(func=cmd_scaffold_inter_agent)
 
     return p
 

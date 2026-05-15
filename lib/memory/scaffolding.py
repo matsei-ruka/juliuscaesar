@@ -3,6 +3,7 @@
 Supports the scaffolding flows described in:
 - docs/specs/accountabilities.md §Phase 3 (`scaffold_accountabilities`)
 - docs/specs/relational-awareness-layer.md §Phase 3 (`scaffold_entities`)
+- docs/specs/inter-agent-protocol.md §Phase 3 (`scaffold_inter_agent`)
 
 Each helper copies template files into the operator's instance dir (where
 applicable) and prints the constitutional snippet to stdout for manual paste
@@ -238,3 +239,90 @@ def scaffold_entities(
     readme_path = archive_dir / "_README.md"
     readme_path.write_text(_archive_readme(today, migrated), encoding="utf-8")
     print(f"[write] {readme_path.relative_to(instance_dir)}")
+
+
+def _patch_claude_md(instance_dir: Path, import_line: str, anchor: str) -> None:
+    """Idempotently insert ``import_line`` above ``anchor`` in CLAUDE.md.
+
+    If CLAUDE.md is absent, prints a warning and returns. If the import line
+    is already present, prints `[skip]` and returns. If the anchor is missing,
+    appends the import to the imports block (after the last `@memory/L1/...`
+    line) and prints `[append]`.
+    """
+    claude_md = instance_dir / "CLAUDE.md"
+    if not claude_md.exists():
+        print(f"[warn] {claude_md} not found — skipping CLAUDE.md patch")
+        return
+
+    text = claude_md.read_text(encoding="utf-8")
+    if import_line in text:
+        print(f"[skip] CLAUDE.md already imports {import_line.strip()}")
+        return
+
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    inserted = False
+    for line in lines:
+        if not inserted and line.strip() == anchor.strip():
+            out.append(import_line if import_line.endswith("\n") else import_line + "\n")
+            inserted = True
+        out.append(line)
+
+    if not inserted:
+        last_import_idx = -1
+        for i, line in enumerate(lines):
+            if line.startswith("@memory/L1/"):
+                last_import_idx = i
+        if last_import_idx >= 0:
+            insert_at = last_import_idx + 1
+            patched = (
+                lines[:insert_at]
+                + [import_line if import_line.endswith("\n") else import_line + "\n"]
+                + lines[insert_at:]
+            )
+            claude_md.write_text("".join(patched), encoding="utf-8")
+            print(f"[append] CLAUDE.md ← {import_line.strip()}")
+            return
+        print("[warn] CLAUDE.md has no @memory/L1/* imports — cannot patch")
+        return
+
+    claude_md.write_text("".join(out), encoding="utf-8")
+    print(f"[patch] CLAUDE.md ← {import_line.strip()}")
+
+
+def scaffold_inter_agent(
+    instance_dir: Path,
+    templates_dir: Path | None = None,
+) -> None:
+    """Scaffold the inter-agent protocol into instance_dir.
+
+    Copies the authority-map template into ``memory/L1/``, patches CLAUDE.md to
+    import it between accountabilities-manifest and HOT, and prints the
+    constitutional snippet for manual paste into ``memory/L1/RULES.md``.
+
+    Idempotent: existing files / existing CLAUDE.md import lines are skipped.
+    """
+    templates = templates_dir if templates_dir is not None else _DEFAULT_TEMPLATES_DIR
+    map_src = templates / _AUTHORITY_MAP_SRC
+    snippet_src = templates / _INTER_AGENT_SNIPPET_SRC
+    for src in (map_src, snippet_src):
+        if not src.exists():
+            raise FileNotFoundError(f"template missing: {src}")
+
+    _copy_if_missing(map_src, instance_dir / _AUTHORITY_MAP_DST)
+
+    _patch_claude_md(
+        instance_dir,
+        import_line="@memory/L1/authority-map.md\n",
+        anchor="@memory/L1/HOT.md",
+    )
+
+    print()
+    print("--- BEGIN RULES.md snippet ---")
+    print(snippet_src.read_text(encoding="utf-8"), end="")
+    print("--- END RULES.md snippet ---")
+    print()
+    print(
+        "Paste the inter-agent protocol snippet into your memory/L1/RULES.md "
+        "under your next free §-number."
+    )

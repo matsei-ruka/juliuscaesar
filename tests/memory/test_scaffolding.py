@@ -24,6 +24,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 from memory.scaffolding import (  # noqa: E402
     scaffold_accountabilities,
     scaffold_entities,
+    scaffold_inter_agent,
 )
 
 
@@ -233,6 +234,77 @@ class ScaffoldEntitiesTests(unittest.TestCase):
             self.assertFalse(
                 (instance / "memory" / "L2" / "entities" / "eve.md").exists()
             )
+
+
+
+class ScaffoldInterAgentTests(unittest.TestCase):
+    def _scaffold(self, instance: Path) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            scaffold_inter_agent(instance)
+        return buf.getvalue()
+
+    def _instance_with_claude(self, tmp: str) -> Path:
+        instance = Path(tmp)
+        (instance / "CLAUDE.md").write_text(
+            "@memory/L1/IDENTITY.md\n"
+            "@memory/L1/accountabilities-manifest.md\n"
+            "@memory/L1/HOT.md\n",
+            encoding="utf-8",
+        )
+        return instance
+
+    def test_scaffold_copies_authority_map_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            map_path = instance / "memory" / "L1" / "authority-map.md"
+            self.assertTrue(map_path.exists(), f"missing {map_path}")
+            self.assertIn(
+                "Inter-Agent Authority Map",
+                map_path.read_text(encoding="utf-8"),
+            )
+
+    def test_scaffold_idempotent_authority_map(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            map_path = instance / "memory" / "L1" / "authority-map.md"
+            map_path.write_text("CUSTOM\n", encoding="utf-8")
+            output = self._scaffold(instance)
+            self.assertEqual(map_path.read_text(encoding="utf-8"), "CUSTOM\n")
+            self.assertIn("[skip]", output)
+
+    def test_scaffold_patches_claude_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            text = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            lines = [line for line in text.splitlines() if line.startswith("@memory/L1/")]
+            self.assertIn("@memory/L1/authority-map.md", lines)
+            am_idx = lines.index("@memory/L1/authority-map.md")
+            hot_idx = lines.index("@memory/L1/HOT.md")
+            self.assertLess(am_idx, hot_idx)
+            acc_idx = lines.index("@memory/L1/accountabilities-manifest.md")
+            self.assertLess(acc_idx, am_idx)
+
+    def test_scaffold_patch_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            self._scaffold(instance)
+            first = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            output = self._scaffold(instance)
+            second = (instance / "CLAUDE.md").read_text(encoding="utf-8")
+            self.assertEqual(first, second)
+            self.assertIn("[skip] CLAUDE.md already imports", output)
+
+    def test_scaffold_prints_rules_snippet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance_with_claude(tmp)
+            output = self._scaffold(instance)
+            self.assertIn("INTER-AGENT PROTOCOL", output)
+            self.assertIn("Authority symmetry", output)
+            self.assertIn("RULES.md", output)
 
 
 if __name__ == "__main__":
