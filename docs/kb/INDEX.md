@@ -44,6 +44,7 @@
 | Cron channel | subsystem/channel-cron.md | Scheduled task → gateway event with pinned brain |
 | Commitments and re-engagement | subsystem/commitments-and-reengagement.md | Deferred action YAML engine plus silence-aware re-engagement producer |
 | Dream pipeline | subsystem/dream-pipeline.md | Offline reflection cycle, artifact emitters, risk gates, reports |
+| Accountabilities system | subsystem/accountabilities.md | Opt-in governance layer: manifest, L2 detail files, audit log, jc-doctor checks |
 
 ### contract
 
