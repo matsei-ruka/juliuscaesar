@@ -26,10 +26,13 @@ This file declares the peer-agent ecosystem this instance operates inside. The f
 <!-- `agent_id` is kebab-case and stable. `instance_id` is the JC instance directory name, or `external`. -->
 <!-- `accountabilities_pointer` is a relative path (or `TBD` until the peer ships a manifest). -->
 <!-- `channel` identifies the primary inbound channel for that peer (e.g. `telegram:@<bot-handle>`). -->
+<!--
+Example row (do not uncomment — copy a filled version into the table below):
+| mario-leone | Mario Leone | COO | filippo-perta | memory/L1/accountabilities-manifest.md | telegram:@mario_leone_bot | mario_leone_coo |
+-->
 
 | agent_id     | display_name   | role                  | human_authority   | accountabilities_pointer                  | channel                          | instance_id     |
 |--------------|----------------|-----------------------|-------------------|-------------------------------------------|----------------------------------|-----------------|
-| <!-- example: mario-leone | Mario Leone | COO | filippo-perta | memory/L1/accountabilities-manifest.md | telegram:@mario_leone_bot | mario_leone_coo --> |
 |              |                |                       |                   |                                           |                                  |                 |
 
 ## Self

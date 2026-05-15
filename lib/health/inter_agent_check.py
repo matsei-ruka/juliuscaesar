@@ -156,7 +156,14 @@ def _parse_agents_table(text: str) -> tuple[list[str], list[dict[str, str]], str
         cells = [c.strip() for c in line.strip("|").split("|")]
         if not any(cells):
             continue
-        if all(c.startswith("<!--") or not c for c in cells):
+        # Skip rows whose entire content (between the outer pipes) is one HTML
+        # comment — handles single-cell `<!-- ... -->` rows as well as comments
+        # whose body contains `|` so it splits across cells.
+        inner = line.strip("|").strip()
+        joined = "".join(cells).strip()
+        if (inner.startswith("<!--") and inner.endswith("-->")) or (
+            joined.startswith("<!--") and joined.endswith("-->")
+        ):
             continue
         row = {
             header_cells[i]: cells[i] if i < len(cells) else ""
@@ -267,6 +274,26 @@ def _check_authority_map(
     return items
 
 
+def _extract_section_body(text: str, heading_substrings: tuple[str, ...]) -> str | None:
+    """Return the body of the first `##` heading whose text contains any of
+    `heading_substrings` (case-insensitive), up to the next `##` heading.
+    Returns None when no matching heading is found.
+    """
+    in_section = False
+    body: list[str] = []
+    for line in text.splitlines():
+        if re.match(r"^##\s", line):
+            if in_section:
+                break
+            lower = line.lower()
+            if any(s in lower for s in heading_substrings):
+                in_section = True
+            continue
+        if in_section:
+            body.append(line)
+    return "\n".join(body) if in_section else None
+
+
 def _check_rules_section(instance_dir: Path) -> HealthItem:
     path = _rules_path(instance_dir)
     if not path.exists():
@@ -275,12 +302,13 @@ def _check_rules_section(instance_dir: Path) -> HealthItem:
         text = path.read_text(encoding="utf-8", errors="replace").lower()
     except OSError as exc:
         return HealthItem("warn", f"RULES.md unreadable: {exc}")
-    if "inter-agent protocol" not in text:
+    section = _extract_section_body(text, ("inter-agent protocol",))
+    if section is None:
         return HealthItem(
             "warn",
             "RULES.md missing the Inter-Agent Protocol constitutional section",
         )
-    hits = sum(1 for kw in PRINCIPLE_KEYWORDS if kw in text)
+    hits = sum(1 for kw in PRINCIPLE_KEYWORDS if kw in section)
     if hits < PRINCIPLE_MIN_HITS:
         return HealthItem(
             "warn",

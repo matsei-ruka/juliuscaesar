@@ -86,6 +86,26 @@ def _parse_frontmatter(text: str) -> dict | None:
     return data
 
 
+def _extract_section_body(text: str, heading_substrings: tuple[str, ...]) -> str | None:
+    """Return the body of the first `##` heading whose text contains any of
+    `heading_substrings` (case-insensitive), up to the next `##` heading.
+    Returns None when no matching heading is found.
+    """
+    in_section = False
+    body: list[str] = []
+    for line in text.splitlines():
+        if re.match(r"^##\s", line):
+            if in_section:
+                break
+            lower = line.lower()
+            if any(s in lower for s in heading_substrings):
+                in_section = True
+            continue
+        if in_section:
+            body.append(line)
+    return "\n".join(body) if in_section else None
+
+
 def _check_rules_section(instance_dir: Path) -> HealthItem:
     path = _rules_path(instance_dir)
     if not path.exists():
@@ -94,16 +114,16 @@ def _check_rules_section(instance_dir: Path) -> HealthItem:
         text = path.read_text(encoding="utf-8", errors="replace").lower()
     except OSError as exc:
         return HealthItem("warn", f"RULES.md unreadable: {exc}")
-    has_section = (
-        "authority awareness" in text or "adaptive discovery" in text
+    section = _extract_section_body(
+        text, ("authority awareness", "adaptive discovery")
     )
-    if not has_section:
+    if section is None:
         return HealthItem(
             "warn",
             "RULES.md missing the Authority Awareness / Adaptive Discovery "
             "constitutional section",
         )
-    hits = sum(1 for kw in KEYWORD_PHRASES if kw in text)
+    hits = sum(1 for kw in KEYWORD_PHRASES if kw in section)
     if hits < KEYWORD_MIN_HITS:
         return HealthItem(
             "warn",

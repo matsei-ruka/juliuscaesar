@@ -1324,15 +1324,21 @@ def _load_adaptive_discovery(data: dict[str, Any]) -> AdaptiveDiscoveryConfig:
         else {}
     )
     defaults = AdaptiveDiscoveryConfig()
+    raw_channel = str(
+        raw.get("high_stakes_escalation_channel")
+        or defaults.high_stakes_escalation_channel
+    )
+    # Normalize channel slugs (e.g. `jc_events` → `jc-events`) so consumers can
+    # compare against SUPPORTED_CHANNELS directly. The `authority` alias is
+    # preserved verbatim since it is not a channel slug.
+    if raw_channel != ADAPTIVE_DISCOVERY_AUTHORITY_ALIAS:
+        raw_channel = _normalize_channel_key(raw_channel)
     return AdaptiveDiscoveryConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         default_unknown_posture=str(
             raw.get("default_unknown_posture") or defaults.default_unknown_posture
         ),
-        high_stakes_escalation_channel=str(
-            raw.get("high_stakes_escalation_channel")
-            or defaults.high_stakes_escalation_channel
-        ),
+        high_stakes_escalation_channel=raw_channel,
     )
 
 
