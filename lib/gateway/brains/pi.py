@@ -64,10 +64,15 @@ class PiBrain(Brain):
 
     @property
     def _no_tools(self) -> bool:
-        """Read no_tools from brain override config. Default: True."""
+        """Read no_tools from brain override config. Default: False (tools on).
+
+        Mirrors claude/codex parity: pi is an agentic CLI; gateway brain defaults
+        to tools-enabled. Set ``brains.pi.no_tools: true`` in gateway.yaml to
+        disable for a pure chat-only persona.
+        """
         raw = getattr(self.override, "no_tools", None)
         if raw is None:
-            return True
+            return False
         return bool(raw)
 
     @property
@@ -115,33 +120,10 @@ class PiBrain(Brain):
             args.extend(["--thinking", thinking])
         return tuple(args)
 
-    def prompt_for_event(self, event: Event) -> str:
-        """Build full prompt with the gateway output contract appended.
-
-        Delegates to Brain.prompt_for_event() for the standard preamble
-        (L1 memory, clock, metadata block, voice instructions, known
-        chats), then appends the output contract so pi emits structured
-        JSON the gateway can parse.
-        """
-        base = super().prompt_for_event(event)
-        contract = """
-
-[GATEWAY OUTPUT CONTRACT]
-
-Your final stdout MUST be a single JSON object on a single line (no code
-fences, no prose before or after) with exactly these fields:
-
-  {"push_message_sent": <bool>, "message": <string>}
-
-Rules:
-- push_message_sent=true if you delivered output yourself via PushNotification;
-  'message' is then an audit log. The framework will NOT re-deliver.
-- push_message_sent=false if the framework should deliver 'message' to the
-  channel.
-- 'message' is always required. Empty string only for no-op silent runs.
-- Emit ONLY the JSON object as your final output.
-"""
-        return base + contract
+    # Note: gateway output contract is injected by the adapter via
+    # --append-system-prompt (mirrors claude.sh). No prompt_for_event override
+    # needed; the base class preamble (L1 memory, clock, metadata, voice,
+    # chats) is sufficient.
 
     # ------------------------------------------------------------------
     # Session capture (matches CodexBrain pre/post snapshot pattern)
