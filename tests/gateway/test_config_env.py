@@ -225,5 +225,75 @@ class AccountabilitiesSchemaTests(unittest.TestCase):
             self.assertIn("authority_channel", str(ctx.exception))
 
 
+class EntitiesSchemaTests(unittest.TestCase):
+    """Covers docs/specs/relational-awareness-layer.md §Phase 2 — Config schema."""
+
+    def test_entities_block_missing_defaults_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "default_brain: claude\n")
+            cfg = load_config(instance)
+            self.assertFalse(cfg.entities.enabled)
+            self.assertFalse(cfg.entities.migrate_legacy_people)
+
+    def test_entities_enabled_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: true\n"
+                "  migrate_legacy_people: true\n",
+            )
+            cfg = load_config(instance)
+            self.assertTrue(cfg.entities.enabled)
+            self.assertTrue(cfg.entities.migrate_legacy_people)
+
+    def test_entities_disabled_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: false\n",
+            )
+            cfg = load_config(instance)
+            self.assertFalse(cfg.entities.enabled)
+            self.assertFalse(cfg.entities.migrate_legacy_people)
+
+    def test_entities_unknown_key_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: true\n"
+                "  bogus_field: value\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("entities.bogus_field", str(ctx.exception))
+
+    def test_entities_non_mapping_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(instance, "entities: not-a-mapping\n")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("entities", str(ctx.exception))
+
+    def test_entities_non_boolean_enabled_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "entities:\n"
+                "  enabled: maybe\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("entities.enabled", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

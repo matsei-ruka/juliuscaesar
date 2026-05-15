@@ -145,6 +145,12 @@ class AccountabilitiesConfig:
 
 
 @dataclass(frozen=True)
+class EntitiesConfig:
+    enabled: bool = False
+    migrate_legacy_people: bool = False
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
@@ -162,6 +168,7 @@ class GatewayConfig:
     codex_auth: CodexAuthConfig = field(default_factory=CodexAuthConfig)
     principal: PrincipalConfig = field(default_factory=PrincipalConfig)
     accountabilities: AccountabilitiesConfig = field(default_factory=AccountabilitiesConfig)
+    entities: EntitiesConfig = field(default_factory=EntitiesConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -493,6 +500,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "codex_auth",
         "principal",
         "accountabilities",
+        "entities",
     }
     for key in data:
         if key not in allowed_top:
@@ -975,6 +983,20 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                         "authority_channel is 'email'"
                     )
 
+    entities_raw = data.get("entities")
+    if entities_raw is not None:
+        if not isinstance(entities_raw, dict):
+            errors.append("entities: must be a mapping")
+        else:
+            allowed_entities = {"enabled", "migrate_legacy_people"}
+            for key in entities_raw:
+                if key not in allowed_entities:
+                    errors.append(f"entities.{key}: unknown field")
+            for key in ("enabled", "migrate_legacy_people"):
+                value = entities_raw.get(key)
+                if value is not None and not isinstance(value, bool):
+                    errors.append(f"entities.{key}: must be boolean")
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1176,6 +1198,17 @@ def _load_accountabilities(data: dict[str, Any]) -> AccountabilitiesConfig:
     )
 
 
+def _load_entities(data: dict[str, Any]) -> EntitiesConfig:
+    raw = data.get("entities") if isinstance(data.get("entities"), dict) else {}
+    defaults = EntitiesConfig()
+    return EntitiesConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        migrate_legacy_people=bool(
+            raw.get("migrate_legacy_people", defaults.migrate_legacy_people)
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1288,6 +1321,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         codex_auth=_load_codex_auth(data),
         principal=_load_principal(data),
         accountabilities=_load_accountabilities(data),
+        entities=_load_entities(data),
     )
 
 
