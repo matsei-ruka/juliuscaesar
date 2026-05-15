@@ -102,9 +102,22 @@ def _fingerprint(instance_dir: Path) -> tuple[tuple[str, float], ...]:
     paths.append(
         (ACCOUNTABILITIES_MANIFEST_FILE, l1_dir / ACCOUNTABILITIES_MANIFEST_FILE)
     )
-    paths.append(
-        (AUTHORITY_MAP_FILE, l1_dir / AUTHORITY_MAP_FILE)
+    # Authority map path is operator-configurable via
+    # inter_agent_protocol.authority_map_path; stat the configured location
+    # so edits to a non-default path still invalidate the cache.
+    cfg = _load_gateway_config(instance_dir)
+    map_rel = AUTHORITY_MAP_FILE
+    iap = getattr(cfg, "inter_agent_protocol", None) if cfg is not None else None
+    if iap is not None:
+        configured = getattr(iap, "authority_map_path", "") or ""
+        if configured:
+            map_rel = configured
+    map_path = (
+        instance_dir / map_rel
+        if "/" in map_rel or map_rel.startswith(".")
+        else l1_dir / map_rel
     )
+    paths.append((map_rel, map_path))
     paths.append(("ops/gateway.yaml", instance_dir / "ops" / "gateway.yaml"))
     fingerprint: list[tuple[str, float]] = []
     for name, path in paths:
@@ -256,7 +269,14 @@ def render_adaptive_discovery_block(instance_dir: Path) -> str:
         else:
             channel = "the human authority"
     else:
-        channel = raw_channel
+        # If the configured explicit channel exists but is disabled, fall back
+        # to a generic hint so the preamble does not mislead the model into
+        # trying to escalate over an unavailable channel.
+        ch_cfg = cfg.channels.get(raw_channel) if hasattr(cfg, "channels") else None
+        if ch_cfg is not None and not getattr(ch_cfg, "enabled", False):
+            channel = "the human authority"
+        else:
+            channel = raw_channel
 
     return (
         "# Adaptive discovery — live reminder\n"

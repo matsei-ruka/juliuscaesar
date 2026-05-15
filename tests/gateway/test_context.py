@@ -463,12 +463,33 @@ class AdaptiveDiscoveryBlockTests(unittest.TestCase):
             instance = _make_instance(tmp, {"IDENTITY.md": "id"})
             self._write_gateway_yaml(
                 instance,
+                "channels:\n"
+                "  telegram:\n"
+                "    enabled: true\n"
+                "    token_env: TELEGRAM_BOT_TOKEN\n"
                 "adaptive_discovery:\n"
                 "  enabled: true\n"
                 "  high_stakes_escalation_channel: telegram\n",
             )
             block = context.render_adaptive_discovery_block(instance)
             self.assertIn("escalate via telegram", block)
+
+    def test_adaptive_block_falls_back_when_explicit_channel_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp, {"IDENTITY.md": "id"})
+            self._write_gateway_yaml(
+                instance,
+                "channels:\n"
+                "  telegram:\n"
+                "    enabled: false\n"
+                "    token_env: TELEGRAM_BOT_TOKEN\n"
+                "adaptive_discovery:\n"
+                "  enabled: true\n"
+                "  high_stakes_escalation_channel: telegram\n",
+            )
+            block = context.render_adaptive_discovery_block(instance)
+            self.assertIn("escalate via the human authority", block)
+            self.assertNotIn("escalate via telegram", block)
 
     def test_adaptive_block_fallback_when_accountabilities_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
