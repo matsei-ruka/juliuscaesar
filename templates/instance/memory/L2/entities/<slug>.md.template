@@ -1,0 +1,47 @@
+<!-- Copy this file to <entity-slug>.md and fill in each section -->
+---
+slug: <entity-slug>                       # kebab-case; matches filename without `.md`
+entity_id: <entity-slug>                  # same as slug; reserved for future ID-vs-slug split
+entity_type: human                        # human | agent | organization | collective
+entity_category: unknown                  # internal_authority | internal_peer | external_client | external_vendor | external_occasional | unknown
+display_name: <full name as the operator would say it aloud>
+human_authority: <slug of the internal_authority that governs this entity, or "" if N/A>
+accountabilities_pointer: TBD             # relative path to the entity's accountability manifest, or "TBD" or ""
+knowledge_state: inferred                 # declared | inferred | hybrid
+classification_confidence: low            # high | medium | low
+confidence_basis: <one-line justification for the classification_confidence>
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+last_verified: YYYY-MM-DD
+tags: [entities, <category>, <free-form>]
+---
+
+# <Display name>
+
+<!-- Recommended body sections. Tag per-attribute provenance inline with [declared] or [inferred] -->
+<!-- when `knowledge_state: hybrid`. See `_README.md` for the convention. -->
+
+## Identity
+
+<!-- Full name, role, organization, languages, location. -->
+…
+
+## Relationship
+
+<!-- How the principal knows them, history, current status. -->
+…
+
+## Communication
+
+<!-- Preferred channels, cadence, register, taboos. -->
+…
+
+## Open items
+
+<!-- Active threads, pending follow-ups, commitments. -->
+…
+
+## Notes
+
+<!-- Operator color, observations, anything that doesn't fit above. -->
+…
