@@ -14,6 +14,7 @@ from .codex import CodexBrain
 from .dispatch import invoke_brain, supported_brains
 from .gemini import GeminiBrain
 from .opencode import OpencodeBrain
+from .pi import PiBrain
 
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "CodexBrain",
     "GeminiBrain",
     "OpencodeBrain",
+    "PiBrain",
     "invoke_brain",
     "resolve_alias",
     "supported_brains",

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import brain_spec as _brain_spec
 
 
-SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider")
+SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider", "pi")
 SUPPORTED_UNSAFE_FALLBACK_BRAINS = (*SUPPORTED_BRAINS, "openrouter")
 SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email")
 SUPPORTED_TRIAGE_BACKENDS = (
@@ -106,6 +106,8 @@ class BrainOverrideConfig:
     yolo: bool | None = None
     timeout_seconds: int | None = None
     extra_args: tuple[str, ...] = ()
+    no_tools: bool | None = None
+    thinking: str | None = None
 
 
 @dataclass(frozen=True)
@@ -794,7 +796,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     errors.append(f"brains.{name}: must be a mapping")
                     continue
                 for key in body:
-                    if key not in {"bin", "sandbox", "yolo", "timeout_seconds", "extra_args"}:
+                    if key not in {"bin", "sandbox", "yolo", "timeout_seconds", "extra_args", "no_tools", "thinking"}:
                         errors.append(f"brains.{name}.{key}: unknown field")
                 if body.get("sandbox") is not None:
                     sandbox = str(body["sandbox"])
@@ -805,6 +807,15 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                         )
                 if body.get("yolo") is not None and not isinstance(body["yolo"], bool):
                     errors.append(f"brains.{name}.yolo: must be boolean")
+                if body.get("no_tools") is not None and not isinstance(body["no_tools"], bool):
+                    errors.append(f"brains.{name}.no_tools: must be boolean")
+                if body.get("thinking") is not None:
+                    thinking_val = str(body["thinking"]).strip().lower()
+                    if thinking_val not in ("off", "minimal", "low", "medium", "high", "xhigh"):
+                        errors.append(
+                            f"brains.{name}.thinking: must be one of "
+                            "off, minimal, low, medium, high, xhigh"
+                        )
                 if (
                     str(name) == "codex"
                     and body.get("yolo") is True
@@ -1048,6 +1059,8 @@ def _load_brains(data: dict[str, Any]) -> dict[str, BrainOverrideConfig]:
             yolo=bool(body["yolo"]) if body.get("yolo") is not None else None,
             timeout_seconds=int(body["timeout_seconds"]) if body.get("timeout_seconds") is not None else None,
             extra_args=tuple(str(arg) for arg in (body.get("extra_args") or [])),
+            no_tools=bool(body["no_tools"]) if body.get("no_tools") is not None else None,
+            thinking=str(body["thinking"]) if body.get("thinking") is not None else None,
         )
     return out
 

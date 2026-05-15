@@ -154,6 +154,12 @@ class AliasTests(unittest.TestCase):
     def test_codex_coding_alias(self):
         self.assertEqual(resolve_alias("codex-coding"), "codex:gpt-5.3-codex")
 
+    def test_pi_google_aliases_target_pi_gemini_models(self):
+        self.assertEqual(resolve_alias("pi-google"), "pi:gemini-2.5-pro")
+        self.assertEqual(resolve_alias("pi-gemini"), "pi:gemini-2.5-pro")
+        self.assertEqual(resolve_alias("pi-gemini25"), "pi:gemini-2.5-pro")
+        self.assertEqual(resolve_alias("pi-gemini20"), "pi:gemini-2.0-flash")
+
     def test_unknown_alias_passes_through(self):
         self.assertEqual(resolve_alias("custom:weird"), "custom:weird")
 
