@@ -5,6 +5,10 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.05.15.02
+
+Release for accountabilities and deep-research operator tooling.
+
 - New `deep-research` skill drives Gemini Advanced through a per-host
   Chromium profile. Adds `bin/jc-research` (login / run / start / status /
   result / cancel / list / profile), the `lib/skills/gemini_deep_research/`
@@ -19,6 +23,14 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
   Playwright importability.
 - Operator opt-out: `JC_RESEARCH_DISABLED=1` in an instance `.env` makes
   every CLI entry exit 17 immediately.
+- Added the opt-in accountabilities governance layer: config schema,
+  L1 manifest + L2 detail templates, `jc memory scaffold accountabilities`,
+  audit-log writer, `jc-doctor` health checks, operator docs, and KB coverage.
+- Accountabilities context is injected only when `accountabilities.enabled` is
+  true; disabled instances do not load the manifest even when the file exists.
+- Manifest enactment authority now surfaces live config to the agent, including
+  the concrete `telegram_primary_chat_id` for `telegram-primary`, and audit
+  health checks parse escaped Markdown table pipes correctly.
 
 ## 2026.05.15.01
 
