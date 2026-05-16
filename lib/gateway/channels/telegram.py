@@ -131,7 +131,10 @@ class TelegramChannel:
             self._chats_conn = queue_module.connect(self.instance_dir)
         return self._chats_conn
 
-    _BUSY_EMOJIS = ("🔄", "⏳", "🚦", "🚥", "✔️", "👀")
+    # Telegram Bot API `setMessageReaction` only accepts emoji from a curated
+    # list (Bot API v6.5+ free reactions). All entries below are verified
+    # members of that list and read as "agent is busy / on it".
+    _BUSY_EMOJIS = ("👀", "🤔", "✍", "👨‍💻", "🫡", "🤓")
 
     def _busy_react(self, chat_id: str, message_id: int) -> None:
         """React to a message when the gateway is processing another event.
