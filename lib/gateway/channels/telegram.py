@@ -141,15 +141,17 @@ class TelegramChannel:
         via a daemon thread. Best-effort throughout — never raises.
         """
         try:
-            conn = self._get_chats_conn()
-            # Force a fresh read — WAL connections cache snapshots between
-            # transactions, and a stale snapshot would miss an in-flight
-            # `status='running'` event.
-            conn.commit()
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM events WHERE status='running'"
-            ).fetchone()
-            running = int(row["n"]) if row else 0
+            # Fresh connection avoids stale WAL snapshots from _chats_conn's
+            # ongoing transaction (upsert_chat writes leave the connection
+            # mid-transaction in Python 3.12+ implicit-transaction mode).
+            conn = queue_module.connect(self.instance_dir)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM events WHERE status='running'"
+                ).fetchone()
+                running = int(row["n"]) if row else 0
+            finally:
+                conn.close()
         except Exception as exc:  # noqa: BLE001
             self.log(f"telegram busy_react query failed: {exc}")
             return
