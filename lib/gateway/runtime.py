@@ -446,11 +446,14 @@ class GatewayRuntime:
     def _bundle_events(events: list[queue.Event]) -> queue.Event:
         """Merge a same-conversation batch into a single synthetic Event.
 
-        - `content` joins per-event lines prefixed with `[username]` (falls back
-          to user_id, then "user").
+        - `content` joins per-event lines prefixed with `@username:` (falls
+          back to user_id, then "user"). The `@` prefix is load-bearing: a
+          `[name]` prefix would collide with `parse_inline_override`.
         - `meta` / source_message_id / user_id come from the LATEST event so
           reply context (reply_to_message_id, image_path, etc) tracks the most
-          recent message.
+          recent message. `meta.coalesced_ids` records the batch member ids;
+          `process_event` uses that flag to skip slash + inline-override
+          parsing (the bundled prefix-and-content shape isn't user-authored).
         - `id` is the FIRST event's id for stable logging.
         """
         latest = events[-1]
@@ -467,7 +470,17 @@ class GatewayRuntime:
             who = username or ev.user_id or "user"
             lines.append(f"@{who}: {ev.content}")
         bundled_content = "\n\n".join(lines)
-        return dataclasses.replace(latest, id=first.id, content=bundled_content)
+        try:
+            latest_meta = json.loads(latest.meta) if latest.meta else {}
+        except (TypeError, ValueError):
+            latest_meta = {}
+        if not isinstance(latest_meta, dict):
+            latest_meta = {}
+        latest_meta["coalesced_ids"] = [e.id for e in events]
+        bundled_meta = json.dumps(latest_meta, sort_keys=True, separators=(",", ":"))
+        return dataclasses.replace(
+            latest, id=first.id, content=bundled_content, meta=bundled_meta
+        )
 
     def _cancel_reengage_on_inbound_reply(self, event: queue.Event) -> None:
         """Cancel pending re-engagement touches when a tracked chat replies."""
@@ -698,11 +711,13 @@ class GatewayRuntime:
             return response
 
         channel = router.channel_name(event)
-        event, meta = self._apply_inline_override(event, meta)
+        coalesced = bool(meta.get("coalesced_ids"))
+        if not coalesced:
+            event, meta = self._apply_inline_override(event, meta)
 
-        slash = overrides.parse_slash_command(event.content)
-        if slash is not None:
-            return self._handle_slash(slash, event, meta, channel)
+            slash = overrides.parse_slash_command(event.content)
+            if slash is not None:
+                return self._handle_slash(slash, event, meta, channel)
 
         sticky = self._resolve_sticky(event, channel)
         triage, triage_rejected = self._maybe_triage(event, sticky)
