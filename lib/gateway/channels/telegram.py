@@ -142,16 +142,26 @@ class TelegramChannel:
         """
         try:
             conn = self._get_chats_conn()
+            # Force a fresh read — WAL connections cache snapshots between
+            # transactions, and a stale snapshot would miss an in-flight
+            # `status='running'` event.
+            conn.commit()
             row = conn.execute(
                 "SELECT COUNT(*) AS n FROM events WHERE status='running'"
             ).fetchone()
-            if not row or row["n"] == 0:
-                return
-        except Exception:  # noqa: BLE001
+            running = int(row["n"]) if row else 0
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram busy_react query failed: {exc}")
+            return
+        if running == 0:
             return
         emoji = random.choice(self._BUSY_EMOJIS)
         token = self.token
-        set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=emoji)
+        self.log(
+            f"telegram busy_react chat_id={chat_id} message_id={message_id} "
+            f"emoji={emoji} running={running}"
+        )
+        set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=emoji, log=self.log)
 
         def _remove() -> None:
             time.sleep(30)

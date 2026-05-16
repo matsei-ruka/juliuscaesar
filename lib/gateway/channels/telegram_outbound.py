@@ -42,11 +42,12 @@ def set_message_reaction(
     chat_id: str,
     message_id: int,
     emoji: str | None,
+    log: LogFn | None = None,
 ) -> None:
     """POST `setMessageReaction`. Pass emoji=None to clear the reaction.
 
-    Best-effort — errors are silently swallowed so a failed reaction never
-    interrupts normal message flow.
+    Best-effort — errors are logged (if `log` is provided) but never raised
+    so a failed reaction never interrupts normal message flow.
     """
     if not token or not chat_id:
         return
@@ -54,13 +55,22 @@ def set_message_reaction(
         [{"type": "emoji", "emoji": emoji}] if emoji else []
     )
     try:
-        http_json(
+        data = http_json(
             f"https://api.telegram.org/bot{token}/setMessageReaction",
             data={"chat_id": str(chat_id), "message_id": message_id, "reaction": reaction},
             timeout=10,
         )
-    except Exception:  # noqa: BLE001
-        pass
+        if log and isinstance(data, dict) and not data.get("ok", False):
+            log(
+                f"telegram setMessageReaction failed: chat_id={chat_id} "
+                f"message_id={message_id} emoji={emoji!r} response={data}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(
+                f"telegram setMessageReaction error: chat_id={chat_id} "
+                f"message_id={message_id} emoji={emoji!r}: {exc}"
+            )
 
 
 def send_text(
