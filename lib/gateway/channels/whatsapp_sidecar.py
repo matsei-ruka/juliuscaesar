@@ -26,13 +26,13 @@ SIDECAR_SCRIPT = "dist/index.js"
 RESTART_BACKOFF = (5, 30, 120)  # seconds between restart attempts
 
 
+class SidecarError(Exception):
+    """Raised when the sidecar fails fatally (e.g., auth_missing)."""
+
+
 def _sidecar_dir() -> Path:
     """Return the sidecar directory within the framework checkout."""
     return Path(__file__).resolve().parent / "whatsapp_sidecar"
-
-
-class SidecarError(Exception):
-    """Raised when the sidecar fails fatally (e.g., auth_missing)."""
 
 
 class WhatsAppSidecar:
@@ -100,6 +100,26 @@ class WhatsAppSidecar:
             to=to,
             text=text,
             quoted_message_id=quoted_message_id,
+        )
+        with self._lock:
+            proc = self._proc
+        if proc is None or proc.poll() is not None:
+            raise SidecarError("sidecar not running")
+        try:
+            proc.stdin.write(protocol.encode_command(cmd) + "\n")
+            proc.stdin.flush()
+        except (OSError, BrokenPipeError) as exc:
+            raise SidecarError(f"sidecar stdin write failed: {exc}") from exc
+        return cmd_id
+
+    def download(self, message_key: dict, dest_path: str) -> str:
+        """Download media from a WhatsApp message. Returns a command id."""
+        cmd_id = f"dl_{int(time.monotonic() * 1000)}"
+        cmd = protocol.DownloadCommand(
+            type="download",
+            id=cmd_id,
+            message_key=message_key,
+            dest_path=dest_path,
         )
         with self._lock:
             proc = self._proc

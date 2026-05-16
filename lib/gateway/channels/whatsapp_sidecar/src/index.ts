@@ -16,11 +16,13 @@
 
 import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
-import { startSocket, stopSocket, sendOne } from "./socket.js";
+import { startSocket, stopSocket, sendOne, getSocket } from "./socket.js";
+import { downloadMedia } from "./send.js";
 import type {
   OutgoingEvent,
   IncomingCommand,
   SendCommand,
+  DownloadCommand,
 } from "./protocol.js";
 
 // ---- CLI args ----
@@ -119,6 +121,37 @@ rl.on("line", (raw) => {
           ok: false,
           error: err instanceof Error ? err.message : String(err),
         });
+        });
+      break;
+    }
+
+    case "download": {
+      const d = cmd as DownloadCommand;
+      const sock = getSocket();
+      if (!sock) {
+        emitEvent({
+          type: "download_result",
+          id: d.id,
+          ok: false,
+          error: "socket not connected",
+        });
+        break;
+      }
+      downloadMedia(sock, d.message_key, d.dest_path)
+        .then((result: { ok: boolean; dest_path?: string; mime_type?: string; file_size?: number; error?: string }) => {
+          emitEvent({
+            type: "download_result",
+            id: d.id,
+            ...result,
+          });
+        })
+        .catch((err: unknown) => {
+          emitEvent({
+            type: "download_result",
+            id: d.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
         });
       break;
     }

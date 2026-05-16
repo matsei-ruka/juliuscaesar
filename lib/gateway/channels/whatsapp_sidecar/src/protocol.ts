@@ -68,6 +68,7 @@ export type OutgoingEvent =
   | ConnectionEvent
   | NormalizedMessage
   | SendResultEvent
+  | DownloadResultEvent
   | ErrorEvent;
 
 // ---- Python → Sidecar (stdin) ----
@@ -81,11 +82,34 @@ export interface SendCommand {
   media?: null;
 }
 
+export interface DownloadCommand {
+  type: "download";
+  id: string;
+  message_key: {
+    id: string;
+    remoteJid: string;
+    fromMe: boolean;
+  };
+  dest_path: string;
+}
+
 export interface StopCommand {
   type: "stop";
 }
 
-export type IncomingCommand = SendCommand | StopCommand;
+export type IncomingCommand = SendCommand | DownloadCommand | StopCommand;
+
+// ---- Command results ----
+
+export interface DownloadResultEvent {
+  type: "download_result";
+  id: string;
+  ok: boolean;
+  dest_path?: string;
+  mime_type?: string;
+  file_size?: number;
+  error?: string;
+}
 
 // ---- Message used by send.ts internally ----
 

@@ -6,6 +6,7 @@
  */
 
 import type { WASocket } from "@whiskeysockets/baileys";
+import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import type { OutboundMessage, SendResultEvent } from "./protocol.js";
 
@@ -68,6 +69,57 @@ export async function sendMessage(
       }
     }
     return { ok: true, message_id: lastId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
+
+/**
+ * Download media from a WhatsApp message.
+ * Returns path to the downloaded file.
+ */
+export async function downloadMedia(
+  sock: WASocket,
+  msgKey: { id: string; remoteJid: string; fromMe: boolean },
+  destPath: string
+): Promise<{ ok: boolean; dest_path?: string; mime_type?: string; file_size?: number; error?: string }> {
+  try {
+    // Build a minimal message object for downloadMediaMessage
+    const msg = {
+      key: {
+        id: msgKey.id,
+        remoteJid: msgKey.remoteJid,
+        fromMe: msgKey.fromMe,
+      },
+    } as any;
+
+    const buffer = await downloadMediaMessage(msg, "buffer", {});
+    if (!buffer || buffer.length === 0) {
+      return { ok: false, error: "empty or missing media" };
+    }
+
+    const buf = buffer;
+    const { writeFileSync, mkdirSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    mkdirSync(dirname(destPath), { recursive: true });
+    writeFileSync(destPath, buf);
+
+    // Detect MIME type from buffer header
+    let mimeType = "application/octet-stream";
+    if (buf[0] === 0xff && buf[1] === 0xd8) mimeType = "image/jpeg";
+    else if (buf[0] === 0x89 && buf[1] === 0x50) mimeType = "image/png";
+    else if (buf[0] === 0x47 && buf[1] === 0x49) mimeType = "image/gif";
+    else if (buf[0] === 0x52 && buf[1] === 0x49) mimeType = "image/webp";
+    else if (buf[0] === 0x4f && buf[1] === 0x67) mimeType = "audio/ogg";
+    else if (buf[0] === 0x00 && buf[1] === 0x00) mimeType = "video/mp4";
+
+    return {
+      ok: true,
+      dest_path: destPath,
+      mime_type: mimeType,
+      file_size: buf.length,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: message };

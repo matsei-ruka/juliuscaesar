@@ -213,6 +213,9 @@ class WhatsAppChannel:
         elif event_type == "send_result":
             self._on_send_result(raw)
 
+        elif event_type == "download_result":
+            self._on_download_result(raw)
+
         elif event_type == "error":
             self.log(f"sidecar error: {raw.get('reason')}")
             if raw.get("fatal"):
@@ -355,6 +358,30 @@ class WhatsAppChannel:
             account_id=account_id,
         )
 
+        # Download media if present and enabled
+        if msg.media and self._sidecar:
+            cfg_raw = _load_wa_config(self.instance_dir)
+            accounts = cfg_raw.get("accounts") if isinstance(cfg_raw.get("accounts"), dict) else {}
+            acct = accounts.get(account_id, {})
+            media_cfg = acct.get("media") if isinstance(acct.get("media"), dict) else {}
+            if media_cfg.get("enabled", True):
+                max_bytes = int(media_cfg.get("max_bytes", 25_000_000))
+                media_dir = (
+                    self.instance_dir / "state" / "channels" / "whatsapp"
+                    / "media" / account_id / msg.message_id
+                )
+                ext = _media_ext(msg.media)
+                dest = media_dir / f"media{ext}"
+                message_key = {
+                    "id": msg.message_id,
+                    "remoteJid": msg.remote_jid,
+                    "fromMe": False,
+                }
+                try:
+                    self._sidecar.download(message_key, str(dest))
+                except SidecarError as exc:
+                    self.log(f"media download queued failed: {exc}")
+
     def _on_send_result(self, raw: dict[str, Any]) -> None:
         """Outbound send result from sidecar."""
         ok = bool(raw.get("ok", False))
@@ -413,3 +440,68 @@ class WhatsAppChannel:
                 self.log(f"operator notified about external sender: {jid}")
         except Exception as exc:
             self.log(f"operator notification failed: {exc}")
+
+    # ── Media handling ─────────────────────────────────────────────────
+
+    def _on_download_result(self, raw: dict[str, Any]) -> None:
+        """Handle media download result from sidecar."""
+        ok = bool(raw.get("ok", False))
+        dl_id = str(raw.get("id", ""))
+        dest_path = str(raw.get("dest_path", ""))
+        file_size = int(raw.get("file_size", 0))
+        error = str(raw.get("error", ""))
+
+        if ok and dest_path:
+            self.log(f"media downloaded: {dest_path} ({file_size} bytes)")
+            state.record_event(
+                self.instance_dir, event="media_downloaded",
+                download_id=dl_id, dest_path=dest_path, file_size=file_size,
+            )
+        else:
+            self.log(f"media download failed id={dl_id}: {error}")
+            state.record_event(
+                self.instance_dir, event="media_download_failed",
+                download_id=dl_id, error=error,
+            )
+
+    # ── Health (watchdog integration) ──────────────────────────────────
+
+    def health(self) -> dict[str, Any]:
+        """Return structured health status for watchdog consumption.
+
+        The watchdog calls this periodically. Returns a dict with:
+          - connected: bool
+          - auth_valid: bool
+          - fatal_error: str or None
+          - self_jid: str
+          - account_id: str
+          - recent_events: list of recent event dicts
+        """
+        return {
+            "connected": self._connection_open.is_set(),
+            "auth_valid": not self._fatal_error or self._fatal_error not in (
+                "logged_out", "auth_missing"
+            ),
+            "fatal_error": self._fatal_error,
+            "self_jid": self._self_jid,
+            "account_id": "default",
+            "recent_events": state.recent_events(self.instance_dir, limit=10),
+        }
+
+
+def _media_ext(media: dict[str, Any]) -> str:
+    """Return a file extension for a media type."""
+    mime = str(media.get("mime_type", "")).lower()
+    if "jpeg" in mime or "jpg" in mime:
+        return ".jpg"
+    if "png" in mime:
+        return ".png"
+    if "webp" in mime:
+        return ".webp"
+    if "ogg" in mime or "opus" in mime:
+        return ".ogg"
+    if "mp4" in mime:
+        return ".mp4"
+    if "pdf" in mime:
+        return ".pdf"
+    return ".bin"

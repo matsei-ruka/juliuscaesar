@@ -190,9 +190,11 @@ export async function sendOne(
 export async function stopSocket(): Promise<void> {
   stopping = true;
   if (sock) {
-    // Baileys socket doesn't expose a direct close method on the WASocket type.
-    // The connection is closed by ending the WS internally or via ev listeners.
-    // We signal stop and let the next connection.close event skip reconnect.
     sock = null;
   }
+}
+
+/** Retrieve the current socket for download operations. */
+export function getSocket(): WASocket | null {
+  return sock;
 }

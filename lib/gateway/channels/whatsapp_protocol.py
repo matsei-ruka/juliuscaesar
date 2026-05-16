@@ -98,23 +98,52 @@ class SendCommand:
 
 
 @dataclass(frozen=True)
+class DownloadCommand:
+    type: str = "download"
+    id: str = ""
+    message_key: dict[str, Any] = field(default_factory=dict)
+    dest_path: str = ""
+
+
+@dataclass(frozen=True)
 class StopCommand:
     type: str = "stop"
 
 
+@dataclass(frozen=True)
+class DownloadResult:
+    type: str = "download_result"
+    id: str = ""
+    ok: bool = False
+    dest_path: str = ""
+    mime_type: str = ""
+    file_size: int = 0
+    error: str = ""
+
+
 # ── Encoding / decoding ─────────────────────────────────────────────────────
 
-def encode_command(cmd: SendCommand | StopCommand) -> str:
+def encode_command(cmd: SendCommand | DownloadCommand | StopCommand) -> str:
     """Serialize a command to a JSON line for the sidecar's stdin."""
-    data: dict[str, Any] = {"type": cmd.type}
     if cmd.type == "send":
+        data: dict[str, Any] = {"type": "send"}
         data["id"] = cmd.id
         data["to"] = cmd.to
         data["text"] = cmd.text
         if cmd.quoted_message_id:
             data["quoted_message_id"] = cmd.quoted_message_id
         data["media"] = None
-    return json.dumps(data, ensure_ascii=False)
+        return json.dumps(data, ensure_ascii=False)
+    if cmd.type == "download":
+        data = {
+            "type": "download",
+            "id": cmd.id,
+            "message_key": cmd.message_key,
+            "dest_path": cmd.dest_path,
+        }
+        return json.dumps(data, ensure_ascii=False)
+    # stop
+    return json.dumps({"type": "stop"})
 
 
 def decode_event(line: str) -> dict[str, Any]:
