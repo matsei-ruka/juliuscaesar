@@ -30,7 +30,7 @@ _CAPABILITIES: dict[str, BrainCapabilities] = {
     "gemini":    BrainCapabilities(text=True, images=True,  tools=True, file_edits=True),
     "opencode":  BrainCapabilities(text=True, images=False, tools=True, file_edits=True),
     "aider":     BrainCapabilities(text=True, images=False, tools=True, file_edits=True),
-    "pi":        BrainCapabilities(text=True, images=False, tools=True, file_edits=True),
+    "pi":        BrainCapabilities(text=True, images=True,  tools=True, file_edits=True),
 }
 
 _UNKNOWN = BrainCapabilities(text=True, images=False, tools=False, file_edits=False)
