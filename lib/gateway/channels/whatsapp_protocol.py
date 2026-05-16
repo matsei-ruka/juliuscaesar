@@ -135,15 +135,15 @@ def encode_command(cmd: SendCommand | DownloadCommand | StopCommand) -> str:
         data["media"] = None
         return json.dumps(data, ensure_ascii=False)
     if cmd.type == "download":
-        data = {
+        return json.dumps({
             "type": "download",
             "id": cmd.id,
             "message_key": cmd.message_key,
             "dest_path": cmd.dest_path,
-        }
-        return json.dumps(data, ensure_ascii=False)
-    # stop
-    return json.dumps({"type": "stop"})
+        }, ensure_ascii=False)
+    if cmd.type == "stop":
+        return json.dumps({"type": "stop"})
+    raise ValueError(f"unknown command type: {cmd.type!r}")
 
 
 def decode_event(line: str) -> dict[str, Any]:

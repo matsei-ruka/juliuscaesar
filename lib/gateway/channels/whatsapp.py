@@ -335,9 +335,30 @@ class WhatsAppChannel:
             "push_name": msg.push_name,
             "sender_tier": sender_tier,
             "quoted_message_id": msg.quoted_message_id,
+            "original_text": msg.text or "[media]",
         }
         if msg.media:
             meta["media"] = msg.media
+
+        # Download media synchronously before enqueue so vision routing works.
+        media_path: str | None = None
+        if msg.media and self._sidecar:
+            cfg_raw = _load_wa_config(self.instance_dir)
+            accounts = cfg_raw.get("accounts") if isinstance(cfg_raw.get("accounts"), dict) else {}
+            acct = accounts.get(account_id, {})
+            media_cfg = acct.get("media") if isinstance(acct.get("media"), dict) else {}
+            if media_cfg.get("enabled", True):
+                max_bytes = int(media_cfg.get("max_bytes", 25_000_000))
+                media_dir = (
+                    self.instance_dir / "state" / "channels" / "whatsapp"
+                    / "media" / account_id / msg.message_id
+                )
+                ext = _media_ext(msg.media)
+                dest = media_dir / f"media{ext}"
+                # Write the expected path into meta so the brain can reference it
+                # even if the download is still in-flight.
+                meta["image_path"] = str(dest)
+                media_path = str(dest)
 
         source_message_id = f"{account_id}:{msg.remote_jid}:{msg.message_id}"
 
@@ -358,29 +379,19 @@ class WhatsAppChannel:
             account_id=account_id,
         )
 
-        # Download media if present and enabled
-        if msg.media and self._sidecar:
-            cfg_raw = _load_wa_config(self.instance_dir)
-            accounts = cfg_raw.get("accounts") if isinstance(cfg_raw.get("accounts"), dict) else {}
-            acct = accounts.get(account_id, {})
-            media_cfg = acct.get("media") if isinstance(acct.get("media"), dict) else {}
-            if media_cfg.get("enabled", True):
-                max_bytes = int(media_cfg.get("max_bytes", 25_000_000))
-                media_dir = (
-                    self.instance_dir / "state" / "channels" / "whatsapp"
-                    / "media" / account_id / msg.message_id
-                )
-                ext = _media_ext(msg.media)
-                dest = media_dir / f"media{ext}"
-                message_key = {
-                    "id": msg.message_id,
-                    "remoteJid": msg.remote_jid,
-                    "fromMe": False,
-                }
-                try:
-                    self._sidecar.download(message_key, str(dest))
-                except SidecarError as exc:
-                    self.log(f"media download queued failed: {exc}")
+        # Initiate async media download after enqueue.
+        # The meta already carries image_path; brain references it.
+        # Download result is handled by _on_download_result later.
+        if media_path and self._sidecar:
+            message_key = {
+                "id": msg.message_id,
+                "remoteJid": msg.remote_jid,
+                "fromMe": False,
+            }
+            try:
+                self._sidecar.download(message_key, media_path)
+            except SidecarError as exc:
+                self.log(f"media download queued failed: {exc}")
 
     def _on_send_result(self, raw: dict[str, Any]) -> None:
         """Outbound send result from sidecar."""

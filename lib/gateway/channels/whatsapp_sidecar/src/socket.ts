@@ -190,6 +190,11 @@ export async function sendOne(
 export async function stopSocket(): Promise<void> {
   stopping = true;
   if (sock) {
+    try {
+      sock.end(new Error("stopped"));
+    } catch {
+      // ignore — socket may already be closing
+    }
     sock = null;
   }
 }
