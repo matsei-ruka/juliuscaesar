@@ -85,8 +85,30 @@ if [[ -n "$MODEL" ]]; then
 fi
 
 # Extra args from brain config (extra_args_for_event + override.extra_args).
-if [[ $# -gt 0 ]]; then
-    ARGS+=("$@")
+# --image /path pairs are translated to pi's @/path file-attachment syntax.
+# All other extra args pass through unchanged.
+IMAGE_ARGS=()
+PASSTHRU_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --image)
+            shift
+            if [[ $# -gt 0 && -f "$1" ]]; then
+                IMAGE_ARGS+=("@$1")
+            fi
+            shift
+            ;;
+        *)
+            PASSTHRU_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+if [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]]; then
+    ARGS+=("${PASSTHRU_ARGS[@]}")
+fi
+if [[ ${#IMAGE_ARGS[@]} -gt 0 ]]; then
+    ARGS+=("${IMAGE_ARGS[@]}")
 fi
 
 # Worker mode override — mirrors claude.sh. When invoked from `jc-workers _run`,

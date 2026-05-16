@@ -113,11 +113,26 @@ class PiBrain(Brain):
         return env
 
     def extra_args_for_event(self, event: Event) -> tuple[str, ...]:
-        """Pass --thinking from brain override config to the adapter."""
+        """Pass --thinking and image paths to the adapter.
+
+        Image paths are extracted from event metadata and forwarded as
+        --image /path pairs.  pi.sh converts these to @/path (pi's file-
+        attachment syntax) before invoking pi.
+        """
+        meta = self._meta(event)
         args: list[str] = []
         thinking = self._thinking
         if thinking:
             args.extend(["--thinking", thinking])
+        for key in ("image_path", "image"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                args.extend(["--image", value.strip()])
+        image_paths = meta.get("image_paths")
+        if isinstance(image_paths, list):
+            for p in image_paths:
+                if isinstance(p, str) and p.strip():
+                    args.extend(["--image", p.strip()])
         return tuple(args)
 
     # Note: gateway output contract is injected by the adapter via
