@@ -19,16 +19,10 @@ from typing import Any, Callable
 
 import yaml
 
+from channels.email.normalize import normalize_sender_addr
 from ..config import ChannelConfig, env_value
 from .base import EnqueueFn, LogFn
 from . import email_dispatcher
-
-
-def _normalize_sender(sender: Any) -> str | None:
-    normalized = str(sender or "").lower().strip()
-    if not normalized or "@" not in normalized or any(ch.isspace() for ch in normalized):
-        return None
-    return normalized
 
 
 def _load_email_config(instance_dir: Path) -> dict[str, Any]:
@@ -49,7 +43,7 @@ def _load_email_config(instance_dir: Path) -> dict[str, Any]:
 
 def _sender_tier_from_config(email_cfg: dict[str, Any], sender: Any, fallback: Any = None) -> str:
     """Resolve the current sender tier, with blocklist taking precedence."""
-    normalized = _normalize_sender(sender)
+    normalized = normalize_sender_addr(sender)
     if normalized is None:
         return "blocked"
     senders_cfg = email_cfg.get("senders") if isinstance(email_cfg.get("senders"), dict) else {}
@@ -61,7 +55,7 @@ def _sender_tier_from_config(email_cfg: dict[str, Any], sender: Any, fallback: A
         return {
             item
             for raw in values
-            if (item := _normalize_sender(raw))
+            if (item := normalize_sender_addr(raw))
         }
 
     if normalized in sender_set("blocklist"):
@@ -223,6 +217,8 @@ class EmailChannel:
                 body=response,
                 in_reply_to=in_reply_to,
                 references=list(references) if references else None,
+                original_to=meta.get("email_to_recipients") or None,
+                original_cc=meta.get("email_cc") or None,
             )
         except Exception as exc:  # noqa: BLE001
             self.log(f"email send failed: {exc}")

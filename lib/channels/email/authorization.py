@@ -10,14 +10,9 @@ from typing import Optional
 
 import yaml
 
+from .normalize import normalize_sender_addr
+
 __all__ = ["SenderAuthorizer", "update_sender_list"]
-
-
-def _normalize_sender(sender_email: str | None) -> str | None:
-    sender = str(sender_email or "").lower().strip()
-    if not sender or "@" not in sender or any(ch.isspace() for ch in sender):
-        return None
-    return sender
 
 
 def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> None:
@@ -39,7 +34,7 @@ def update_sender_list(config_path: Path, list_name: str, sender_email: str) -> 
     if not isinstance(senders_list, list):
         senders_list = []
 
-    sender = _normalize_sender(sender_email)
+    sender = normalize_sender_addr(sender_email)
     if sender is None:
         return
     if sender not in senders_list:
@@ -109,26 +104,26 @@ class SenderAuthorizer:
             trusted = senders_cfg.get("trusted", [])
             if isinstance(trusted, list):
                 self.trusted = {
-                    normalized for s in trusted if (normalized := _normalize_sender(s))
+                    normalized for s in trusted if (normalized := normalize_sender_addr(s))
                 }
 
             # Backward compatibility for Phase 1-3 configs.
             allowed = senders_cfg.get("allowed", [])
             if isinstance(allowed, list):
                 self.trusted |= {
-                    normalized for s in allowed if (normalized := _normalize_sender(s))
+                    normalized for s in allowed if (normalized := normalize_sender_addr(s))
                 }
 
             external = senders_cfg.get("external", [])
             if isinstance(external, list):
                 self.external = {
-                    normalized for s in external if (normalized := _normalize_sender(s))
+                    normalized for s in external if (normalized := normalize_sender_addr(s))
                 }
 
             blocked = senders_cfg.get("blocklist", [])
             if isinstance(blocked, list):
                 self.blocked = {
-                    normalized for s in blocked if (normalized := _normalize_sender(s))
+                    normalized for s in blocked if (normalized := normalize_sender_addr(s))
                 }
         except Exception:
             # YAML parse error; keep stale config
@@ -147,7 +142,7 @@ class SenderAuthorizer:
             self._reload()
             self.last_check = now
 
-        sender = _normalize_sender(sender_email)
+        sender = normalize_sender_addr(sender_email)
         if sender is None:
             return "blocked"
 

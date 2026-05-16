@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 import yaml
 
+from channels.email.normalize import normalize_sender_addr
 from gateway.config_writer import atomic_write_text
 
 
@@ -27,21 +28,17 @@ def _cfg_path(instance_dir: Path) -> Path:
     return Path(instance_dir) / "ops" / "gateway.yaml"
 
 
-def _normalize_addr(value: str) -> str:
-    return str(value or "").lower().strip()
-
-
 def _normalize_list(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
-        return [_normalize_addr(v) for v in value if _normalize_addr(v)]
-    text = _normalize_addr(str(value))
-    return [text] if text else []
+        return [a for v in value if (a := normalize_sender_addr(v))]
+    a = normalize_sender_addr(str(value))
+    return [a] if a else []
 
 
 def _dedupe_sorted(values: Iterable[str]) -> tuple[str, ...]:
-    return tuple(sorted({_normalize_addr(v) for v in values if _normalize_addr(v)}))
+    return tuple(sorted({a for v in values if (a := normalize_sender_addr(v))}))
 
 
 def _load_yaml(instance_dir: Path, *, strict: bool = False) -> tuple[Path, str, dict[str, Any]]:
@@ -86,7 +83,7 @@ def set_sender_tier(instance_dir: Path, sender: str, tier: str) -> bool:
     tier = str(tier or "").lower().strip()
     if tier not in {"trusted", "external", "blocklist"}:
         raise ValueError(f"unsupported email sender tier: {tier}")
-    sender_norm = _normalize_addr(sender)
+    sender_norm = normalize_sender_addr(sender)
     if not sender_norm:
         raise ValueError("email sender address is required")
 
