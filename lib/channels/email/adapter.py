@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from .authorization import SenderAuthorizer
 from .imap_client import IMAPClient
+from .normalize import normalize_sender_addr
 from .sanitize import wrap_email_prompt
 from .smtp_client import SMTPClient
 
@@ -46,6 +47,8 @@ class EmailChannelAdapter:
         self.smtp_port = int(smtp_cfg.get("port", env.get("SMTP_PORT", 587)))
         self.smtp_sent_folder = smtp_cfg.get("sent_folder", "Sent")
         self.smtp_signature = smtp_cfg.get("signature", "")
+        self.from_display_name: Optional[str] = smtp_cfg.get("from_display_name") or None
+        self.reply_all: bool = bool(smtp_cfg.get("reply_all", False))
 
         # Limits
         self.body_limit = int(config.get("body_limit", 8000))
@@ -71,6 +74,7 @@ class EmailChannelAdapter:
             password=self.imap_password,
             smtp_port=self.smtp_port,
             sent_folder=self.smtp_sent_folder,
+            from_display_name=self.from_display_name,
         )
 
         # Authorization
@@ -112,6 +116,8 @@ class EmailChannelAdapter:
                 "user_id": f"email_{msg.sender.lower()}",
                 "sender": msg.sender,
                 "sender_name": msg.sender_name,
+                "to": msg.to,
+                "cc": msg.cc,
                 "subject": msg.subject,
                 "message_id": msg.message_id,
                 "in_reply_to": msg.in_reply_to,
@@ -150,13 +156,17 @@ class EmailChannelAdapter:
         body: str,
         in_reply_to: Optional[str] = None,
         references: Optional[list[str]] = None,
+        original_to: Optional[list[str]] = None,
+        original_cc: Optional[list[str]] = None,
     ) -> str:
         """Send reply via SMTP. Returns Message-ID."""
         references_str = " ".join(references) if references else None
 
+        cc = self._build_reply_cc(recipient, original_to, original_cc)
+
         message_id = self.smtp_client.send(
             to=[recipient],
-            cc=[],
+            cc=cc,
             subject=subject,
             body=body,
             in_reply_to=in_reply_to,
@@ -164,6 +174,26 @@ class EmailChannelAdapter:
             signature=self.smtp_signature,
         )
         return message_id
+
+    def _build_reply_cc(
+        self,
+        recipient: str,
+        original_to: Optional[list[str]],
+        original_cc: Optional[list[str]],
+    ) -> list[str]:
+        """Build CC list for reply-all, excluding self and the To recipient."""
+        if not self.reply_all or not (original_to or original_cc):
+            return []
+        self_addr = normalize_sender_addr(self.imap_user) or (self.imap_user or "").lower()
+        recipient_addr = normalize_sender_addr(recipient) or recipient.lower()
+        seen: set[str] = {self_addr, recipient_addr}
+        result: list[str] = []
+        for raw in (original_to or []) + (original_cc or []):
+            addr = normalize_sender_addr(raw)
+            if addr and addr not in seen:
+                seen.add(addr)
+                result.append(raw)  # preserve original formatting
+        return result
 
     def _load_last_uid(self) -> int:
         """Load UID watermark from state file."""

@@ -25,6 +25,7 @@ class SMTPClient:
         imap_port: int = 993,
         sent_folder: str = "Sent",
         timeout: int = 30,
+        from_display_name: Optional[str] = None,
     ):
         self.host = host
         self.user = user
@@ -33,6 +34,7 @@ class SMTPClient:
         self.imap_port = imap_port
         self.sent_folder = sent_folder
         self.timeout = timeout
+        self.from_display_name = from_display_name or None
 
     def send(
         self,
@@ -95,7 +97,10 @@ class SMTPClient:
     ) -> EmailMIME:
         """Build RFC 2822 compliant message."""
         msg = EmailMIME()
-        msg["From"] = self.user
+        if self.from_display_name:
+            msg["From"] = email.utils.formataddr((self.from_display_name, self.user))
+        else:
+            msg["From"] = self.user
         msg["To"] = ", ".join(to)
         if cc:
             msg["Cc"] = ", ".join(cc)
