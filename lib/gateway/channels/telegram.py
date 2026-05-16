@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -38,6 +40,7 @@ from .telegram_outbound import (
     send_text,
     send_typing as send_typing_action,
     send_voice as send_voice_message,
+    set_message_reaction,
 )
 from .telegram_commands import (
     handle_slash_command,
@@ -127,6 +130,34 @@ class TelegramChannel:
         if self._chats_conn is None:
             self._chats_conn = queue_module.connect(self.instance_dir)
         return self._chats_conn
+
+    _BUSY_EMOJIS = ("🔄", "⏳", "🚦", "🚥", "✔️", "👀")
+
+    def _busy_react(self, chat_id: str, message_id: int) -> None:
+        """React to a message when the gateway is processing another event.
+
+        Checks the queue for any currently-running event. If one exists,
+        adds a random emoji reaction immediately, then removes it after 30 s
+        via a daemon thread. Best-effort throughout — never raises.
+        """
+        try:
+            conn = self._get_chats_conn()
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM events WHERE status='running'"
+            ).fetchone()
+            if not row or row["n"] == 0:
+                return
+        except Exception:  # noqa: BLE001
+            return
+        emoji = random.choice(self._BUSY_EMOJIS)
+        token = self.token
+        set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=emoji)
+
+        def _remove() -> None:
+            time.sleep(30)
+            set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=None)
+
+        threading.Thread(target=_remove, daemon=True).start()
 
     def close(self) -> None:
         """Release cached resources (chats DB connection). Idempotent."""
@@ -996,6 +1027,11 @@ class TelegramChannel:
                             content=text,
                             meta=meta,
                         )
+                        # Busy acknowledgement: react if another event is running.
+                        _chat_id = str(meta.get("chat_id", ""))
+                        _msg_id = meta.get("message_id")
+                        if _chat_id and isinstance(_msg_id, int):
+                            self._busy_react(_chat_id, _msg_id)
                     self.close()
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"telegram poll error: {exc}")

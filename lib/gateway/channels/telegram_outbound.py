@@ -36,6 +36,33 @@ def send_typing(
     )
 
 
+def set_message_reaction(
+    *,
+    token: str,
+    chat_id: str,
+    message_id: int,
+    emoji: str | None,
+) -> None:
+    """POST `setMessageReaction`. Pass emoji=None to clear the reaction.
+
+    Best-effort — errors are silently swallowed so a failed reaction never
+    interrupts normal message flow.
+    """
+    if not token or not chat_id:
+        return
+    reaction: list[dict[str, str]] = (
+        [{"type": "emoji", "emoji": emoji}] if emoji else []
+    )
+    try:
+        http_json(
+            f"https://api.telegram.org/bot{token}/setMessageReaction",
+            data={"chat_id": str(chat_id), "message_id": message_id, "reaction": reaction},
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def send_text(
     *,
     instance_dir: Path,
