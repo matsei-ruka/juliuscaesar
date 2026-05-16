@@ -293,7 +293,7 @@ class WhatsAppChannel:
                 )
                 return
 
-            if group_tier == "external":
+            if group_tier == "external" and sender_tier != "blocked":
                 # External groups: enqueue but draft response
                 sender_tier = "external"
 
@@ -466,6 +466,24 @@ class WhatsAppChannel:
 
     # ── Health (watchdog integration) ──────────────────────────────────
 
+    def _auth_valid(self) -> bool:
+        """Return True if the auth state is not known to be invalid.
+
+        _fatal_error can be:
+          - None → auth is fine
+          - "auth_missing" → no creds exist
+          - "logged_out: <reason>" → WhatsApp explicitly logged out
+          - <SidecarError message> → unknown, assume valid (not auth-related)
+        """
+        if not self._fatal_error:
+            return True
+        if self._fatal_error == "auth_missing":
+            return False
+        if self._fatal_error.startswith("logged_out"):
+            return False
+        # Unknown error — don't assume auth is bad
+        return True
+
     def health(self) -> dict[str, Any]:
         """Return structured health status for watchdog consumption.
 
@@ -479,9 +497,7 @@ class WhatsAppChannel:
         """
         return {
             "connected": self._connection_open.is_set(),
-            "auth_valid": not self._fatal_error or self._fatal_error not in (
-                "logged_out", "auth_missing"
-            ),
+            "auth_valid": self._auth_valid(),
             "fatal_error": self._fatal_error,
             "self_jid": self._self_jid,
             "account_id": "default",
