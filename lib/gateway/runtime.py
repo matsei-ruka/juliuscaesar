@@ -465,7 +465,7 @@ class GatewayRuntime:
             if isinstance(ev_meta, dict):
                 username = ev_meta.get("username") or ev_meta.get("user_name")
             who = username or ev.user_id or "user"
-            lines.append(f"[{who}] {ev.content}")
+            lines.append(f"@{who}: {ev.content}")
         bundled_content = "\n\n".join(lines)
         return dataclasses.replace(latest, id=first.id, content=bundled_content)
 
