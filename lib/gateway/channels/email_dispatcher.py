@@ -32,6 +32,7 @@ import urllib.request
 
 import yaml
 from . import email_state
+from channels.email.normalize import normalize_sender_addr
 
 
 __all__ = [
@@ -55,13 +56,6 @@ class DispatchResult:
     pending: int = 0
     blocked: int = 0
     handled_uids: list[str] = field(default_factory=list)
-
-
-def _normalize_sender(sender: Any) -> str | None:
-    normalized = str(sender or "").lower().strip()
-    if not normalized or "@" not in normalized or any(ch.isspace() for ch in normalized):
-        return None
-    return normalized
 
 
 def _sender_key(sender: str) -> str:
@@ -104,6 +98,8 @@ def _meta_for_event(msg: dict[str, Any]) -> dict[str, Any]:
         "delivery_channel": "email",
         "email_to": msg.get("sender"),
         "email_to_name": msg.get("sender_name"),
+        "email_to_recipients": msg.get("to") or [],
+        "email_cc": msg.get("cc") or [],
         "email_subject": msg.get("subject"),
         "email_message_id": msg.get("message_id"),
         "email_in_reply_to": msg.get("in_reply_to"),
@@ -371,7 +367,7 @@ def dispatch_messages(
     for msg in messages:
         uid = _message_uid(msg)
         sender = msg.get("sender", "(unknown)")
-        normalized_sender = _normalize_sender(sender)
+        normalized_sender = normalize_sender_addr(sender)
         if normalized_sender is None:
             result.blocked += 1
             result.handled_uids.append(uid)
