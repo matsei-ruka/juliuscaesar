@@ -53,6 +53,22 @@ channels:
         assert auth.check("legacy@example.com") == "trusted"
 
 
+def test_display_name_sender_matches_trusted_list() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _write_config(
+            Path(tmp),
+            """
+channels:
+  email:
+    senders:
+      trusted: [a@b]
+""",
+        )
+        auth = SenderAuthorizer(cfg, check_interval=0)
+        assert auth.check("X Y <a@b>") == "trusted"
+        assert auth.check('"X, Y" <a@b>') == "trusted"
+
+
 def test_sender_lists_are_trimmed_and_invalid_updates_are_ignored() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         instance = Path(tmp)
