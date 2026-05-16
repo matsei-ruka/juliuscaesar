@@ -84,3 +84,4 @@ Format: `## [YYYY-MM-DD] <verb> | <target> - <one-line note>`
 ## [2026-05-13] update | subsystem/watchdog-runtime.md — removed watchdog failed-event replay and brain switching
 ## [2026-05-15] new | subsystem/accountabilities.md — accountabilities system P1–P5, 31 tests, branch spec/accountabilities
 ## [2026-05-15] update | subsystem/accountabilities.md — documented enabled-gated manifest injection, telegram primary id authority, and escaped-pipe audit parsing
+## [2026-05-16] new | subsystem/channel-whatsapp.md — initial entry covering sidecar architecture, 3-tier access control, gotchas

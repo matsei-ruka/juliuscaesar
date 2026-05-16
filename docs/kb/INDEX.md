@@ -42,6 +42,7 @@
 | Voice channel | subsystem/channel-voice.md | Paired-channel ASR/TTS via DashScope |
 | jc-events channel | subsystem/channel-jc-events.md | Internal worker/system event ingestion via `state/events/` |
 | Cron channel | subsystem/channel-cron.md | Scheduled task → gateway event with pinned brain |
+| WhatsApp channel | subsystem/channel-whatsapp.md | Baileys WhatsApp Web sidecar over stdio, 3-tier access control |
 | Commitments and re-engagement | subsystem/commitments-and-reengagement.md | Deferred action YAML engine plus silence-aware re-engagement producer |
 | Dream pipeline | subsystem/dream-pipeline.md | Offline reflection cycle, artifact emitters, risk gates, reports |
 | Accountabilities system | subsystem/accountabilities.md | Opt-in governance layer: manifest, L2 detail files, audit log, jc-doctor checks |
