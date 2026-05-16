@@ -335,6 +335,102 @@ def claim_next(
         raise
 
 
+def claim_batch_same_conversation(
+    conn: sqlite3.Connection,
+    *,
+    worker_id: str,
+    lease_seconds: int = 300,
+    sources: Iterable[str] | None = None,
+) -> list[Event]:
+    """Claim the oldest queued event and every other queued event sharing its
+    `conversation_id`. Returned events are ordered by id ascending.
+
+    If the oldest claimable event has a NULL `conversation_id`, only that
+    single event is claimed (NULL doesn't equal NULL in SQL, and unrelated
+    NULL-conv events must not be batched together).
+
+    Empty list when nothing is claimable.
+    """
+
+    now = now_iso()
+    locked_until = add_seconds(now, lease_seconds)
+    source_list = list(sources or [])
+    params: list[Any] = [now]
+    source_clause = ""
+    if source_list:
+        source_clause = f" AND source IN ({','.join('?' for _ in source_list)})"
+        params.extend(source_list)
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        requeue_expired(conn, now=now)
+        head = conn.execute(
+            f"""
+            SELECT id, conversation_id FROM events
+            WHERE status='queued'
+              AND available_at <= ?
+              {source_clause}
+            ORDER BY id
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        if head is None:
+            conn.commit()
+            return []
+
+        head_id = int(head["id"])
+        conv_id = head["conversation_id"]
+
+        if conv_id is None:
+            ids = [head_id]
+        else:
+            batch_params: list[Any] = [conv_id, now]
+            batch_source_clause = ""
+            if source_list:
+                batch_source_clause = (
+                    f" AND source IN ({','.join('?' for _ in source_list)})"
+                )
+                batch_params.extend(source_list)
+            rows = conn.execute(
+                f"""
+                SELECT id FROM events
+                WHERE status='queued'
+                  AND conversation_id=?
+                  AND available_at <= ?
+                  {batch_source_clause}
+                ORDER BY id
+                """,
+                batch_params,
+            ).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            if head_id not in ids:
+                ids = sorted({head_id, *ids})
+
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"""
+            UPDATE events
+            SET status='running',
+                locked_by=?,
+                locked_until=?,
+                started_at=COALESCE(started_at, ?),
+                error=NULL
+            WHERE id IN ({placeholders})
+            """,
+            (worker_id, locked_until, now, *ids),
+        )
+        event_rows = conn.execute(
+            f"SELECT * FROM events WHERE id IN ({placeholders}) ORDER BY id",
+            ids,
+        ).fetchall()
+        conn.commit()
+        return [event for row in event_rows if (event := row_to_event(row)) is not None]
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def complete(conn: sqlite3.Connection, event_id: int, *, response: str = "") -> Event:
     ts = now_iso()
     conn.execute(

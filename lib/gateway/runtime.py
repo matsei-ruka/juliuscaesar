@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import threading
@@ -363,51 +364,110 @@ class GatewayRuntime:
     def dispatch_once(self) -> bool:
         conn = queue.connect(self.instance_dir)
         try:
-            event = queue.claim_next(
-                conn,
-                worker_id=self.worker_id,
-                lease_seconds=self.config.lease_seconds,
-            )
+            if self.config.reliability.coalesce_same_conversation:
+                events_batch = queue.claim_batch_same_conversation(
+                    conn,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.config.lease_seconds,
+                )
+            else:
+                single = queue.claim_next(
+                    conn,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.config.lease_seconds,
+                )
+                events_batch = [single] if single is not None else []
         finally:
             conn.close()
-        if event is None:
+        if not events_batch:
             return False
         from .brains import AdapterFailure
+
+        if len(events_batch) == 1:
+            event = events_batch[0]
+            batch_ids = [event.id]
+        else:
+            event = self._bundle_events(events_batch)
+            batch_ids = [e.id for e in events_batch]
+            self.log(
+                f"coalesce: claimed {len(events_batch)} events "
+                f"conv_id={event.conversation_id} ids={batch_ids}"
+            )
 
         # Pre-triage hook for outstanding auth-token round-trips. Returns True
         # iff the message was consumed by the recovery flow.
         if self._recovery.maybe_consume_auth_token(event):
             conn_t = queue.connect(self.instance_dir)
             try:
-                queue.complete(conn_t, event.id, response="(auth token consumed)")
+                for eid in batch_ids:
+                    queue.complete(conn_t, eid, response="(auth token consumed)")
             finally:
                 conn_t.close()
+            if len(batch_ids) > 1:
+                self.log(f"coalesce: marked {len(batch_ids)} events done ids={batch_ids}")
             self.log(f"event auth-token consumed id={event.id}")
             return True
         try:
             response = self.process_event(event)
             conn2 = queue.connect(self.instance_dir)
             try:
-                queue.complete(conn2, event.id, response=response)
+                for eid in batch_ids:
+                    queue.complete(conn2, eid, response=response)
             finally:
                 conn2.close()
             self._cancel_reengage_on_inbound_reply(event)
+            if len(batch_ids) > 1:
+                self.log(f"coalesce: marked {len(batch_ids)} events done ids={batch_ids}")
             self.log(f"event done id={event.id} source={event.source}")
         except AdapterFailure as failure:
             self._recovery.handle_adapter_failure(event, failure)
         except Exception as exc:  # noqa: BLE001
             conn3 = queue.connect(self.instance_dir)
             try:
-                failed = queue.fail(
-                    conn3,
-                    event.id,
-                    error=str(exc)[:1000],
-                    max_retries=self.config.max_retries,
-                )
+                failed_status: str | None = None
+                for eid in batch_ids:
+                    failed = queue.fail(
+                        conn3,
+                        eid,
+                        error=str(exc)[:1000],
+                        max_retries=self.config.max_retries,
+                    )
+                    failed_status = failed.status
             finally:
                 conn3.close()
-            self.log(f"event {failed.status} id={event.id} error={exc}")
+            if len(batch_ids) > 1:
+                self.log(
+                    f"coalesce: marked {len(batch_ids)} events {failed_status} ids={batch_ids}"
+                )
+            self.log(f"event {failed_status} id={event.id} error={exc}")
         return True
+
+    @staticmethod
+    def _bundle_events(events: list[queue.Event]) -> queue.Event:
+        """Merge a same-conversation batch into a single synthetic Event.
+
+        - `content` joins per-event lines prefixed with `[username]` (falls back
+          to user_id, then "user").
+        - `meta` / source_message_id / user_id come from the LATEST event so
+          reply context (reply_to_message_id, image_path, etc) tracks the most
+          recent message.
+        - `id` is the FIRST event's id for stable logging.
+        """
+        latest = events[-1]
+        first = events[0]
+        lines: list[str] = []
+        for ev in events:
+            try:
+                ev_meta = json.loads(ev.meta) if ev.meta else {}
+            except (TypeError, ValueError):
+                ev_meta = {}
+            username = None
+            if isinstance(ev_meta, dict):
+                username = ev_meta.get("username") or ev_meta.get("user_name")
+            who = username or ev.user_id or "user"
+            lines.append(f"[{who}] {ev.content}")
+        bundled_content = "\n\n".join(lines)
+        return dataclasses.replace(latest, id=first.id, content=bundled_content)
 
     def _cancel_reengage_on_inbound_reply(self, event: queue.Event) -> None:
         """Cancel pending re-engagement touches when a tracked chat replies."""

@@ -116,6 +116,7 @@ class ReliabilityConfig:
     log_max_bytes: int = 50 * 1024 * 1024
     log_backups: int = 5
     backoff_seconds: tuple[int, ...] = (10, 60, 300)
+    coalesce_same_conversation: bool = False
 
 
 @dataclass(frozen=True)
@@ -883,13 +884,23 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             errors.append("reliability: must be a mapping")
         else:
             for key in reliability:
-                if key not in {"max_queue_depth", "log_max_bytes", "log_backups", "backoff_seconds"}:
+                if key not in {
+                    "max_queue_depth",
+                    "log_max_bytes",
+                    "log_backups",
+                    "backoff_seconds",
+                    "coalesce_same_conversation",
+                }:
                     errors.append(f"reliability.{key}: unknown field")
             for key in ("max_queue_depth", "log_max_bytes"):
                 if reliability.get(key) is not None:
                     _validate_positive_int(errors, f"reliability.{key}", reliability[key])
             if reliability.get("log_backups") is not None:
                 _validate_nonnegative_int(errors, "reliability.log_backups", reliability["log_backups"])
+            if reliability.get("coalesce_same_conversation") is not None and not isinstance(
+                reliability["coalesce_same_conversation"], bool
+            ):
+                errors.append("reliability.coalesce_same_conversation: must be boolean")
             backoff = reliability.get("backoff_seconds")
             if backoff is not None:
                 if not isinstance(backoff, (list, tuple)) or not backoff:
@@ -1357,6 +1368,7 @@ def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
         log_max_bytes=int(raw.get("log_max_bytes") or 50 * 1024 * 1024),
         log_backups=int(raw.get("log_backups") or 5),
         backoff_seconds=backoff_tuple,
+        coalesce_same_conversation=bool(raw.get("coalesce_same_conversation", False)),
     )
 
 
