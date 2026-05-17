@@ -19,14 +19,16 @@ _PI_SESSION_UUID_RE = re.compile(
 
 
 def _session_has_image_url(path: Path) -> bool:
-    """Return True if the pi session file contains image_url content blocks.
+    """Return True if the pi session file contains image content blocks.
 
-    DeepSeek flash rejects image_url history with 400. Scanning the session
-    file lets PiBrain upgrade to a vision model before resuming such sessions.
-    Byte-string search is fast even on multi-MB files.
+    Pi stores images as {"type":"image","mimeType":"...","data":"..."} in its
+    session JSONL. When serializing for the DeepSeek API, pi converts these to
+    {"type":"image_url",...} — the form flash rejects with 400. Detect the
+    stored form ("type":"image") so we can upgrade to a vision model before
+    resuming such sessions. Byte-string search is fast even on multi-MB files.
     """
     try:
-        return b'"image_url"' in path.read_bytes()
+        return b'"type":"image"' in path.read_bytes()
     except OSError:
         return False
 

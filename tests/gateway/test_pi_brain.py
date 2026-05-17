@@ -480,12 +480,13 @@ class PiBrainAdjustModelTests(unittest.TestCase):
     def test_upgrades_model_when_session_has_image_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
-            # Write a fake pi session file with image_url content.
+            # Pi stores images as {"type":"image","mimeType":"...","data":"..."} in
+            # session JSONL (no spaces around colon — pi's own serializer).
             uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
             session_dir = _pi_session_dir(tmpdir)
             session_dir.mkdir(parents=True, exist_ok=True)
             (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
-                b'{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg"}}]}'
+                b'{"type":"image","mimeType":"image/jpeg","data":"/9j/abc"}'
             )
             result = brain.adjust_model("deepseek-v4-flash", uuid)
             self.assertEqual(result, "deepseek-v4-pro")
@@ -511,8 +512,9 @@ class PiBrainAdjustModelTests(unittest.TestCase):
 
 class SessionHasImageUrlTests(unittest.TestCase):
     def test_detects_image_url(self) -> None:
+        # Pi uses "type":"image" (no spaces) in session JSONL.
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            f.write(b'{"type":"image_url"}')
+            f.write(b'{"type":"image","mimeType":"image/jpeg","data":"abc"}')
             p = Path(f.name)
         self.assertTrue(_session_has_image_url(p))
         p.unlink()
