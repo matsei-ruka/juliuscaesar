@@ -25,6 +25,7 @@ def _snap(language="en", stderr_tail="Read(/foo.py) done"):
 
     class FakeAdapter:
         activity_age_seconds = 5.0
+        pid_alive = True
 
     class FakeEvent:
         id = 1
@@ -243,3 +244,43 @@ def test_narrate_empty_choices_fallback(tmp_path):
          patch("supervisor.narrator.env_value", return_value="test-key"):
         result = narrate(snap, ev, "openrouter:deepseek-v4-flash", tmp_path)
     assert result.from_model is False
+
+
+def test_narrate_no_stderr_pid_alive_calls_ai(tmp_path):
+    """Empty stderr + pid alive → AI called with task/elapsed context, not static string."""
+    snap = _snap(stderr_tail="")
+    snap.adapter.pid_alive = True
+    ev = _ev()
+    with patch("supervisor.narrator.http_json") as mock_http, \
+         patch("supervisor.narrator.env_value", return_value="test-key"):
+        mock_http.return_value = _mock_http_response("analyzing the repository structure")
+        result = narrate(snap, ev, "openrouter:deepseek-v4-flash", tmp_path)
+    assert result.from_model is True
+    assert result.text == "analyzing the repository structure"
+    # Verify it used the no-stderr prompt (task + elapsed, not tail)
+    call_args = mock_http.call_args
+    payload = call_args.kwargs.get("data") or call_args.kwargs["data"]
+    user_msg = payload["messages"][1]["content"]
+    assert "audit repo" in user_msg  # event.content injected
+    assert "01:30" in user_msg  # age_seconds=90.0 → 01:30
+
+
+def test_narrate_no_stderr_pid_dead_returns_fallback(tmp_path):
+    """Empty stderr + pid dead → no AI call, returns last narration or phase fallback."""
+    snap = _snap(stderr_tail="")
+    snap.adapter.pid_alive = False
+    ev = _ev()
+    ev.last_narration = "was scanning files"
+    result = narrate(snap, ev, "openrouter:deepseek-v4-flash", tmp_path)
+    assert result.from_model is False
+    assert result.text == "was scanning files"
+
+
+def test_narrate_no_stderr_pid_dead_no_prior_returns_phase(tmp_path):
+    """Empty stderr + pid dead + no prior narration → phase label fallback."""
+    snap = _snap(stderr_tail="")
+    snap.adapter.pid_alive = False
+    ev = _ev()
+    result = narrate(snap, ev, "openrouter:deepseek-v4-flash", tmp_path)
+    assert result.from_model is False
+    assert result.text == snap.phase.label_for("en")

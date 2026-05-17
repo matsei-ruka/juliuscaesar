@@ -37,40 +37,55 @@ _REDACT_RE = re.compile(
     r'(?i)(?:(api[_-]?key|token|secret|authorization)\s*[:=]\s*(?:bearer\s+)?\S+|\bbearer\s+\S+)',
 )
 
-_PROMPTS: dict[str, dict[str, str]] = {
-    "en": {
-        "system": (
-            "You are a concise progress narrator. You receive recent output lines "
-            "from an AI assistant's tool trace and describe what it is doing "
-            "in ONE sentence of at most 14 words. "
-            "Use plain language. No technical jargon about the underlying framework. "
-            "Never mention: gateway, adapter, brain, JuliusCaesar, conversation_id, "
-            "event_id, pid, stderr, queue.db. "
-            'Respond ONLY with valid JSON: {"narration": "<sentence>"}'
-        ),
-        "user": (
-            "Phase: {phase}\n"
-            "Recent output:\n```\n{tail}\n```\n"
-            "Prior narration (avoid repeating): {prior}\n\n"
-            "Narrate the latest meaningful signal in one sentence, max 14 words, in English."
-        ),
-    },
-    "it": {
-        "system": (
-            "Sei un narratore conciso di progressi. Ricevi le ultime righe di output "
-            "da un assistente AI e descrivi in UNA frase di massimo 14 parole cosa sta facendo. "
-            "Linguaggio semplice. Nessun gergo tecnico sul framework sottostante. "
-            "Non menzionare mai: gateway, adapter, brain, JuliusCaesar, conversation_id, "
-            "event_id, pid, stderr, queue.db. "
-            'Rispondi SOLO con JSON valido: {"narration": "<frase>"}'
-        ),
-        "user": (
-            "Fase: {phase}\n"
-            "Output recente:\n```\n{tail}\n```\n"
-            "Narrazione precedente (non ripetere): {prior}\n\n"
-            "Narra l'ultimo segnale significativo in una frase, max 14 parole, in italiano."
-        ),
-    },
+_SYSTEM_PROMPT: dict[str, str] = {
+    "en": (
+        "You are a concise progress narrator. You describe what an AI assistant is doing "
+        "in ONE sentence of at most 14 words. "
+        "Use plain language. No technical jargon about the underlying framework. "
+        "Never mention: gateway, adapter, brain, JuliusCaesar, conversation_id, "
+        "event_id, pid, stderr, queue.db. "
+        'Respond ONLY with valid JSON: {"narration": "<sentence>"}'
+    ),
+    "it": (
+        "Sei un narratore conciso di progressi. Descrivi in UNA frase di massimo 14 parole "
+        "cosa sta facendo un assistente AI. "
+        "Linguaggio semplice. Nessun gergo tecnico sul framework sottostante. "
+        "Non menzionare mai: gateway, adapter, brain, JuliusCaesar, conversation_id, "
+        "event_id, pid, stderr, queue.db. "
+        'Rispondi SOLO con JSON valido: {"narration": "<frase>"}'
+    ),
+}
+
+_STDERR_USER: dict[str, str] = {
+    "en": (
+        "Phase: {phase}\n"
+        "Recent output:\n```\n{tail}\n```\n"
+        "Prior narration (avoid repeating): {prior}\n\n"
+        "Narrate the latest meaningful signal in one sentence, max 14 words, in English."
+    ),
+    "it": (
+        "Fase: {phase}\n"
+        "Output recente:\n```\n{tail}\n```\n"
+        "Narrazione precedente (non ripetere): {prior}\n\n"
+        "Narra l'ultimo segnale significativo in una frase, max 14 parole, in italiano."
+    ),
+}
+
+_NO_STDERR_USER: dict[str, str] = {
+    "en": (
+        "Task: {task}\n"
+        "Running for: {elapsed}\n"
+        "Prior narration (avoid repeating): {prior}\n\n"
+        "The AI assistant is actively working. No output yet. "
+        "Narrate in one sentence (max 14 words) what it is likely doing right now, in English."
+    ),
+    "it": (
+        "Compito: {task}\n"
+        "In esecuzione da: {elapsed}\n"
+        "Narrazione precedente (non ripetere): {prior}\n\n"
+        "L'assistente AI sta lavorando attivamente. Nessun output ancora. "
+        "Narra in una frase (max 14 parole) cosa sta probabilmente facendo in questo momento, in italiano."
+    ),
 }
 
 
@@ -147,10 +162,9 @@ def _call_model(
         return None
 
 
-_PID_ALIVE_SIGNAL: dict[str, str] = {
-    "en": "processing…",
-    "it": "elaborando…",
-}
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def narrate(
@@ -164,23 +178,19 @@ def narrate(
 ) -> NarratorResult:
     """Return narration for the card's Last signal field.
 
-    Fast path: when stderr is empty and the adapter PID is alive, we return a
-    generic "processing…" string without calling the AI. This avoids wasting
-    narrator budget on claude-brain events that write nothing to stderr.
+    When stderr is empty (e.g. claude brain) and PID is alive, calls the AI
+    using event content + elapsed time so the signal reads as natural language,
+    not a hardcoded string.
 
     Falls back to phase label if model is unavailable or output fails validation.
     """
-    lang = snap.language if snap.language in _PROMPTS else "en"
+    lang = snap.language if snap.language in _SYSTEM_PROMPT else "en"
     fallback_text = snap.phase.label_for(lang)
 
     tail_raw = snap.adapter.stderr_tail or ""
 
-    # Fast path: no stderr content → use pid-alive signal (free, no AI call).
-    if not tail_raw:
-        if snap.adapter.pid_alive:
-            return NarratorResult(text=_PID_ALIVE_SIGNAL.get(lang, "processing…"), from_model=False)
-        # PID dead + no stderr → brain just finished; finalize will delete card.
-        # Return last known narration or fallback so the card stays meaningful.
+    if not tail_raw and not snap.adapter.pid_alive:
+        # PID dead + no stderr → brain finished; finalize will delete card.
         return NarratorResult(text=ev_state.last_narration or fallback_text, from_model=False)
 
     if not narrator_budget:
@@ -192,21 +202,30 @@ def narrate(
             log(f"supervisor narrator: unsupported provider '{provider}', using fallback")
         return NarratorResult(text=fallback_text, from_model=False)
 
-    prompts = _PROMPTS[lang]
-    tail_redacted = redact_stderr(tail_raw[-2000:])
+    system = _SYSTEM_PROMPT[lang]
     prior = ev_state.last_narration or "none"
     phase_label = snap.phase.label_for(lang)
 
-    system = prompts["system"]
-    user = prompts["user"].format(
-        phase=phase_label,
-        tail=tail_redacted or "(no output yet)",
-        prior=prior,
-    )
+    if tail_raw:
+        tail_redacted = redact_stderr(tail_raw[-2000:])
+        user = _STDERR_USER[lang].format(
+            phase=phase_label,
+            tail=tail_redacted,
+            prior=prior,
+        )
+    else:
+        # stderr empty but PID alive — narrate from task description + elapsed.
+        task = (snap.event.content or "")[:300].strip() or phase_label
+        elapsed = _format_elapsed(snap.age_seconds)
+        user = _NO_STDERR_USER[lang].format(
+            task=task,
+            elapsed=elapsed,
+            prior=prior,
+        )
 
     raw = _call_model(instance_dir, model, system, user, log=log)
     if raw is None:
-        return NarratorResult(text=fallback_text, from_model=False)
+        return NarratorResult(text=ev_state.last_narration or fallback_text, from_model=False)
 
     # Parse JSON {"narration": "..."}; accept plain text as fallback
     try:
