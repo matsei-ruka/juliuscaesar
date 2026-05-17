@@ -5,6 +5,39 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.05.17.03
+
+Supervisor: progress cards, silent recovery ladder, audit fixes.
+
+Lands the `feat/supervisor` branch (Phases 1–6) plus the critical and
+high-severity bugs from `docs/specs/supervisor-audit-opus.md`.
+
+- New `jc supervisor` process emits Telegram/Slack/Discord progress
+  cards for long-running events, classifies adapter phase
+  (reading/thinking/coding/idle) from log/session signal, optional AI
+  narrator (Last signal line) with per-tick + per-event budgets, and
+  loop-guard final cards. Disabled by default; toggle via
+  `jc supervisor enable|disable`.
+- Silent recovery: when an event's adapter PID is gone, supervisor
+  re-queues it (with optional `drop_resume_session` + backoff) without
+  surfacing a "crash" to the user. After `max_recovery_attempts` the
+  event is escalated to `failed` and handed off to the watchdog with a
+  neutral ⏹ stopped card.
+- Audit critical fixes (`docs/specs/supervisor-audit-opus.md` #1–#4):
+  recovery counter pin TTL prevents reset across requeue cycles;
+  `reset_running_to_queued` wraps SELECT+UPDATE in `BEGIN IMMEDIATE`
+  with CAS on `locked_by`; `complete`/`fail` gain opt-in
+  `expected_locked_by` guard against stale-worker overwrite; YAML
+  round-trip replaces sed for `enable|disable`.
+- Audit high fixes (#5, #8–#11): `_is_pid_alive` treats
+  `PermissionError` as alive; `edit_card_slack` returns False on
+  `message_not_found` so the runner can re-send; `_render_and_send`
+  clears the stale id and re-sends in the same tick when edit fails;
+  `_finalize_completed` now handles `failed`/`escalated` events with a
+  neutral stopped card; escalation path closes the in-progress card
+  before handing off to the watchdog.
+- 183 supervisor + gateway-queue tests pass.
+
 ## 2026.05.17.02
 
 Release for video ingestion + WhatsApp shim wiring.
