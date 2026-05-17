@@ -458,56 +458,63 @@ class PiRegexTests(unittest.TestCase):
 
 
 class PiBrainAdjustModelTests(unittest.TestCase):
-    """PiBrain.adjust_model() upgrades to vision_model when session has image_url."""
+    """PiBrain.adjust_model() is a pass-through (session handling in adjust_resume_session)."""
 
     def _brain(self, vision_model: str | None = None, tmpdir: Path | None = None) -> PiBrain:
         override = BrainOverrideConfig(vision_model=vision_model)
         instance = tmpdir or Path(tempfile.mkdtemp())
         return PiBrain(instance, override=override)
 
-    def test_returns_model_unchanged_when_no_vision_model_configured(self) -> None:
-        brain = self._brain(vision_model=None)
+    def test_returns_model_unchanged(self) -> None:
+        brain = self._brain(vision_model="deepseek-v4-pro")
         self.assertEqual(brain.adjust_model("deepseek-v4-flash", "some-uuid"), "deepseek-v4-flash")
 
-    def test_returns_model_unchanged_when_no_resume_session(self) -> None:
+    def test_returns_model_unchanged_when_no_session(self) -> None:
         brain = self._brain(vision_model="deepseek-v4-pro")
         self.assertEqual(brain.adjust_model("deepseek-v4-flash", None), "deepseek-v4-flash")
 
-    def test_returns_model_unchanged_when_already_vision_model(self) -> None:
-        brain = self._brain(vision_model="deepseek-v4-pro")
-        self.assertEqual(brain.adjust_model("deepseek-v4-pro", "some-uuid"), "deepseek-v4-pro")
 
-    def test_upgrades_model_when_session_has_image_url(self) -> None:
+class PiBrainAdjustResumeSessionTests(unittest.TestCase):
+    """PiBrain.adjust_resume_session() drops sessions with image content."""
+
+    def _brain(self, vision_model: str | None = None, tmpdir: Path | None = None) -> PiBrain:
+        override = BrainOverrideConfig(vision_model=vision_model)
+        instance = tmpdir or Path(tempfile.mkdtemp())
+        return PiBrain(instance, override=override)
+
+    def test_returns_none_when_no_session(self) -> None:
+        brain = self._brain()
+        self.assertIsNone(brain.adjust_resume_session("deepseek-v4-flash", None))
+
+    def test_drops_session_when_has_image_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
-            # Pi stores images as {"type":"image","mimeType":"...","data":"..."} in
-            # session JSONL (no spaces around colon — pi's own serializer).
+            brain = self._brain(tmpdir=Path(tmpdir))
             uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
             session_dir = _pi_session_dir(tmpdir)
             session_dir.mkdir(parents=True, exist_ok=True)
             (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
                 b'{"type":"image","mimeType":"image/jpeg","data":"/9j/abc"}'
             )
-            result = brain.adjust_model("deepseek-v4-flash", uuid)
-            self.assertEqual(result, "deepseek-v4-pro")
+            result = brain.adjust_resume_session("deepseek-v4-flash", uuid)
+            self.assertIsNone(result)
 
-    def test_keeps_model_when_session_has_no_image_url(self) -> None:
+    def test_keeps_session_when_text_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
+            brain = self._brain(tmpdir=Path(tmpdir))
             uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
             session_dir = _pi_session_dir(tmpdir)
             session_dir.mkdir(parents=True, exist_ok=True)
             (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
                 b'{"role":"user","content":[{"type":"text","text":"hello"}]}'
             )
-            result = brain.adjust_model("deepseek-v4-flash", uuid)
-            self.assertEqual(result, "deepseek-v4-flash")
+            result = brain.adjust_resume_session("deepseek-v4-flash", uuid)
+            self.assertEqual(result, uuid)
 
-    def test_keeps_model_when_session_file_not_found(self) -> None:
+    def test_keeps_session_when_file_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
-            result = brain.adjust_model("deepseek-v4-flash", "nonexistent-uuid")
-            self.assertEqual(result, "deepseek-v4-flash")
+            brain = self._brain(tmpdir=Path(tmpdir))
+            result = brain.adjust_resume_session("deepseek-v4-flash", "nonexistent-uuid")
+            self.assertEqual(result, "nonexistent-uuid")
 
 
 class SessionHasImageUrlTests(unittest.TestCase):

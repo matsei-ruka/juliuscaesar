@@ -243,6 +243,18 @@ Your reply is only the text the user reads.
         """
         return model
 
+    def adjust_resume_session(
+        self, model: str | None, resume_session: str | None
+    ) -> str | None:
+        """Optional hook to clear or replace the resume session before dispatch.
+
+        Called after adjust_model(). Default: return resume_session unchanged.
+        Subclasses override to drop contaminated sessions (e.g. sessions that
+        contain content types incompatible with the selected model).
+        Return None to force a fresh session start.
+        """
+        return resume_session
+
     def extra_args_for_event(self, event: Event) -> tuple[str, ...]:
         return ()
 
@@ -313,6 +325,13 @@ Your reply is only the text the user reads.
             env.pop("WORKER_RESUME_SESSION", None)
         env.update(self.extra_env())
         model = self.adjust_model(model, resume_session)
+        resume_session = self.adjust_resume_session(model, resume_session)
+        if resume_session:
+            env["JC_RESUME_SESSION"] = resume_session
+            env["WORKER_RESUME_SESSION"] = resume_session
+        else:
+            env.pop("JC_RESUME_SESSION", None)
+            env.pop("WORKER_RESUME_SESSION", None)
         timeout = self.override.timeout_seconds or timeout_seconds
         start = now_iso()
         wall_start = time.monotonic()

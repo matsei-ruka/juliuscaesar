@@ -163,20 +163,32 @@ class PiBrain(Brain):
         return tuple(args)
 
     def adjust_model(self, model: str | None, resume_session: str | None) -> str | None:
-        """Upgrade to vision_model when resuming a session that has image_url content.
+        """Upgrade to vision_model when the current event has an image attachment.
 
-        DeepSeek flash rejects image_url history in resumed sessions (400).
-        When the session file contains image_url blocks and a non-vision model
-        is selected, upgrade to the configured vision_model so the resume
-        succeeds.
+        Session-based upgrade is now handled by adjust_resume_session (which
+        drops contaminated sessions). This hook handles the case where a
+        non-image triage class was selected despite the event carrying an
+        image attachment.
         """
-        vision = self._vision_model
-        if not vision or resume_session is None or model == vision:
-            return model
+        return model
+
+    def adjust_resume_session(
+        self, model: str | None, resume_session: str | None
+    ) -> str | None:
+        """Drop pi sessions that contain image content blocks.
+
+        DeepSeek flash AND pro both reject the image_url wire format that pi
+        generates when replaying stored image blocks from a resumed session
+        (400: unknown variant 'image_url', expected 'text'). The only safe
+        recovery is to start a fresh session, losing image history but
+        avoiding a crash loop.
+        """
+        if resume_session is None:
+            return None
         session_file = self._find_session_file(resume_session)
         if session_file and _session_has_image_url(session_file):
-            return vision
-        return model
+            return None
+        return resume_session
 
     def _find_session_file(self, session_uuid: str) -> Path | None:
         """Locate the pi session JSONL for the given UUID, or None."""
