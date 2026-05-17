@@ -8,7 +8,9 @@ import pytest
 
 from supervisor.snapshot import (
     _brain_map_from_log,
+    _coalesce_siblings_from_log,
     _detect_language,
+    _extract_id_list,
     _extract_int,
     _extract_token,
     _is_pid_alive,
@@ -130,3 +132,60 @@ def test_is_pid_alive_treats_permission_error_as_alive():
     """
     with mock.patch("supervisor.snapshot.os.kill", side_effect=PermissionError):
         assert _is_pid_alive(1) is True
+
+
+# --- _extract_id_list ---
+
+def test_extract_id_list_basic():
+    assert _extract_id_list("coalesce: claimed 3 events ids=[1, 2, 3]", "ids=[", "]") == [1, 2, 3]
+
+
+def test_extract_id_list_single():
+    assert _extract_id_list("ids=[42]", "ids=[", "]") == [42]
+
+
+def test_extract_id_list_missing():
+    assert _extract_id_list("no list here", "ids=[", "]") == []
+
+
+def test_extract_id_list_garbage_returns_empty():
+    assert _extract_id_list("ids=[abc, 2]", "ids=[", "]") == []
+
+
+# --- _coalesce_siblings_from_log ---
+
+def test_coalesce_siblings_active_batch():
+    lines = [
+        '"msg":"coalesce: claimed 3 events conv_id=X ids=[10, 11, 12]"',
+    ]
+    assert _coalesce_siblings_from_log(lines) == {11, 12}
+
+
+def test_coalesce_siblings_dropped_after_done():
+    lines = [
+        '"msg":"coalesce: claimed 2 events conv_id=X ids=[20, 21]"',
+        '"msg":"coalesce: marked 2 events done ids=[20, 21]"',
+    ]
+    assert _coalesce_siblings_from_log(lines) == set()
+
+
+def test_coalesce_siblings_multiple_batches():
+    lines = [
+        '"msg":"coalesce: claimed 2 events conv_id=X ids=[1, 2]"',
+        '"msg":"coalesce: marked 2 events done ids=[1, 2]"',
+        '"msg":"coalesce: claimed 3 events conv_id=Y ids=[3, 4, 5]"',
+    ]
+    assert _coalesce_siblings_from_log(lines) == {4, 5}
+
+
+def test_coalesce_siblings_marked_queued_clears_too():
+    """coalesce: marked N events queued|failed|done all terminate the batch."""
+    lines = [
+        '"msg":"coalesce: claimed 2 events conv_id=X ids=[7, 8]"',
+        '"msg":"coalesce: marked 2 events queued ids=[7, 8]"',
+    ]
+    assert _coalesce_siblings_from_log(lines) == set()
+
+
+def test_coalesce_siblings_no_log_lines():
+    assert _coalesce_siblings_from_log([]) == set()

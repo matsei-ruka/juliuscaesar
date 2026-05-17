@@ -26,6 +26,7 @@ def build_snapshots(
     log_lines = _read_gateway_log_tail(instance_dir)
     brain_map = _brain_map_from_log(log_lines)
     pid_map = _pid_map_from_log(log_lines)
+    coalesced_siblings = _coalesce_siblings_from_log(log_lines)
     worker_convs = _linked_worker_conversations(instance_dir)
     return _read_qualifying(
         instance_dir,
@@ -33,6 +34,7 @@ def build_snapshots(
         now=now,
         brain_map=brain_map,
         pid_map=pid_map,
+        coalesced_siblings=coalesced_siblings,
         worker_convs=worker_convs,
     )
 
@@ -44,6 +46,7 @@ def _read_qualifying(
     now: datetime,
     brain_map: dict[int, tuple[str, str | None]],
     pid_map: dict[int, int],
+    coalesced_siblings: set[int],
     worker_convs: set[str],
 ) -> list[EventSnapshot]:
     conn = queue.connect(instance_dir)
@@ -58,6 +61,9 @@ def _read_qualifying(
     for row in rows:
         event = queue.row_to_event(row)
         if event is None:
+            continue
+        if event.id in coalesced_siblings:
+            # Coalesced batch sibling — leader event represents the work; skip.
             continue
         age = _event_age(event, now=now)
         brain, model = brain_map.get(event.id, ("unknown", None))
@@ -209,6 +215,50 @@ def _pid_map_from_log(lines: list[str]) -> dict[int, int]:
         pid = _extract_int(line, "pid=")
         if event_id is not None and pid is not None:
             out[event_id] = pid
+    return out
+
+
+def _coalesce_siblings_from_log(lines: list[str]) -> set[int]:
+    """Return set of coalesced sibling event ids whose batch is still in flight.
+
+    Walks the gateway log for matching "coalesce: claimed N events ... ids=[..]"
+    and "coalesce: marked N events <status> ids=[..]" pairs. While a batch is
+    in flight (claimed but not yet terminated), the non-leader members are
+    sibling rows the supervisor must skip — the leader represents the work.
+    """
+    in_flight: dict[int, list[int]] = {}
+    for line in lines:
+        ids = _extract_id_list(line, "ids=[", "]")
+        if not ids:
+            continue
+        leader = ids[0]
+        if "coalesce: claimed" in line:
+            in_flight[leader] = ids[1:]
+        elif "coalesce: marked" in line:
+            in_flight.pop(leader, None)
+    siblings: set[int] = set()
+    for batch in in_flight.values():
+        siblings.update(batch)
+    return siblings
+
+
+def _extract_id_list(line: str, prefix: str, suffix: str) -> list[int]:
+    start = line.find(prefix)
+    if start < 0:
+        return []
+    start += len(prefix)
+    end = line.find(suffix, start)
+    if end < 0:
+        return []
+    out: list[int] = []
+    for tok in line[start:end].split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(int(tok))
+        except ValueError:
+            return []
     return out
 
 
