@@ -108,6 +108,7 @@ class BrainOverrideConfig:
     extra_args: tuple[str, ...] = ()
     no_tools: bool | None = None
     thinking: str | None = None
+    vision_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -845,7 +846,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     errors.append(f"brains.{name}: must be a mapping")
                     continue
                 for key in body:
-                    if key not in {"bin", "sandbox", "yolo", "timeout_seconds", "extra_args", "no_tools", "thinking"}:
+                    if key not in {"bin", "sandbox", "yolo", "timeout_seconds", "extra_args", "no_tools", "thinking", "vision_model"}:
                         errors.append(f"brains.{name}.{key}: unknown field")
                 if body.get("sandbox") is not None:
                     sandbox = str(body["sandbox"])
@@ -1234,6 +1235,7 @@ def _load_brains(data: dict[str, Any]) -> dict[str, BrainOverrideConfig]:
             extra_args=tuple(str(arg) for arg in (body.get("extra_args") or [])),
             no_tools=bool(body["no_tools"]) if body.get("no_tools") is not None else None,
             thinking=str(body["thinking"]) if body.get("thinking") is not None else None,
+            vision_model=str(body["vision_model"]) if body.get("vision_model") is not None else None,
         )
     return out
 

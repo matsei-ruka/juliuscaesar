@@ -18,6 +18,19 @@ _PI_SESSION_UUID_RE = re.compile(
 )
 
 
+def _session_has_image_url(path: Path) -> bool:
+    """Return True if the pi session file contains image_url content blocks.
+
+    DeepSeek flash rejects image_url history with 400. Scanning the session
+    file lets PiBrain upgrade to a vision model before resuming such sessions.
+    Byte-string search is fast even on multi-MB files.
+    """
+    try:
+        return b'"image_url"' in path.read_bytes()
+    except OSError:
+        return False
+
+
 def _pi_session_dir(cwd: str) -> Path:
     """Return the pi session directory for the given cwd.
 
@@ -83,6 +96,18 @@ class PiBrain(Brain):
             return str(raw).strip()
         return None
 
+    @property
+    def _vision_model(self) -> str | None:
+        """Model to use when session contains image_url content.
+
+        Set ``brains.pi.vision_model: <model>`` in gateway.yaml (model only,
+        no ``pi:`` prefix). When unset, no automatic upgrade occurs.
+        """
+        raw = getattr(self.override, "vision_model", None)
+        if raw and str(raw).strip():
+            return str(raw).strip()
+        return None
+
     # ------------------------------------------------------------------
     # Brain hooks
     # ------------------------------------------------------------------
@@ -134,6 +159,30 @@ class PiBrain(Brain):
                 if isinstance(p, str) and p.strip():
                     args.extend(["--image", p.strip()])
         return tuple(args)
+
+    def adjust_model(self, model: str | None, resume_session: str | None) -> str | None:
+        """Upgrade to vision_model when resuming a session that has image_url content.
+
+        DeepSeek flash rejects image_url history in resumed sessions (400).
+        When the session file contains image_url blocks and a non-vision model
+        is selected, upgrade to the configured vision_model so the resume
+        succeeds.
+        """
+        vision = self._vision_model
+        if not vision or resume_session is None or model == vision:
+            return model
+        session_file = self._find_session_file(resume_session)
+        if session_file and _session_has_image_url(session_file):
+            return vision
+        return model
+
+    def _find_session_file(self, session_uuid: str) -> Path | None:
+        """Locate the pi session JSONL for the given UUID, or None."""
+        root = _pi_session_dir(str(self.instance_dir))
+        if not root.is_dir():
+            return None
+        matches = list(root.glob(f"*{session_uuid}*"))
+        return matches[0] if matches else None
 
     # Note: gateway output contract is injected by the adapter via
     # --append-system-prompt (mirrors claude.sh). No prompt_for_event override

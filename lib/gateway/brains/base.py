@@ -233,6 +233,16 @@ Your reply is only the text the user reads.
     def extra_env(self) -> dict[str, str]:
         return {}
 
+    def adjust_model(self, model: str | None, resume_session: str | None) -> str | None:
+        """Optional hook to upgrade the model before adapter dispatch.
+
+        Called after extra_env() and before building the adapter command.
+        Default: return model unchanged. Subclasses override to implement
+        model upgrade logic (e.g. force a vision-capable model when the
+        session has accumulated image content).
+        """
+        return model
+
     def extra_args_for_event(self, event: Event) -> tuple[str, ...]:
         return ()
 
@@ -302,6 +312,7 @@ Your reply is only the text the user reads.
             env.pop("JC_RESUME_SESSION", None)
             env.pop("WORKER_RESUME_SESSION", None)
         env.update(self.extra_env())
+        model = self.adjust_model(model, resume_session)
         timeout = self.override.timeout_seconds or timeout_seconds
         start = now_iso()
         wall_start = time.monotonic()

@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 from gateway.brains.pi import (  # noqa: E402
     PiBrain,
     _pi_session_dir,
+    _session_has_image_url,
     _snapshot_session_paths,
     _PI_SESSION_UUID_RE,
 )
@@ -454,6 +455,77 @@ class PiRegexTests(unittest.TestCase):
         self.assertIsNone(
             _PI_SESSION_UUID_RE.search("2026-05-14T13-28-21-813Z")
         )
+
+
+class PiBrainAdjustModelTests(unittest.TestCase):
+    """PiBrain.adjust_model() upgrades to vision_model when session has image_url."""
+
+    def _brain(self, vision_model: str | None = None, tmpdir: Path | None = None) -> PiBrain:
+        override = BrainOverrideConfig(vision_model=vision_model)
+        instance = tmpdir or Path(tempfile.mkdtemp())
+        return PiBrain(instance, override=override)
+
+    def test_returns_model_unchanged_when_no_vision_model_configured(self) -> None:
+        brain = self._brain(vision_model=None)
+        self.assertEqual(brain.adjust_model("deepseek-v4-flash", "some-uuid"), "deepseek-v4-flash")
+
+    def test_returns_model_unchanged_when_no_resume_session(self) -> None:
+        brain = self._brain(vision_model="deepseek-v4-pro")
+        self.assertEqual(brain.adjust_model("deepseek-v4-flash", None), "deepseek-v4-flash")
+
+    def test_returns_model_unchanged_when_already_vision_model(self) -> None:
+        brain = self._brain(vision_model="deepseek-v4-pro")
+        self.assertEqual(brain.adjust_model("deepseek-v4-pro", "some-uuid"), "deepseek-v4-pro")
+
+    def test_upgrades_model_when_session_has_image_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
+            # Write a fake pi session file with image_url content.
+            uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
+            session_dir = _pi_session_dir(tmpdir)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
+                b'{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg"}}]}'
+            )
+            result = brain.adjust_model("deepseek-v4-flash", uuid)
+            self.assertEqual(result, "deepseek-v4-pro")
+
+    def test_keeps_model_when_session_has_no_image_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
+            uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
+            session_dir = _pi_session_dir(tmpdir)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
+                b'{"role":"user","content":[{"type":"text","text":"hello"}]}'
+            )
+            result = brain.adjust_model("deepseek-v4-flash", uuid)
+            self.assertEqual(result, "deepseek-v4-flash")
+
+    def test_keeps_model_when_session_file_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            brain = self._brain(vision_model="deepseek-v4-pro", tmpdir=Path(tmpdir))
+            result = brain.adjust_model("deepseek-v4-flash", "nonexistent-uuid")
+            self.assertEqual(result, "deepseek-v4-flash")
+
+
+class SessionHasImageUrlTests(unittest.TestCase):
+    def test_detects_image_url(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            f.write(b'{"type":"image_url"}')
+            p = Path(f.name)
+        self.assertTrue(_session_has_image_url(p))
+        p.unlink()
+
+    def test_returns_false_for_text_only(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            f.write(b'{"type":"text","text":"hello"}')
+            p = Path(f.name)
+        self.assertFalse(_session_has_image_url(p))
+        p.unlink()
+
+    def test_returns_false_for_missing_file(self) -> None:
+        self.assertFalse(_session_has_image_url(Path("/nonexistent/path.jsonl")))
 
 
 if __name__ == "__main__":
