@@ -594,6 +594,35 @@ def reset_running_to_queued(
     return True
 
 
+def mark_event_failed(
+    conn: sqlite3.Connection,
+    event_id: int,
+    *,
+    error: str = "recovery_escalated",
+) -> bool:
+    """Mark a 'running' event as failed (supervisor Phase 6 escalation).
+
+    Called after ``max_recovery_attempts`` is exhausted. Only transitions
+    rows in 'running' status — refuses to clobber already-terminal rows.
+    Returns True if the row was actually transitioned.
+    """
+    row = conn.execute(
+        "SELECT status FROM events WHERE id=?", (event_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(event_id)
+    if row["status"] != "running":
+        return False
+    conn.execute(
+        """UPDATE events
+           SET status='failed', finished_at=?, locked_by=NULL, locked_until=NULL, error=?
+           WHERE id=? AND status='running'""",
+        (now_iso(), error, event_id),
+    )
+    conn.commit()
+    return True
+
+
 def update_meta(conn: sqlite3.Connection, event_id: int, meta: dict[str, Any]) -> Event:
     cur = conn.execute(
         "UPDATE events SET meta=? WHERE id=?",

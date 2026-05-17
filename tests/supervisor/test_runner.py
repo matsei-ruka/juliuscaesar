@@ -356,10 +356,9 @@ def test_session_poison_drops_resume(tmp_path):
     assert "resume_session" not in new_meta
 
 
-def test_recovery_loop_guard(tmp_path):
-    """After max_recovery_attempts, recovery stops triggering."""
+def test_max_recovery_escalates_to_failed(tmp_path):
+    """After max_recovery_attempts, supervisor escalates event to failed."""
     _setup_instance(tmp_path)
-    # Pre-seed state so recovery_attempts is already at max
     from supervisor.state import EventState, SupervisorState
     eid = _make_running_event(tmp_path, age_seconds=120.0, pid=999999)
     state = SupervisorState()
@@ -369,15 +368,29 @@ def test_recovery_loop_guard(tmp_path):
     sender = FakeSender()
     result = run_tick(tmp_path, sender=sender)
 
-    # No new recovery triggered
-    assert result.recoveries == []
-    # Event still in 'running' (not reset)
+    # Escalation recorded in recoveries
+    assert len(result.recoveries) == 1
+    assert result.recoveries[0]["event_id"] == eid
+    assert result.recoveries[0]["class"] == "escalated"
+
+    # Event transitioned to failed
     conn = queue.connect(tmp_path)
     try:
-        row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+        row = conn.execute("SELECT status, error FROM events WHERE id=?", (eid,)).fetchone()
     finally:
         conn.close()
-    assert row["status"] == "running"
+    assert row["status"] == "failed"
+    assert row["error"] == "recovery_escalated"
+
+    # State marks escalated=True
+    from supervisor.state import SupervisorState
+    state2 = SupervisorState.load(tmp_path)
+    ev_state = state2.events.get(str(eid))
+    assert ev_state is not None
+    assert ev_state.escalated is True
+
+    # No card sent for escalated event
+    assert sender.sends == []
 
 
 def test_recovery_disabled_no_action(tmp_path):

@@ -207,5 +207,73 @@ class ResetRunningToQueuedTests(unittest.TestCase):
             conn.close()
 
 
+class MarkEventFailedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-failed-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _running_event(self, conn) -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, meta, status, received_at, available_at, started_at,
+               locked_by, locked_until)
+            VALUES ('telegram', 'x', '{}', 'running', '2026-05-17T10:00:00+00:00',
+                    '2026-05-17T10:00:00+00:00', '2026-05-17T10:00:00+00:00',
+                    'worker-1', '2026-05-17T10:05:00+00:00')
+            """
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_transitions_running_to_failed(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn)
+            ok = queue.mark_event_failed(conn, eid)
+            self.assertTrue(ok)
+            row = conn.execute(
+                "SELECT status, error, locked_by, locked_until FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["error"], "recovery_escalated")
+            self.assertIsNone(row["locked_by"])
+            self.assertIsNone(row["locked_until"])
+        finally:
+            conn.close()
+
+    def test_refuses_non_running_event(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn)
+            conn.execute("UPDATE events SET status='done' WHERE id=?", (eid,))
+            conn.commit()
+            ok = queue.mark_event_failed(conn, eid)
+            self.assertFalse(ok)
+            row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+            self.assertEqual(row["status"], "done")
+        finally:
+            conn.close()
+
+    def test_missing_event_raises_keyerror(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            with self.assertRaises(KeyError):
+                queue.mark_event_failed(conn, 99999)
+        finally:
+            conn.close()
+
+    def test_custom_error_message(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn)
+            queue.mark_event_failed(conn, eid, error="custom_reason")
+            row = conn.execute("SELECT error FROM events WHERE id=?", (eid,)).fetchone()
+            self.assertEqual(row["error"], "custom_reason")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from supervisor.recovery import (
     apply_recovery,
     classify_failure,
     decide,
+    escalate_to_failed,
     load_patterns,
     needs_recovery,
 )
@@ -281,6 +282,44 @@ def test_apply_recovery_no_op_if_not_triggered(tmp_path):
     finally:
         conn.close()
     assert row["status"] == "running"
+
+
+# --- escalate_to_failed ---------------------------------------------------
+
+def test_escalate_to_failed_transitions_running(tmp_path):
+    eid = _setup_queue(tmp_path)
+    ok = escalate_to_failed(tmp_path, eid)
+    assert ok is True
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT status, error FROM events WHERE id=?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "failed"
+    assert row["error"] == "recovery_escalated"
+
+
+def test_escalate_to_failed_skips_non_running(tmp_path):
+    eid = _setup_queue(tmp_path)
+    conn = queue.connect(tmp_path)
+    try:
+        conn.execute("UPDATE events SET status='done' WHERE id=?", (eid,))
+        conn.commit()
+    finally:
+        conn.close()
+    ok = escalate_to_failed(tmp_path, eid)
+    assert ok is False
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "done"
+
+
+def test_escalate_to_failed_missing_event(tmp_path):
+    ok = escalate_to_failed(tmp_path, 99999)
+    assert ok is False
 
 
 # --- load_patterns --------------------------------------------------------

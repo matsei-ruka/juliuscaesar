@@ -27,7 +27,7 @@ from .delivery import (
 )
 from .models import EventSnapshot, TickResult
 from .narrator import narrate
-from .recovery import apply_recovery, decide as recovery_decide, load_patterns
+from .recovery import apply_recovery, decide as recovery_decide, escalate_to_failed, load_patterns
 from .snapshot import build_snapshots
 from .state import EventState, SupervisorState
 
@@ -89,31 +89,56 @@ def run_tick(
         for snap in snapshots:
             ev_state = state.event(snap.event.id)
             decision = recovery_decide(snap, ev_state, cfg, patterns=patterns)
-            if not decision.triggered:
-                continue
-            if not dry_run:
-                ok = apply_recovery(instance_dir, snap.event.id, decision, log=log)
+
+            if decision.triggered:
+                if not dry_run:
+                    ok = apply_recovery(instance_dir, snap.event.id, decision, log=log)
+                    if ok:
+                        ev_state.recovery_attempts += 1
+                        recovered_ids.add(snap.event.id)
+                        result.recoveries.append(
+                            {
+                                "event_id": snap.event.id,
+                                "class": decision.failure_class,
+                                "drop_resume_session": decision.drop_resume_session,
+                                "available_in_seconds": decision.available_in_seconds,
+                                "attempt": ev_state.recovery_attempts,
+                            }
+                        )
+                        _write_log(
+                            instance_dir,
+                            {
+                                "kind": "supervisor_recovery_triggered",
+                                "ts": now.isoformat(),
+                                "event_id": snap.event.id,
+                                "class": decision.failure_class,
+                                "drop_resume_session": decision.drop_resume_session,
+                                "available_in_seconds": decision.available_in_seconds,
+                                "attempt": ev_state.recovery_attempts,
+                            },
+                        )
+
+            elif decision.reason == "max_recovery_attempts_exceeded" and not dry_run:
+                # Phase 6: exhausted retries — escalate to failed + watchdog handoff.
+                ok = escalate_to_failed(instance_dir, snap.event.id, log=log)
                 if ok:
-                    ev_state.recovery_attempts += 1
+                    ev_state.escalated = True
                     recovered_ids.add(snap.event.id)
                     result.recoveries.append(
                         {
                             "event_id": snap.event.id,
-                            "class": decision.failure_class,
-                            "drop_resume_session": decision.drop_resume_session,
-                            "available_in_seconds": decision.available_in_seconds,
+                            "class": "escalated",
+                            "drop_resume_session": False,
+                            "available_in_seconds": 0,
                             "attempt": ev_state.recovery_attempts,
                         }
                     )
                     _write_log(
                         instance_dir,
                         {
-                            "kind": "supervisor_recovery_triggered",
+                            "kind": "supervisor_recovery_escalated",
                             "ts": now.isoformat(),
                             "event_id": snap.event.id,
-                            "class": decision.failure_class,
-                            "drop_resume_session": decision.drop_resume_session,
-                            "available_in_seconds": decision.available_in_seconds,
                             "attempt": ev_state.recovery_attempts,
                         },
                     )

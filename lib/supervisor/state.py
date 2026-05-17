@@ -18,6 +18,7 @@ class EventState:
     narration_count: int = 0
     last_narration: str = ""
     recovery_attempts: int = 0
+    escalated: bool = False
     language: str = "en"
     card_count: int = 0
 

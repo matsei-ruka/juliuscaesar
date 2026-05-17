@@ -167,6 +167,35 @@ def apply_recovery(
     return ok
 
 
+def escalate_to_failed(
+    instance_dir: Path,
+    event_id: int,
+    *,
+    log: LogFn | None = None,
+) -> bool:
+    """Mark event failed after max_recovery_attempts exhausted (Phase 6).
+
+    Writes to queue only — caller is responsible for updating EventState and
+    writing the supervisor log entry. Returns True if the row was transitioned.
+    """
+    conn = queue.connect(instance_dir)
+    try:
+        ok = queue.mark_event_failed(conn, event_id, error="recovery_escalated")
+    except KeyError:
+        if log:
+            log(f"supervisor escalate_to_failed: event {event_id} not found")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor escalate_to_failed failed event={event_id}: {exc}")
+        return False
+    finally:
+        conn.close()
+    if log and ok:
+        log(f"supervisor escalation event={event_id} marked failed")
+    return ok
+
+
 def load_patterns(
     instance_dir: Path, recovery_patterns_path: str = ""
 ) -> dict[str, list[re.Pattern]]:
