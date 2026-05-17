@@ -65,6 +65,7 @@ Subcommands:
   self-model   Autonomous self-observation loop (jc-self-model).
   persona      Persona interview engine (jc-persona).
   approvals    Unified local approvals table (jc-approvals).
+  supervisor   Per-event progress cards + silent recovery (jc-supervisor).
 Global flags:
   --instance-dir <path>    Override instance dir (or set \$JC_INSTANCE_DIR).
 
@@ -117,7 +118,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|whatsapp|transcripts|commitments|dream|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|completion|approvals)
+    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|whatsapp|transcripts|commitments|dream|supervisor|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|completion|approvals)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127
