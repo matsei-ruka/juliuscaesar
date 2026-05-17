@@ -184,8 +184,15 @@ PYEOF
 
         self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
         # cd to INSTANCE_DIR so the daemon's cwd matches the watchdog health check.
-        (cd "$INSTANCE_DIR" && setsid "$self" --instance-dir "$INSTANCE_DIR" watch --interval "$interval" \
-            >> "$log_file" 2>&1 < /dev/null) &
+        # Prefer setsid (Linux) for full session detach; fall back to plain
+        # backgrounded subshell on macOS where setsid is absent.
+        if command -v setsid >/dev/null 2>&1; then
+            (cd "$INSTANCE_DIR" && setsid "$self" --instance-dir "$INSTANCE_DIR" watch --interval "$interval" \
+                >> "$log_file" 2>&1 < /dev/null) &
+        else
+            (cd "$INSTANCE_DIR" && "$self" --instance-dir "$INSTANCE_DIR" watch --interval "$interval" \
+                >> "$log_file" 2>&1 < /dev/null) &
+        fi
         child_pid=$!
         disown "$child_pid" 2>/dev/null || true
         # The child writes its own pidfile inside `watch`; stamp it here too
