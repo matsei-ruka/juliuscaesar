@@ -183,8 +183,9 @@ PYEOF
         fi
 
         self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-        setsid "$self" --instance-dir "$INSTANCE_DIR" watch --interval "$interval" \
-            >> "$log_file" 2>&1 < /dev/null &
+        # cd to INSTANCE_DIR so the daemon's cwd matches the watchdog health check.
+        (cd "$INSTANCE_DIR" && setsid "$self" --instance-dir "$INSTANCE_DIR" watch --interval "$interval" \
+            >> "$log_file" 2>&1 < /dev/null) &
         child_pid=$!
         disown "$child_pid" 2>/dev/null || true
         # The child writes its own pidfile inside `watch`; stamp it here too
