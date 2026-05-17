@@ -347,6 +347,9 @@ Your reply is only the text the user reads.
         stderr_dir = self.instance_dir / "state" / "gateway" / "adapter_stderr"
         stderr_dir.mkdir(parents=True, exist_ok=True)
         stderr_path = stderr_dir / f"{event.id}-{os.getpid()}-{int(wall_start)}.log"
+        stdout_dir = self.instance_dir / "state" / "gateway" / "adapter_stdout"
+        stdout_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = stdout_dir / f"{event.id}-{os.getpid()}-{int(wall_start)}.log"
         with log_path.open("ab") as binlog:
             binlog.write(
                 f"[{start}] adapter start event={event.id} brain={self.name} model={model or '-'}\n".encode()
@@ -361,6 +364,7 @@ Your reply is only the text the user reads.
             except OSError:
                 pass
             stderr_handle = stderr_path.open("wb")
+            stdout_handle = stdout_path.open("wb")
             try:
                 try:
                     cmd = [
@@ -372,12 +376,11 @@ Your reply is only the text the user reads.
                     proc = subprocess.Popen(
                         cmd,
                         stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
+                        stdout=stdout_handle,
                         stderr=stderr_handle,
                         cwd=str(self.instance_dir),
                         env=env,
                         start_new_session=True,
-                        text=True,
                     )
                 except Exception as exc:  # noqa: BLE001
                     log(
@@ -389,7 +392,8 @@ Your reply is only the text the user reads.
                     f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
                 )
                 try:
-                    stdout, _ = proc.communicate(prompt, timeout=timeout)
+                    prompt_bytes = prompt.encode("utf-8") if prompt else b""
+                    _, _ = proc.communicate(prompt_bytes, timeout=timeout)
                 except subprocess.TimeoutExpired:
                     duration = time.monotonic() - wall_start
                     log(
@@ -410,6 +414,7 @@ Your reply is only the text the user reads.
                 )
             finally:
                 stderr_handle.close()
+                stdout_handle.close()
                 try:
                     binlog.write(stderr_path.read_bytes())
                 except OSError:
@@ -418,6 +423,15 @@ Your reply is only the text the user reads.
                 raise AdapterFailure(self.name, proc.returncode, _read_tail(stderr_path))
         try:
             stderr_path.unlink()
+        except OSError:
+            pass
+        stdout = ""
+        try:
+            stdout = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            pass
+        try:
+            stdout_path.unlink()
         except OSError:
             pass
         session_id = None

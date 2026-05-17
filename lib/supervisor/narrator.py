@@ -346,17 +346,28 @@ def narrate(
             prior=prior,
         )
     else:
-        # No stderr — try reading the live session journal for tool trace.
-        journal_path = _find_active_journal(instance_dir, snap.event.started_at)
-        journal_trace = _extract_journal_trace(journal_path) if journal_path else ""
-        if journal_trace:
+        # No stderr. Try live output in priority order:
+        # 1. stdout sidecar (written live for all brains — pi, codex, opencode, claude)
+        # 2. claude session journal (structured tool trace, claude-only)
+        # 3. task+elapsed fallback
+        live_trace = ""
+
+        stdout_tail = snap.adapter.stdout_tail or ""
+        if stdout_tail:
+            live_trace = redact_stderr(stdout_tail[-2000:])
+
+        if not live_trace and snap.brain.lower() == "claude":
+            journal_path = _find_active_journal(instance_dir, snap.event.started_at)
+            if journal_path:
+                live_trace = _extract_journal_trace(journal_path)
+
+        if live_trace:
             user = _STDERR_USER[lang].format(
                 phase=phase_label,
-                tail=journal_trace,
+                tail=live_trace,
                 prior=prior,
             )
         else:
-            # Journal not available yet — narrate from task description + elapsed.
             task = (snap.event.content or "")[:300].strip() or phase_label
             elapsed = _format_elapsed(snap.age_seconds)
             user = _NO_STDERR_USER[lang].format(

@@ -118,6 +118,19 @@ def _build_adapter_info(
 
     pid_alive = _is_pid_alive(pid) if pid is not None else False
 
+    # Probe adapter_stdout sidecar (written live for non-claude brains).
+    stdout_dir = instance_dir / "state" / "gateway" / "adapter_stdout"
+    stdout_path: Path | None = None
+    stdout_tail = ""
+    if stdout_dir.is_dir():
+        candidates = sorted(
+            stdout_dir.glob(f"{event_id}-*"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        )
+        if candidates:
+            stdout_path = candidates[-1]
+            stdout_tail = _read_tail(stdout_path, tail_bytes)
+
     return AdapterInfo(
         event_id=event_id,
         pid=pid,
@@ -125,6 +138,8 @@ def _build_adapter_info(
         stderr_mtime=stderr_mtime,
         stderr_tail=stderr_tail,
         pid_alive=pid_alive,
+        stdout_path=stdout_path,
+        stdout_tail=stdout_tail,
     )
 
 

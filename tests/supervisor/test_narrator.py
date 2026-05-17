@@ -26,6 +26,7 @@ def _snap(language="en", stderr_tail="Read(/foo.py) done"):
     class FakeAdapter:
         activity_age_seconds = 5.0
         pid_alive = True
+        stdout_tail = ""
 
     class FakeEvent:
         id = 1

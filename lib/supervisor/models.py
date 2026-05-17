@@ -28,6 +28,8 @@ class AdapterInfo:
     stderr_mtime: float | None
     stderr_tail: str
     pid_alive: bool
+    stdout_path: Path | None = None
+    stdout_tail: str = ""
 
     @property
     def activity_age_seconds(self) -> float | None:
