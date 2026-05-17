@@ -29,7 +29,7 @@ from .delivery import (
     send_card_telegram,
 )
 from .models import EventSnapshot, TickResult
-from .narrator import narrate
+from .narrator import generate_title, narrate
 from .recovery import apply_recovery, decide as recovery_decide, escalate_to_failed, load_patterns
 from .snapshot import build_snapshots
 from .state import RECOVERY_STATE_TTL_SECONDS, EventState, SupervisorState
@@ -316,7 +316,20 @@ def _render_and_send(
         },
     )
 
-    title = _title_from_meta(snap.meta, snap.event.content)
+    # Generate AI activity title on first card only (stored in ev_state).
+    if not ev_state.title and narrator_budget:
+        raw_content = snap.event.content or _title_from_meta(snap.meta, snap.event.content)
+        generated = generate_title(
+            raw_content,
+            cfg.narrator_brain,
+            instance_dir,
+            language=ev_state.language,
+            log=log,
+        )
+        if generated:
+            ev_state.title = generated
+
+    title = ev_state.title or _title_from_meta(snap.meta, snap.event.content)
     card = render_card(
         title=title,
         phase=snap.phase,

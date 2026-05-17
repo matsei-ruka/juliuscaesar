@@ -31,6 +31,7 @@ def _snap(language="en", stderr_tail="Read(/foo.py) done"):
         id = 1
         content = "audit repo"
         source = "telegram"
+        started_at = "2026-05-17T10:00:00Z"
 
     class FakeSnap:
         event = FakeEvent()

@@ -29,6 +29,8 @@ class EventState:
     escalated: bool = False
     language: str = "en"
     card_count: int = 0
+    # AI-generated short activity title (set once on first card, persists).
+    title: str = ""
     # Wall-clock timestamp (seconds since epoch) when the entry should become
     # eligible for prune. Set whenever recovery_attempts is bumped or the row
     # transitions out of the active set with non-zero counter; 0 means

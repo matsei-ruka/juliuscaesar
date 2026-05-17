@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -86,6 +88,28 @@ _NO_STDERR_USER: dict[str, str] = {
         "L'assistente AI sta lavorando attivamente. Nessun output ancora. "
         "Narra in una frase (max 14 parole) cosa sta probabilmente facendo in questo momento, in italiano."
     ),
+}
+
+_TITLE_SYSTEM: dict[str, str] = {
+    "en": (
+        "You are a task labeler. Given a user's message to an AI assistant, "
+        "produce a short activity title of at most 6 words. "
+        "Use a gerund or noun phrase (e.g. 'Auditing PHP Repository', 'Searching Auth Vulnerabilities'). "
+        "No punctuation at end. No quotes. "
+        'Respond ONLY with valid JSON: {"title": "<short title>"}'
+    ),
+    "it": (
+        "Sei un classificatore di task. Data una richiesta utente, "
+        "produci un titolo breve dell'attività di massimo 6 parole. "
+        "Usa gerundio o sintagma nominale (es: 'Analisi Repository PHP', 'Ricerca Vulnerabilità Auth'). "
+        "Nessuna punteggiatura finale. Niente virgolette. "
+        'Rispondi SOLO con JSON valido: {"title": "<titolo breve>"}'
+    ),
+}
+
+_TITLE_USER: dict[str, str] = {
+    "en": 'User message: "{message}"\n\nGenerate a short activity title (max 6 words, gerund/noun form), in English:',
+    "it": 'Messaggio: "{message}"\n\nGenera un titolo breve dell\'attività (max 6 parole, gerundio/forma nominale), in italiano:',
 }
 
 
@@ -167,6 +191,114 @@ def _format_elapsed(seconds: float) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def _instance_to_project_slug(instance_dir: Path) -> str:
+    """Convert instance_dir path to Claude's project directory slug."""
+    return str(instance_dir).replace("/", "-").replace("_", "-")
+
+
+def _find_active_journal(instance_dir: Path, started_at_iso: str | None) -> Path | None:
+    """Find the actively-written claude session journal for a running event."""
+    slug = _instance_to_project_slug(instance_dir)
+    journals_dir = Path.home() / ".claude" / "projects" / slug
+    if not journals_dir.is_dir():
+        return None
+
+    now_ts = time.time()
+    cutoff = now_ts - 180  # only consider journals modified in the last 3 min
+
+    started_epoch: float | None = None
+    if started_at_iso:
+        try:
+            dt = datetime.fromisoformat(started_at_iso.replace("Z", "+00:00"))
+            started_epoch = dt.timestamp()
+        except Exception:  # noqa: BLE001
+            pass
+
+    candidates: list[tuple[float, Path]] = []
+    for p in journals_dir.glob("*.jsonl"):
+        try:
+            stat = p.stat()
+        except OSError:
+            continue
+        if stat.st_mtime < cutoff:
+            continue
+        if started_epoch and stat.st_ctime < started_epoch - 10:
+            continue  # created before event started (with 10s slack)
+        candidates.append((stat.st_mtime, p))
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _extract_journal_trace(journal_path: Path, max_entries: int = 30) -> str:
+    """Extract recent tool_use and thinking entries from a claude session journal."""
+    entries: list[str] = []
+    try:
+        with journal_path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "assistant":
+                    continue
+                msg = obj.get("message") or {}
+                for block in (msg.get("content") or []):
+                    btype = block.get("type")
+                    if btype == "tool_use":
+                        name = block.get("name", "")
+                        inp = block.get("input") or {}
+                        args = ", ".join(f"{k}={str(v)[:60]}" for k, v in inp.items())
+                        entries.append(f"{name}({args})")
+                    elif btype == "thinking":
+                        snippet = (block.get("thinking") or "")[:120].strip()
+                        if snippet:
+                            entries.append(f"[thinking] {snippet}")
+    except OSError:
+        return ""
+    return "\n".join(entries[-max_entries:])
+
+
+def generate_title(
+    content: str,
+    narrator_brain: str,
+    instance_dir: Path,
+    *,
+    language: str = "en",
+    log: LogFn | None = None,
+) -> str | None:
+    """Generate a short activity title from the event's user message. Returns None on failure."""
+    lang = language if language in _TITLE_SYSTEM else "en"
+    provider, model = _parse_brain_spec(narrator_brain)
+    if provider != "openrouter":
+        return None
+
+    short_content = content[:200].strip()
+    if not short_content:
+        return None
+
+    raw = _call_model(
+        instance_dir, model,
+        _TITLE_SYSTEM[lang],
+        _TITLE_USER[lang].format(message=short_content),
+        log=log,
+    )
+    if raw is None:
+        return None
+
+    try:
+        obj = json.loads(raw)
+        title = str(obj.get("title") or "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        title = raw.strip()
+
+    if not title or len(title) > 80 or any(tok in title.lower() for tok in _BANNED):
+        return None
+    return title
+
+
 def narrate(
     snap: EventSnapshot,
     ev_state: EventState,
@@ -214,14 +346,24 @@ def narrate(
             prior=prior,
         )
     else:
-        # stderr empty but PID alive — narrate from task description + elapsed.
-        task = (snap.event.content or "")[:300].strip() or phase_label
-        elapsed = _format_elapsed(snap.age_seconds)
-        user = _NO_STDERR_USER[lang].format(
-            task=task,
-            elapsed=elapsed,
-            prior=prior,
-        )
+        # No stderr — try reading the live session journal for tool trace.
+        journal_path = _find_active_journal(instance_dir, snap.event.started_at)
+        journal_trace = _extract_journal_trace(journal_path) if journal_path else ""
+        if journal_trace:
+            user = _STDERR_USER[lang].format(
+                phase=phase_label,
+                tail=journal_trace,
+                prior=prior,
+            )
+        else:
+            # Journal not available yet — narrate from task description + elapsed.
+            task = (snap.event.content or "")[:300].strip() or phase_label
+            elapsed = _format_elapsed(snap.age_seconds)
+            user = _NO_STDERR_USER[lang].format(
+                task=task,
+                elapsed=elapsed,
+                prior=prior,
+            )
 
     raw = _call_model(instance_dir, model, system, user, log=log)
     if raw is None:
