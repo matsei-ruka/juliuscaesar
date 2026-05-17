@@ -16,6 +16,7 @@ class EventState:
     last_phase: str = ""
     channel_message_id: int | None = None
     narration_count: int = 0
+    last_narration: str = ""
     recovery_attempts: int = 0
     language: str = "en"
     card_count: int = 0

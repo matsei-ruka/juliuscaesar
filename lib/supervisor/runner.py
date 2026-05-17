@@ -3,6 +3,7 @@
 Phase 1: snapshot + classify + log.
 Phase 2: render + send/edit cards via channel delivery. Loop guard: never
 writes to ``state/transcripts/``.
+Phase 3: AI narrator — cheap model call fills "Last signal" card field.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from .cards import Card, render_card, render_final_card
 from .config import SupervisorConfig, load_config as load_supervisor_config
 from .delivery import edit_card_telegram, send_card_telegram
 from .models import EventSnapshot, TickResult
+from .narrator import narrate
 from .snapshot import build_snapshots
 from .state import EventState, SupervisorState
 
@@ -73,6 +75,7 @@ def run_tick(
     )
 
     # 2. Send/edit cards for events still running and past threshold.
+    tick_narrator_calls = 0
     for snap in snapshots:
         skip_reason = _should_skip(snap, cfg, state, now)
         if skip_reason:
@@ -95,7 +98,14 @@ def run_tick(
         )
 
         if not dry_run:
-            _render_and_send(instance_dir, state, snap, now=now, sender=sender, log=log)
+            narrator_budget = tick_narrator_calls < cfg.narrator_calls_per_tick_max
+            used = _render_and_send(
+                instance_dir, cfg, state, snap,
+                now=now, sender=sender, log=log,
+                narrator_budget=narrator_budget,
+            )
+            if used:
+                tick_narrator_calls += 1
 
     if not dry_run:
         state.prune(active_ids)
@@ -152,13 +162,16 @@ def _should_skip(
 
 def _render_and_send(
     instance_dir: Path,
+    cfg: SupervisorConfig,
     state: SupervisorState,
     snap: EventSnapshot,
     *,
     now: datetime,
     sender: "CardSender",
     log: LogFn,
-) -> None:
+    narrator_budget: bool = True,
+) -> bool:
+    """Render and send/edit a progress card. Returns True if narrator was called."""
     ev_state = state.event(snap.event.id)
 
     # First card sets the language; subsequent cards keep the same language so
@@ -167,13 +180,37 @@ def _render_and_send(
         ev_state.language = snap.language
         ev_state.first_card_at = now.timestamp()
 
+    # Narrator: call if budget allows and event hasn't hit its cap.
+    narrator_called = False
+    narration_text = ""
+    event_narrator_cap = ev_state.narration_count < cfg.narrator_calls_per_event_max
+    if narrator_budget and event_narrator_cap:
+        result = narrate(
+            snap, ev_state, cfg.narrator_brain, instance_dir, log=log,
+        )
+        narration_text = result.text
+        narrator_called = result.from_model
+        if result.from_model:
+            ev_state.narration_count += 1
+            ev_state.last_narration = result.text
+        _write_log(
+            instance_dir,
+            {
+                "kind": "supervisor_narrator_call",
+                "ts": now.isoformat(),
+                "event_id": snap.event.id,
+                "from_model": result.from_model,
+                "narration": result.text,
+            },
+        )
+
     title = _title_from_meta(snap.meta, snap.event.content)
     card = render_card(
         title=title,
         phase=snap.phase,
         elapsed_seconds=snap.age_seconds,
         activity_age_seconds=snap.adapter.activity_age_seconds,
-        narration="",
+        narration=narration_text,
         language=ev_state.language,
     )
 
@@ -223,6 +260,7 @@ def _render_and_send(
             "ok": ok,
         },
     )
+    return narrator_called
 
 
 def _finalize_completed(
