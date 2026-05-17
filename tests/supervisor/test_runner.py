@@ -393,6 +393,55 @@ def test_max_recovery_escalates_to_failed(tmp_path):
     assert sender.sends == []
 
 
+def test_edit_failure_forces_resend_in_same_tick(tmp_path):
+    """Bug #8 / #9 — when edit returns False (e.g. Slack message_not_found,
+    Telegram message deleted), the runner must clear the stale message_id and
+    immediately send a fresh card so the user keeps seeing progress."""
+    _setup_instance(tmp_path)
+    _make_running_event(tmp_path, age_seconds=120.0, stderr_tail="Read(x)\n")
+
+    class FailingEditSender(CardSender):
+        def __init__(self):
+            self.sends: list[str] = []
+            self.edits: list[str] = []
+            self.next_mid = 5000
+
+        def send(self, *, instance_dir, source, meta, card, log):
+            mid = str(self.next_mid)
+            self.next_mid += 1
+            self.sends.append(mid)
+            return mid
+
+        def edit(self, *, instance_dir, source, meta, message_id, card, log):
+            self.edits.append(message_id)
+            return False  # simulate message_not_found / 404
+
+    sender = FailingEditSender()
+
+    # Tick 1: send initial card
+    run_tick(tmp_path, sender=sender)
+    assert sender.sends == ["5000"]
+    assert sender.edits == []
+
+    # Phase change so backoff doesn't skip; rewrite stderr
+    stderr_dir = tmp_path / "state" / "gateway" / "adapter_stderr"
+    for p in stderr_dir.glob("*"):
+        p.write_text("Bash(ls)\n")
+
+    # Tick 2: edit fails → runner must clear id and send fresh
+    run_tick(tmp_path, sender=sender)
+    assert sender.edits == ["5000"]
+    assert sender.sends == ["5000", "5001"], (
+        "edit returned False but runner did not fall back to send (Bug #8/#9)"
+    )
+
+    # State should now carry the new id
+    from supervisor.state import SupervisorState
+    state = SupervisorState.load(tmp_path)
+    ev_state = next(iter(state.events.values()))
+    assert ev_state.channel_message_id == "5001"
+
+
 def test_recovery_attempts_persist_across_requeue_cycle(tmp_path):
     """Bug #1 — recovery_attempts must survive the requeue→reclaim gap.
 

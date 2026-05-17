@@ -140,11 +140,20 @@ def _read_tail(path: Path, nbytes: int) -> str:
 
 
 def _is_pid_alive(pid: int) -> bool:
+    """Probe ``pid`` with signal 0.
+
+    ``PermissionError`` means the PID exists but belongs to a different user —
+    that is still *alive*. Returning False on permission error would let the
+    supervisor falsely declare a foreign-user (or recycled) PID dead and reset
+    the event out from under a healthy adapter (Bug #5).
+    """
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
 
 
 def _read_gateway_log_tail(instance_dir: Path, max_lines: int = 200) -> list[str]:

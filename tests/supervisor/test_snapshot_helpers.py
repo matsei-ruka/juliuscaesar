@@ -1,10 +1,17 @@
 """Tests for snapshot module helper functions."""
 
+import os
+import sys
+from unittest import mock
+
+import pytest
+
 from supervisor.snapshot import (
     _brain_map_from_log,
     _detect_language,
     _extract_int,
     _extract_token,
+    _is_pid_alive,
     _pid_map_from_log,
 )
 
@@ -103,3 +110,23 @@ def test_detect_language_english_default():
 
 def test_detect_language_empty_content():
     assert _detect_language({}, "") == "en"
+
+
+# --- _is_pid_alive (Bug #5) ---
+
+def test_is_pid_alive_returns_true_for_self():
+    assert _is_pid_alive(os.getpid()) is True
+
+
+def test_is_pid_alive_returns_false_for_missing_pid():
+    """ProcessLookupError → dead."""
+    with mock.patch("supervisor.snapshot.os.kill", side_effect=ProcessLookupError):
+        assert _is_pid_alive(99999) is False
+
+
+def test_is_pid_alive_treats_permission_error_as_alive():
+    """Bug #5 — PermissionError means the PID *exists* (just unprivileged or
+    foreign-user). Returning False would let the supervisor reset live events.
+    """
+    with mock.patch("supervisor.snapshot.os.kill", side_effect=PermissionError):
+        assert _is_pid_alive(1) is True

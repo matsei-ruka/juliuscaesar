@@ -98,6 +98,27 @@ def render_final_card(
     return Card(text=text, phase="done", emoji="✅", language=lang)
 
 
+def render_stopped_card(
+    *,
+    title: str,
+    elapsed_seconds: float,
+    language: str = "en",
+) -> Card:
+    """Neutral terminal card for failed/escalated events.
+
+    Per the loop-guard / no-crash-exposure spec, the user must never see
+    "crash" or "error" text — the supervisor either silently recovers or
+    quietly closes the card. This renderer is used by ``_finalize_completed``
+    for ``status='failed'`` rows and by the escalation path (Bugs #10, #11).
+    """
+    lang = language if language in ("en", "it") else "en"
+    title_short = _truncate(title, 60)
+    elapsed = _format_elapsed(elapsed_seconds)
+    stopped_label = "interrotto" if lang == "it" else "stopped"
+    text = f"⏹ {title_short}\n\n{_LABELS['time'][lang]}: {elapsed} · {stopped_label}"
+    return Card(text=text, phase="stopped", emoji="⏹", language=lang)
+
+
 def _activity_bar(activity_age_seconds: float | None) -> str:
     """10-block bar; full = active within 1s, empties linearly over 60s."""
     if activity_age_seconds is None:

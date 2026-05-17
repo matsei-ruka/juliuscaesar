@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from gateway import queue
 
-from .cards import Card, render_card, render_final_card
+from .cards import Card, render_card, render_final_card, render_stopped_card
 from .config import SupervisorConfig, load_config as load_supervisor_config
 from .delivery import (
     edit_card_discord,
@@ -129,6 +129,31 @@ def run_tick(
 
             elif decision.reason == "max_recovery_attempts_exceeded" and not dry_run:
                 # Phase 6: exhausted retries — escalate to failed + watchdog handoff.
+                # Before transitioning the row, close any open progress card
+                # with the neutral ⏹ stopped layout so the user doesn't see the
+                # last "📖 reading" frame indefinitely (Bug #11). Drop the
+                # message_id afterwards so _finalize_completed doesn't try to
+                # edit a card that's already been finalized here.
+                if ev_state.channel_message_id:
+                    source = snap.event.source or "telegram"
+                    address = _delivery_address(source, snap.meta)
+                    if address:
+                        title = _title_from_meta(snap.meta, snap.event.content)
+                        elapsed = snap.age_seconds
+                        stopped_card = render_stopped_card(
+                            title=title,
+                            elapsed_seconds=elapsed,
+                            language=ev_state.language or "en",
+                        )
+                        sender.edit(
+                            instance_dir=instance_dir,
+                            source=source,
+                            meta=snap.meta,
+                            message_id=ev_state.channel_message_id,
+                            card=stopped_card,
+                            log=log,
+                        )
+                    ev_state.channel_message_id = None
                 ok = escalate_to_failed(instance_dir, snap.event.id, log=log)
                 if ok:
                     ev_state.escalated = True
@@ -309,6 +334,23 @@ def _render_and_send(
             log=log,
         )
         action = "edit"
+        if not ok:
+            # Edit failed (message deleted, expired edit window, etc.). Clear
+            # the stale id and send a fresh card in the same tick so the user
+            # gets continued visibility instead of a permanently orphaned card
+            # (Bug #9, partner to Bug #8).
+            ev_state.channel_message_id = None
+            mid = sender.send(
+                instance_dir=instance_dir,
+                source=source,
+                meta=snap.meta,
+                card=card,
+                log=log,
+            )
+            if mid:
+                ev_state.channel_message_id = mid
+            ok = mid is not None
+            action = "edit_then_send"
     else:
         mid = sender.send(
             instance_dir=instance_dir,
@@ -355,15 +397,14 @@ def _finalize_completed(
     sender: "CardSender",
     log: LogFn,
 ) -> None:
-    """Render ✅ for events that had a card and have since completed.
+    """Render a terminal card for events that had a card and have since
+    finished (Bug #10 / #11).
 
-    A "completed" event is one that:
+    A "finished" event is one that:
     - had a ``channel_message_id`` stored in state (got at least one card),
     - is no longer in the active snapshot set (not running anymore),
-    - is in status ``done`` per queue.db (success path).
-
-    Events in ``failed`` status are not finalized here — Phase 5 (silent
-    recovery) owns that case.
+    - is in a terminal status: ``done`` → ✅ final card, ``failed`` or
+      ``escalated`` → neutral ⏹ stopped card (no crash/error text per spec).
     """
     candidate_ids: list[int] = []
     for k, ev_state in state.events.items():
@@ -386,16 +427,24 @@ def _finalize_completed(
         status_row = statuses.get(eid)
         if status_row is None:
             continue
-        if status_row.get("status") != "done":
+        status = status_row.get("status")
+        if status not in ("done", "failed", "escalated"):
             continue
         ev_state = state.events[str(eid)]
         title = _title_from_status_row(status_row)
         elapsed = _elapsed_from_status_row(status_row, now)
-        card = render_final_card(
-            title=title,
-            elapsed_seconds=elapsed,
-            language=ev_state.language or "en",
-        )
+        if status == "done":
+            card = render_final_card(
+                title=title,
+                elapsed_seconds=elapsed,
+                language=ev_state.language or "en",
+            )
+        else:
+            card = render_stopped_card(
+                title=title,
+                elapsed_seconds=elapsed,
+                language=ev_state.language or "en",
+            )
         if dry_run:
             continue
         source = str(status_row.get("source") or "telegram")
@@ -416,6 +465,7 @@ def _finalize_completed(
                 "kind": "supervisor_card_finalized",
                 "ts": now.isoformat(),
                 "event_id": eid,
+                "status": status,
                 "message_id": ev_state.channel_message_id,
                 "ok": ok,
             },

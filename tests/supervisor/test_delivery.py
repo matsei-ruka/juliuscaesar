@@ -88,6 +88,20 @@ def test_edit_card_slack_not_modified_treated_as_ok(tmp_path):
     assert ok is True
 
 
+def test_edit_card_slack_message_not_found_returns_false(tmp_path):
+    """Bug #8 — message_not_found means the card is GONE; previous behavior
+    treated it as success which kept the dead message_id in state forever.
+    Returning False lets the runner clear the id and re-send next tick.
+    """
+    with patch("supervisor.delivery.http_json") as mock_http, \
+         patch("supervisor.delivery.env_value", return_value="xoxb-test"):
+        mock_http.return_value = {"ok": False, "error": "message_not_found"}
+        ok = edit_card_slack(
+            instance_dir=tmp_path, channel="C123", ts="1715984400.123456", card=_card()
+        )
+    assert ok is False
+
+
 def test_edit_card_slack_api_failure_returns_false(tmp_path):
     with patch("supervisor.delivery.http_json") as mock_http, \
          patch("supervisor.delivery.env_value", return_value="xoxb-test"):

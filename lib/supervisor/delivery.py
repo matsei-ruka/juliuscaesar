@@ -218,8 +218,15 @@ def edit_card_slack(
     if data.get("ok"):
         return True
     err = str(data.get("error") or "").lower()
-    if "not_modified" in err or "message_not_found" in err:
+    if "not_modified" in err:
         return True
+    if "message_not_found" in err:
+        # Message is gone (user deleted / channel archived). Tell caller so it
+        # can clear ``channel_message_id`` and re-send instead of editing the
+        # same dead ID forever (Bug #8).
+        if log:
+            log(f"supervisor edit_card_slack message_not_found: {data}")
+        return False
     if log:
         log(f"supervisor edit_card_slack failed: {data}")
     return False
