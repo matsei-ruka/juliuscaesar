@@ -140,8 +140,14 @@ def apply_recovery(
     decision: RecoveryDecision,
     *,
     log: LogFn | None = None,
+    expected_locked_by: str | None = None,
 ) -> bool:
-    """Apply the queue reset implied by the decision. Returns True on success."""
+    """Apply the queue reset implied by the decision. Returns True on success.
+
+    ``expected_locked_by`` should be the ``locked_by`` value observed at
+    snapshot time. The queue compares it to the current row and refuses the
+    reset if it has changed (Bug #2 race guard).
+    """
     if not decision.triggered:
         return False
     conn = queue.connect(instance_dir)
@@ -151,6 +157,7 @@ def apply_recovery(
             event_id,
             drop_resume_session=decision.drop_resume_session,
             available_in_seconds=decision.available_in_seconds,
+            expected_locked_by=expected_locked_by,
         )
     except Exception as exc:  # noqa: BLE001
         if log:

@@ -393,6 +393,61 @@ def test_max_recovery_escalates_to_failed(tmp_path):
     assert sender.sends == []
 
 
+def test_recovery_attempts_persist_across_requeue_cycle(tmp_path):
+    """Bug #1 — recovery_attempts must survive the requeue→reclaim gap.
+
+    Simulates a flapping adapter: each cycle the supervisor finds a dead-PID
+    running event, recovers it (resets to queued), the dispatcher re-claims,
+    the new adapter dies the same way, repeat. Before the fix, prune() would
+    drop EventState as soon as the event left active_ids, so the counter
+    reset to 0 every cycle and escalation never fired.
+    """
+    _setup_instance(tmp_path)
+    sender = FakeSender()
+    eid = _make_running_event(tmp_path, age_seconds=120.0, pid=999999)
+
+    # Cycle 1: dead-PID → recover, counter goes 0→1.
+    result = run_tick(tmp_path, sender=sender)
+    assert len(result.recoveries) == 1
+    assert result.recoveries[0]["attempt"] == 1
+
+    # Dispatcher "re-claims": flip the row back to running with the same dead
+    # PID. The state.json should still carry recovery_attempts=1.
+    conn = queue.connect(tmp_path)
+    try:
+        conn.execute(
+            "UPDATE events SET status='running', locked_by='worker-2', "
+            "locked_until='2099-01-01T00:00:00Z' WHERE id=?",
+            (eid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Cycle 2: same dead PID → recover again, counter must go 1→2 (not 0→1).
+    result2 = run_tick(tmp_path, sender=sender)
+    assert len(result2.recoveries) == 1
+    assert result2.recoveries[0]["attempt"] == 2, (
+        "recovery_attempts reset to 0 across requeue cycle — Bug #1 regression"
+    )
+
+    # Cycle 3: same dead PID → recover again, counter 2→3 (still tracking).
+    conn = queue.connect(tmp_path)
+    try:
+        conn.execute(
+            "UPDATE events SET status='running', locked_by='worker-3', "
+            "locked_until='2099-01-01T00:00:00Z' WHERE id=?",
+            (eid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    result3 = run_tick(tmp_path, sender=sender)
+    # Default max_recovery_attempts=3 → this tick should escalate.
+    assert len(result3.recoveries) == 1
+    assert result3.recoveries[0]["class"] == "escalated"
+
+
 def test_recovery_disabled_no_action(tmp_path):
     """When recovery.enabled=false, dead PIDs do not trigger reset."""
     ops = tmp_path / "ops"

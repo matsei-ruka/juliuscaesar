@@ -275,5 +275,190 @@ class MarkEventFailedTests(unittest.TestCase):
             conn.close()
 
 
+class ResetRunningCASTests(unittest.TestCase):
+    """Bug #2 — reset_running_to_queued must refuse to clobber a row whose
+    locked_by has changed since the supervisor snapshot."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-reset-cas-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _running_event(self, conn, *, locked_by: str = "worker-1") -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, meta, status, received_at, available_at, started_at,
+               locked_by, locked_until)
+            VALUES ('telegram', 'x', '{}', 'running', '2026-05-17T10:00:00+00:00',
+                    '2026-05-17T10:00:00+00:00', '2026-05-17T10:00:00+00:00',
+                    ?, '2026-05-17T10:05:00+00:00')
+            """,
+            (locked_by,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_resets_when_locked_by_matches(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-A")
+            ok = queue.reset_running_to_queued(
+                conn, eid, expected_locked_by="worker-A"
+            )
+            self.assertTrue(ok)
+            row = conn.execute(
+                "SELECT status FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "queued")
+        finally:
+            conn.close()
+
+    def test_refuses_when_locked_by_changed(self) -> None:
+        """A different worker re-claimed between snapshot and reset; refuse."""
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-B")
+            ok = queue.reset_running_to_queued(
+                conn, eid, expected_locked_by="worker-A"
+            )
+            self.assertFalse(ok)
+            row = conn.execute(
+                "SELECT status, locked_by FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertEqual(row["locked_by"], "worker-B")
+        finally:
+            conn.close()
+
+    def test_no_expectation_resets_unconditionally(self) -> None:
+        """When expected_locked_by is None, behave like the legacy path."""
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="any")
+            ok = queue.reset_running_to_queued(conn, eid)
+            self.assertTrue(ok)
+        finally:
+            conn.close()
+
+
+class CompleteFailStatusGuardTests(unittest.TestCase):
+    """Bug #4 — complete/fail must refuse to overwrite a row that's no longer
+    the caller's claim. Triggered by passing ``expected_locked_by``."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-guard-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _running_event(self, conn, *, locked_by: str = "worker-1") -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, meta, status, received_at, available_at, started_at,
+               locked_by, locked_until)
+            VALUES ('telegram', 'x', '{}', 'running', '2026-05-17T10:00:00+00:00',
+                    '2026-05-17T10:00:00+00:00', '2026-05-17T10:00:00+00:00',
+                    ?, '2026-05-17T10:05:00+00:00')
+            """,
+            (locked_by,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_complete_with_matching_locked_by_succeeds(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-A")
+            ev = queue.complete(
+                conn, eid, response="ok", expected_locked_by="worker-A"
+            )
+            self.assertEqual(ev.status, "done")
+            self.assertEqual(ev.response, "ok")
+        finally:
+            conn.close()
+
+    def test_complete_refuses_when_locked_by_changed(self) -> None:
+        """Stale worker A tries to complete a row now claimed by worker B."""
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-B")
+            with self.assertRaises(KeyError):
+                queue.complete(
+                    conn, eid, response="stale", expected_locked_by="worker-A"
+                )
+            row = conn.execute(
+                "SELECT status, response FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertIsNone(row["response"])
+        finally:
+            conn.close()
+
+    def test_complete_refuses_when_row_not_running(self) -> None:
+        """Row was already completed by someone else; refuse."""
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-A")
+            conn.execute(
+                "UPDATE events SET status='done', locked_by=NULL WHERE id=?",
+                (eid,),
+            )
+            conn.commit()
+            with self.assertRaises(KeyError):
+                queue.complete(
+                    conn, eid, response="late", expected_locked_by="worker-A"
+                )
+        finally:
+            conn.close()
+
+    def test_fail_with_matching_locked_by_requeues(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-A")
+            ev = queue.fail(
+                conn, eid, error="boom",
+                max_retries=3, expected_locked_by="worker-A",
+            )
+            self.assertEqual(ev.status, "queued")
+            self.assertEqual(ev.retry_count, 1)
+        finally:
+            conn.close()
+
+    def test_fail_refuses_when_locked_by_changed(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn, locked_by="worker-B")
+            with self.assertRaises(KeyError):
+                queue.fail(
+                    conn, eid, error="stale",
+                    max_retries=3, expected_locked_by="worker-A",
+                )
+            row = conn.execute(
+                "SELECT status, error FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertIsNone(row["error"])
+        finally:
+            conn.close()
+
+    def test_fail_without_expectation_is_unguarded(self) -> None:
+        """Legacy fixture path (no expected_locked_by) still works on queued
+        rows — used by watchdog tests that fail-fast a never-claimed event."""
+        conn = queue.connect(self.tmp)
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO events (source, content, status, received_at, available_at)
+                VALUES ('telegram', 'x', 'queued', '2026-05-17T10:00:00+00:00',
+                        '2026-05-17T10:00:00+00:00')
+                """
+            )
+            conn.commit()
+            eid = cur.lastrowid
+            ev = queue.fail(conn, eid, error="auth", max_retries=0)
+            self.assertEqual(ev.status, "failed")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

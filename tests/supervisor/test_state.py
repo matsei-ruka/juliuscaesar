@@ -1,6 +1,6 @@
 """Tests for supervisor state load/save."""
 
-from supervisor.state import EventState, SupervisorState
+from supervisor.state import RECOVERY_STATE_TTL_SECONDS, EventState, SupervisorState
 
 
 def test_roundtrip(tmp_path):
@@ -61,3 +61,52 @@ def test_event_creates_default(tmp_path):
     assert isinstance(ev, EventState)
     assert ev.card_count == 0
     assert ev.recovery_attempts == 0
+
+
+# Bug #1 — recovery counter persists across recover→requeue→reclaim cycle.
+def test_prune_pins_entries_with_recovery_attempts(tmp_path):
+    """Entries with non-zero recovery_attempts must survive prune while inside
+    the TTL window — otherwise the counter resets and escalation never fires
+    for flapping events."""
+    state = SupervisorState()
+    state.event(1).last_phase = "reading"  # no recovery → prunable
+    ev2 = state.event(2)
+    ev2.recovery_attempts = 1
+    state.event(3).escalated = True  # treated like recovery state
+
+    now = 1_000_000.0
+    state.prune({99}, now=now)  # nothing active
+
+    # Pristine entry was dropped, recovery + escalated kept and pinned.
+    assert "1" not in state.events
+    assert "2" in state.events
+    assert "3" in state.events
+    assert state.events["2"].pinned_until == now + RECOVERY_STATE_TTL_SECONDS
+    assert state.events["3"].pinned_until == now + RECOVERY_STATE_TTL_SECONDS
+
+
+def test_prune_evicts_after_ttl(tmp_path):
+    """Pinned entries get dropped once the TTL elapses."""
+    state = SupervisorState()
+    ev = state.event(7)
+    ev.recovery_attempts = 2
+    ev.pinned_until = 1_001_000.0  # already-set pin from an earlier prune
+
+    state.prune({}, now=1_000_999.0)  # before pin expires → kept
+    assert "7" in state.events
+
+    state.prune({}, now=1_001_500.0)  # after pin expires → dropped
+    assert "7" not in state.events
+
+
+def test_prune_does_not_pin_active_events(tmp_path):
+    """An active event with recovery_attempts shouldn't get a pinned_until —
+    it's still in the snapshot set so the pin is meaningless and would mask
+    bugs where active entries get treated as stale."""
+    state = SupervisorState()
+    ev = state.event(5)
+    ev.recovery_attempts = 1
+
+    state.prune({5}, now=1_000_000.0)
+    assert "5" in state.events
+    assert state.events["5"].pinned_until == 0.0

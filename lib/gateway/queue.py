@@ -431,22 +431,56 @@ def claim_batch_same_conversation(
         raise
 
 
-def complete(conn: sqlite3.Connection, event_id: int, *, response: str = "") -> Event:
+def complete(
+    conn: sqlite3.Connection,
+    event_id: int,
+    *,
+    response: str = "",
+    expected_locked_by: str | None = None,
+) -> Event:
+    """Mark an event done.
+
+    When ``expected_locked_by`` is provided, the UPDATE is guarded by
+    ``status='running' AND locked_by=?`` so a stale worker whose lease has
+    already been re-claimed by someone else cannot clobber the new claimant's
+    row (Bug #4). When the guard rejects the write, ``KeyError`` is raised so
+    the caller knows the row no longer belongs to it.
+
+    Without the kwarg the call is unguarded (legacy fixture path).
+    """
     ts = now_iso()
-    conn.execute(
-        """
-        UPDATE events
-        SET status='done',
-            finished_at=?,
-            locked_by=NULL,
-            locked_until=NULL,
-            response=?,
-            error=NULL
-        WHERE id=?
-        """,
-        (ts, response, event_id),
-    )
-    conn.commit()
+    if expected_locked_by is not None:
+        cur = conn.execute(
+            """
+            UPDATE events
+            SET status='done',
+                finished_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                response=?,
+                error=NULL
+            WHERE id=? AND status='running' AND locked_by=?
+            """,
+            (ts, response, event_id, expected_locked_by),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            raise KeyError(event_id)
+    else:
+        conn.execute(
+            """
+            UPDATE events
+            SET status='done',
+                finished_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                response=?,
+                error=NULL
+            WHERE id=?
+            """,
+            (ts, response, event_id),
+        )
+        conn.commit()
     event = row_to_event(conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
     if event is None:
         raise KeyError(event_id)
@@ -460,43 +494,95 @@ def fail(
     error: str,
     max_retries: int = 3,
     backoff_seconds: tuple[int, ...] = DEFAULT_RETRY_BACKOFF_SECONDS,
+    expected_locked_by: str | None = None,
 ) -> Event:
-    row = conn.execute("SELECT retry_count FROM events WHERE id=?", (event_id,)).fetchone()
+    """Mark an event failed (or requeue for retry).
+
+    When ``expected_locked_by`` is provided, the UPDATE is guarded by
+    ``status='running' AND locked_by=?`` so a stale worker cannot clobber a
+    freshly-claimed row (Bug #4). On guard rejection ``KeyError`` is raised.
+
+    Without the kwarg the call is unguarded (legacy fixture path).
+    """
+    row = conn.execute(
+        "SELECT retry_count, status, locked_by FROM events WHERE id=?",
+        (event_id,),
+    ).fetchone()
     if row is None:
         raise KeyError(event_id)
+    if expected_locked_by is not None:
+        if row["status"] != "running" or row["locked_by"] != expected_locked_by:
+            raise KeyError(event_id)
 
     retry_count = int(row["retry_count"]) + 1
     ts = now_iso()
     if retry_count <= max_retries:
         delay = backoff_seconds[min(retry_count - 1, len(backoff_seconds) - 1)]
-        conn.execute(
-            """
-            UPDATE events
-            SET status='queued',
-                retry_count=?,
-                available_at=?,
-                locked_by=NULL,
-                locked_until=NULL,
-                error=?
-            WHERE id=?
-            """,
-            (retry_count, add_seconds(ts, delay), error, event_id),
-        )
+        if expected_locked_by is not None:
+            cur = conn.execute(
+                """
+                UPDATE events
+                SET status='queued',
+                    retry_count=?,
+                    available_at=?,
+                    locked_by=NULL,
+                    locked_until=NULL,
+                    error=?
+                WHERE id=? AND status='running' AND locked_by=?
+                """,
+                (retry_count, add_seconds(ts, delay), error, event_id, expected_locked_by),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                raise KeyError(event_id)
+        else:
+            conn.execute(
+                """
+                UPDATE events
+                SET status='queued',
+                    retry_count=?,
+                    available_at=?,
+                    locked_by=NULL,
+                    locked_until=NULL,
+                    error=?
+                WHERE id=?
+                """,
+                (retry_count, add_seconds(ts, delay), error, event_id),
+            )
+            conn.commit()
     else:
-        conn.execute(
-            """
-            UPDATE events
-            SET status='failed',
-                retry_count=?,
-                finished_at=?,
-                locked_by=NULL,
-                locked_until=NULL,
-                error=?
-            WHERE id=?
-            """,
-            (retry_count, ts, error, event_id),
-        )
-    conn.commit()
+        if expected_locked_by is not None:
+            cur = conn.execute(
+                """
+                UPDATE events
+                SET status='failed',
+                    retry_count=?,
+                    finished_at=?,
+                    locked_by=NULL,
+                    locked_until=NULL,
+                    error=?
+                WHERE id=? AND status='running' AND locked_by=?
+                """,
+                (retry_count, ts, error, event_id, expected_locked_by),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                raise KeyError(event_id)
+        else:
+            conn.execute(
+                """
+                UPDATE events
+                SET status='failed',
+                    retry_count=?,
+                    finished_at=?,
+                    locked_by=NULL,
+                    locked_until=NULL,
+                    error=?
+                WHERE id=?
+                """,
+                (retry_count, ts, error, event_id),
+            )
+            conn.commit()
     event = row_to_event(conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
     if event is None:
         raise KeyError(event_id)
@@ -533,65 +619,121 @@ def reset_running_to_queued(
     *,
     drop_resume_session: bool = False,
     available_in_seconds: int = 0,
+    expected_locked_by: str | None = None,
 ) -> bool:
     """Reset a 'running' event back to 'queued' (supervisor silent recovery).
 
-    Returns True if the row was actually transitioned. Refuses to reset
-    rows not in 'running' status (safety check — avoids clobbering done
-    or failed events).
+    Returns True if the row was actually transitioned. Refuses to reset rows
+    not in 'running' status, and — when ``expected_locked_by`` is provided —
+    refuses to reset rows whose ``locked_by`` has changed since the supervisor
+    snapshot. Compare-and-set guards Bug #2: between the supervisor's snapshot
+    read and this UPDATE, a lease may have expired and the dispatcher may have
+    re-claimed the event to a *different* worker; without the CAS we would
+    yank the row out from under the new worker.
+
+    The whole operation runs inside ``BEGIN IMMEDIATE`` so dispatcher claims
+    (which also acquire a write lock) cannot interleave with the SELECT.
 
     Optional:
       - drop_resume_session: removes ``resume_session`` from meta JSON
         (used for session-poison class).
       - available_in_seconds: backoff before dispatcher re-picks the event.
+      - expected_locked_by: when set, only reset if ``locked_by`` matches.
     """
-    row = conn.execute(
-        "SELECT status, meta FROM events WHERE id=?",
-        (event_id,),
-    ).fetchone()
-    if row is None:
-        raise KeyError(event_id)
-    if row["status"] != "running":
-        return False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, meta, locked_by FROM events WHERE id=?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            raise KeyError(event_id)
+        if row["status"] != "running":
+            conn.rollback()
+            return False
+        if (
+            expected_locked_by is not None
+            and row["locked_by"] != expected_locked_by
+        ):
+            conn.rollback()
+            return False
 
-    new_available_at = add_seconds(now_iso(), available_in_seconds)
+        new_available_at = add_seconds(now_iso(), available_in_seconds)
 
-    if drop_resume_session:
-        try:
-            meta = json.loads(row["meta"]) if row["meta"] else {}
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-        if isinstance(meta, dict) and "resume_session" in meta:
-            meta.pop("resume_session", None)
-        meta_text = encode_meta(meta) if isinstance(meta, dict) else row["meta"]
-        conn.execute(
-            """
-            UPDATE events
-            SET status='queued',
-                available_at=?,
-                locked_by=NULL,
-                locked_until=NULL,
-                started_at=NULL,
-                meta=?
-            WHERE id=? AND status='running'
-            """,
-            (new_available_at, meta_text, event_id),
-        )
-    else:
-        conn.execute(
-            """
-            UPDATE events
-            SET status='queued',
-                available_at=?,
-                locked_by=NULL,
-                locked_until=NULL,
-                started_at=NULL
-            WHERE id=? AND status='running'
-            """,
-            (new_available_at, event_id),
-        )
-    conn.commit()
-    return True
+        if drop_resume_session:
+            try:
+                meta = json.loads(row["meta"]) if row["meta"] else {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            if isinstance(meta, dict) and "resume_session" in meta:
+                meta.pop("resume_session", None)
+            meta_text = (
+                encode_meta(meta) if isinstance(meta, dict) else row["meta"]
+            )
+            if expected_locked_by is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE events
+                    SET status='queued',
+                        available_at=?,
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        started_at=NULL,
+                        meta=?
+                    WHERE id=? AND status='running' AND locked_by=?
+                    """,
+                    (new_available_at, meta_text, event_id, expected_locked_by),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE events
+                    SET status='queued',
+                        available_at=?,
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        started_at=NULL,
+                        meta=?
+                    WHERE id=? AND status='running'
+                    """,
+                    (new_available_at, meta_text, event_id),
+                )
+        else:
+            if expected_locked_by is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE events
+                    SET status='queued',
+                        available_at=?,
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        started_at=NULL
+                    WHERE id=? AND status='running' AND locked_by=?
+                    """,
+                    (new_available_at, event_id, expected_locked_by),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE events
+                    SET status='queued',
+                        available_at=?,
+                        locked_by=NULL,
+                        locked_until=NULL,
+                        started_at=NULL
+                    WHERE id=? AND status='running'
+                    """,
+                    (new_available_at, event_id),
+                )
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def mark_event_failed(

@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any
 
 
+# Cool-down window for stale (non-active) EventState entries that carry a
+# non-zero recovery counter. Without it Bug #1 fires: an event that gets
+# recovered leaves the snapshot set, prune drops its EventState, and the next
+# claim creates a fresh EventState with recovery_attempts=0 — escalation never
+# triggers for flapping events. 600s ≈ 20 ticks at the 30s default cadence.
+RECOVERY_STATE_TTL_SECONDS = 600.0
+
+
 @dataclass
 class EventState:
     first_card_at: float = 0.0
@@ -21,6 +29,11 @@ class EventState:
     escalated: bool = False
     language: str = "en"
     card_count: int = 0
+    # Wall-clock timestamp (seconds since epoch) when the entry should become
+    # eligible for prune. Set whenever recovery_attempts is bumped or the row
+    # transitions out of the active set with non-zero counter; 0 means
+    # "no pin — prune as usual".
+    pinned_until: float = 0.0
 
 
 _EVENT_FIELDS = set(EventState.__dataclass_fields__)
@@ -37,10 +50,27 @@ class SupervisorState:
             self.events[key] = EventState()
         return self.events[key]
 
-    def prune(self, active_ids: set[int]) -> None:
+    def prune(self, active_ids: set[int], *, now: float | None = None) -> None:
+        """Drop entries not in ``active_ids``.
+
+        Keep entries with non-zero ``recovery_attempts`` (or ``escalated``)
+        until ``pinned_until`` elapses. This protects the recovery counter
+        across one or more recover→requeue→reclaim cycles so escalation
+        actually fires for flapping events (Bug #1).
+        """
+        import time as _time
+
+        now = now if now is not None else _time.time()
         active_keys = {str(i) for i in active_ids}
-        stale = [k for k in list(self.events) if k not in active_keys]
-        for k in stale:
+        for k in list(self.events):
+            if k in active_keys:
+                continue
+            ev = self.events[k]
+            if ev.recovery_attempts > 0 or ev.escalated:
+                if ev.pinned_until == 0.0:
+                    ev.pinned_until = now + RECOVERY_STATE_TTL_SECONDS
+                if now < ev.pinned_until:
+                    continue
             del self.events[k]
 
     @classmethod

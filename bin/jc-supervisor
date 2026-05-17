@@ -121,18 +121,52 @@ PYEOF
         ;;
 
     enable|disable)
-        enabled="$([[ "$CMD" == "enable" ]] && echo "true" || echo "false")"
+        enabled_val="$([[ "$CMD" == "enable" ]] && echo "true" || echo "false")"
         YAML="$INSTANCE_DIR/ops/gateway.yaml"
-        if grep -q "^supervisor:" "$YAML" 2>/dev/null; then
-            if grep -A5 "^supervisor:" "$YAML" | grep -q "^ *enabled:"; then
-                sed -i "s/^\(  *\)enabled: .*/\1enabled: $enabled/" "$YAML"
-            else
-                sed -i "/^supervisor:/a\\  enabled: $enabled" "$YAML"
-            fi
-        else
-            printf '\nsupervisor:\n  enabled: %s\n' "$enabled" >> "$YAML"
-        fi
-        echo "supervisor.enabled → $enabled in $YAML"
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$YAML" "$enabled_val" <<'PYEOF'
+import sys
+from pathlib import Path
+
+try:
+    import yaml  # PyYAML
+except ImportError:
+    sys.stderr.write(
+        "error: PyYAML required for jc-supervisor enable|disable "
+        "(pip install pyyaml)\n"
+    )
+    sys.exit(1)
+
+yaml_path = Path(sys.argv[1])
+enabled = sys.argv[2] == "true"
+
+if yaml_path.exists():
+    text = yaml_path.read_text(encoding="utf-8")
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        sys.stderr.write(f"error: cannot parse {yaml_path}: {exc}\n")
+        sys.exit(1)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        sys.stderr.write(f"error: {yaml_path} root is not a mapping\n")
+        sys.exit(1)
+else:
+    data = {}
+
+sup = data.get("supervisor")
+if not isinstance(sup, dict):
+    sup = {}
+    data["supervisor"] = sup
+sup["enabled"] = enabled
+
+yaml_path.parent.mkdir(parents=True, exist_ok=True)
+yaml_path.write_text(
+    yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
+    encoding="utf-8",
+)
+print(f"supervisor.enabled → {str(enabled).lower()} in {yaml_path}")
+PYEOF
         ;;
 
     reset)

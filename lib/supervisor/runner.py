@@ -29,7 +29,7 @@ from .models import EventSnapshot, TickResult
 from .narrator import narrate
 from .recovery import apply_recovery, decide as recovery_decide, escalate_to_failed, load_patterns
 from .snapshot import build_snapshots
-from .state import EventState, SupervisorState
+from .state import RECOVERY_STATE_TTL_SECONDS, EventState, SupervisorState
 
 
 LogFn = Callable[[str], None]
@@ -92,9 +92,18 @@ def run_tick(
 
             if decision.triggered:
                 if not dry_run:
-                    ok = apply_recovery(instance_dir, snap.event.id, decision, log=log)
+                    ok = apply_recovery(
+                        instance_dir,
+                        snap.event.id,
+                        decision,
+                        log=log,
+                        expected_locked_by=snap.event.locked_by,
+                    )
                     if ok:
                         ev_state.recovery_attempts += 1
+                        ev_state.pinned_until = (
+                            now.timestamp() + RECOVERY_STATE_TTL_SECONDS
+                        )
                         recovered_ids.add(snap.event.id)
                         result.recoveries.append(
                             {
@@ -180,7 +189,7 @@ def run_tick(
                 tick_narrator_calls += 1
 
     if not dry_run:
-        state.prune(active_ids)
+        state.prune(active_ids, now=now.timestamp())
         state.last_tick_at = now.timestamp()
         state.save(instance_dir)
 
