@@ -7,7 +7,7 @@ recursive narration loops would follow. The supervisor uses raw channel APIs
 (Telegram sendMessage / editMessageText) directly, bypassing
 ``gateway.delivery.deliver_response`` which writes to transcripts.
 
-Only Telegram is wired in Phase 2. Slack and Discord land in Phase 4.
+Telegram wired in Phase 2. Slack + Discord wired in Phase 4.
 """
 
 from __future__ import annotations
@@ -154,3 +154,139 @@ def _post_or_fallback(
         return int(mid) if mid is not None else None
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Slack
+# ---------------------------------------------------------------------------
+
+def send_card_slack(
+    *,
+    instance_dir: Path,
+    channel: str,
+    card: "Card",
+    thread_ts: str | None = None,
+    log: LogFn | None = None,
+) -> str | None:
+    """Post card via chat.postMessage. Returns ts (message id) or None."""
+    token = env_value(instance_dir, "SLACK_BOT_TOKEN")
+    if not token or not channel:
+        return None
+    payload: dict[str, Any] = {
+        "channel": channel,
+        "text": card.text,
+    }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    try:
+        data = http_json("https://slack.com/api/chat.postMessage", token=token, data=payload, timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor send_card_slack error: {exc}")
+        return None
+    if not data.get("ok"):
+        if log:
+            log(f"supervisor send_card_slack failed: {data}")
+        return None
+    ts = data.get("ts")
+    return str(ts) if ts is not None else None
+
+
+def edit_card_slack(
+    *,
+    instance_dir: Path,
+    channel: str,
+    ts: str,
+    card: "Card",
+    log: LogFn | None = None,
+) -> bool:
+    """Edit card via chat.update. Returns True on success or no-op."""
+    token = env_value(instance_dir, "SLACK_BOT_TOKEN")
+    if not token or not channel or not ts:
+        return False
+    payload: dict[str, Any] = {
+        "channel": channel,
+        "ts": ts,
+        "text": card.text,
+    }
+    try:
+        data = http_json("https://slack.com/api/chat.update", token=token, data=payload, timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor edit_card_slack error: {exc}")
+        return False
+    if data.get("ok"):
+        return True
+    err = str(data.get("error") or "").lower()
+    if "not_modified" in err or "message_not_found" in err:
+        return True
+    if log:
+        log(f"supervisor edit_card_slack failed: {data}")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Discord
+# ---------------------------------------------------------------------------
+
+_DISCORD_API = "https://discord.com/api/v10"
+
+
+def send_card_discord(
+    *,
+    instance_dir: Path,
+    channel_id: str,
+    card: "Card",
+    reply_to_message_id: str | None = None,
+    log: LogFn | None = None,
+) -> str | None:
+    """Post card via Discord REST. Returns message_id as str, or None."""
+    token = env_value(instance_dir, "DISCORD_BOT_TOKEN")
+    if not token or not channel_id:
+        return None
+    payload: dict[str, Any] = {"content": card.text[:2000]}
+    if reply_to_message_id:
+        payload["message_reference"] = {"message_id": str(reply_to_message_id)}
+    url = f"{_DISCORD_API}/channels/{channel_id}/messages"
+    try:
+        data = http_json(
+            url,
+            extra_headers={"Authorization": f"Bot {token}"},
+            data=payload,
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor send_card_discord error: {exc}")
+        return None
+    mid = data.get("id")
+    return str(mid) if mid is not None else None
+
+
+def edit_card_discord(
+    *,
+    instance_dir: Path,
+    channel_id: str,
+    message_id: str,
+    card: "Card",
+    log: LogFn | None = None,
+) -> bool:
+    """Edit card via Discord REST PATCH. Returns True on success."""
+    token = env_value(instance_dir, "DISCORD_BOT_TOKEN")
+    if not token or not channel_id or not message_id:
+        return False
+    url = f"{_DISCORD_API}/channels/{channel_id}/messages/{message_id}"
+    payload: dict[str, Any] = {"content": card.text[:2000]}
+    try:
+        data = http_json(
+            url,
+            extra_headers={"Authorization": f"Bot {token}"},
+            data=payload,
+            method="PATCH",
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor edit_card_discord error: {exc}")
+        return False
+    return "id" in data

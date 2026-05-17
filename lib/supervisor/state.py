@@ -14,7 +14,7 @@ class EventState:
     first_card_at: float = 0.0
     last_card_at: float = 0.0
     last_phase: str = ""
-    channel_message_id: int | None = None
+    channel_message_id: str | None = None
     narration_count: int = 0
     last_narration: str = ""
     recovery_attempts: int = 0

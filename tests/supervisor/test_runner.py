@@ -23,21 +23,21 @@ class FakeSender(CardSender):
         self.edits: list[dict] = []
         self.next_message_id = 1000
 
-    def send(self, *, instance_dir, chat_id, card, reply_to_message_id=None,
-             message_thread_id=None, log):
-        mid = self.next_message_id
+    def send(self, *, instance_dir, source, meta, card, log):
+        mid = str(self.next_message_id)
         self.next_message_id += 1
         self.sends.append({
-            "chat_id": chat_id,
+            "source": source,
+            "meta": meta,
             "card": card,
             "message_id": mid,
-            "reply_to_message_id": reply_to_message_id,
         })
         return mid
 
-    def edit(self, *, instance_dir, chat_id, message_id, card, log):
+    def edit(self, *, instance_dir, source, meta, message_id, card, log):
         self.edits.append({
-            "chat_id": chat_id,
+            "source": source,
+            "meta": meta,
             "message_id": message_id,
             "card": card,
         })
@@ -158,7 +158,7 @@ def test_running_event_past_threshold_sends_card(tmp_path):
     assert len(result.snapshots) == 1
     assert len(sender.sends) == 1
     sent = sender.sends[0]
-    assert sent["chat_id"] == "12345"
+    assert sent["meta"]["chat_id"] == "12345"
     assert isinstance(sent["card"], Card)
 
 

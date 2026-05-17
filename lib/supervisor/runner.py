@@ -17,7 +17,14 @@ from gateway import queue
 
 from .cards import Card, render_card, render_final_card
 from .config import SupervisorConfig, load_config as load_supervisor_config
-from .delivery import edit_card_telegram, send_card_telegram
+from .delivery import (
+    edit_card_discord,
+    edit_card_slack,
+    edit_card_telegram,
+    send_card_discord,
+    send_card_slack,
+    send_card_telegram,
+)
 from .models import EventSnapshot, TickResult
 from .narrator import narrate
 from .snapshot import build_snapshots
@@ -44,7 +51,7 @@ def run_tick(
     if not cfg.enabled:
         return TickResult(enabled=False)
 
-    sender = sender or _TelegramSender()
+    sender = sender or _MultiChannelSender()
 
     now = datetime.now(timezone.utc)
     state = SupervisorState.load(instance_dir)
@@ -214,14 +221,15 @@ def _render_and_send(
         language=ev_state.language,
     )
 
-    chat_id = str(snap.meta.get("chat_id") or "")
-    if not chat_id:
-        return
+    source = snap.event.source or "telegram"
+    if not _delivery_address(source, snap.meta):
+        return narrator_called
 
     if ev_state.channel_message_id:
         ok = sender.edit(
             instance_dir=instance_dir,
-            chat_id=chat_id,
+            source=source,
+            meta=snap.meta,
             message_id=ev_state.channel_message_id,
             card=card,
             log=log,
@@ -230,10 +238,9 @@ def _render_and_send(
     else:
         mid = sender.send(
             instance_dir=instance_dir,
-            chat_id=chat_id,
+            source=source,
+            meta=snap.meta,
             card=card,
-            reply_to_message_id=_int_or_none(snap.meta.get("message_id")),
-            message_thread_id=_int_or_none(snap.meta.get("message_thread_id")),
             log=log,
         )
         if mid:
@@ -317,12 +324,14 @@ def _finalize_completed(
         )
         if dry_run:
             continue
-        chat_id = str(status_row.get("chat_id") or "")
-        if not chat_id:
+        source = str(status_row.get("source") or "telegram")
+        meta = status_row.get("meta") or {}
+        if not _delivery_address(source, meta):
             continue
         ok = sender.edit(
             instance_dir=instance_dir,
-            chat_id=chat_id,
+            source=source,
+            meta=meta,
             message_id=ev_state.channel_message_id,
             card=card,
             log=log,
@@ -349,7 +358,7 @@ def _fetch_statuses(instance_dir: Path, event_ids: list[int]) -> dict[int, dict[
     conn = queue.connect(instance_dir)
     try:
         rows = conn.execute(
-            f"SELECT id, status, started_at, finished_at, meta, content "
+            f"SELECT id, source, status, started_at, finished_at, meta, content "
             f"FROM events WHERE id IN ({placeholders})",
             event_ids,
         ).fetchall()
@@ -364,10 +373,10 @@ def _fetch_statuses(instance_dir: Path, event_ids: list[int]) -> dict[int, dict[
         except (json.JSONDecodeError, TypeError):
             meta = {}
         out[int(row["id"])] = {
+            "source": row["source"] or "telegram",
             "status": row["status"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
-            "chat_id": (meta.get("chat_id") if isinstance(meta, dict) else None),
             "content": row["content"] or "",
             "meta": meta if isinstance(meta, dict) else {},
         }
@@ -428,68 +437,113 @@ def _write_log(instance_dir: Path, record: dict) -> None:
         pass
 
 
+def _delivery_address(source: str, meta: dict) -> str:
+    """Return the channel address for delivery, or empty if missing."""
+    if source == "slack":
+        return str(meta.get("channel") or "")
+    if source == "discord":
+        return str(meta.get("channel_id") or "")
+    return str(meta.get("chat_id") or "")
+
+
 # --- Sender abstraction (testable) ---
 
 class CardSender:
-    """Pluggable card sender. Production uses Telegram; tests use a fake."""
+    """Pluggable card sender. Production routes per source; tests use a fake."""
 
     def send(
         self,
         *,
         instance_dir: Path,
-        chat_id: str,
+        source: str,
+        meta: dict,
         card: Card,
-        reply_to_message_id: int | None = None,
-        message_thread_id: int | None = None,
         log: LogFn,
-    ) -> int | None:
+    ) -> str | None:
         raise NotImplementedError
 
     def edit(
         self,
         *,
         instance_dir: Path,
-        chat_id: str,
-        message_id: int,
+        source: str,
+        meta: dict,
+        message_id: str,
         card: Card,
         log: LogFn,
     ) -> bool:
         raise NotImplementedError
 
 
-class _TelegramSender(CardSender):
+class _MultiChannelSender(CardSender):
     def send(
         self,
         *,
         instance_dir: Path,
-        chat_id: str,
+        source: str,
+        meta: dict,
         card: Card,
-        reply_to_message_id: int | None = None,
-        message_thread_id: int | None = None,
         log: LogFn,
-    ) -> int | None:
-        return send_card_telegram(
+    ) -> str | None:
+        if source == "slack":
+            ts = send_card_slack(
+                instance_dir=instance_dir,
+                channel=str(meta.get("channel") or ""),
+                card=card,
+                thread_ts=str(meta.get("thread_ts") or meta.get("ts") or "") or None,
+                log=log,
+            )
+            return ts
+        if source == "discord":
+            return send_card_discord(
+                instance_dir=instance_dir,
+                channel_id=str(meta.get("channel_id") or ""),
+                card=card,
+                reply_to_message_id=str(meta.get("reply_to_message_id") or "") or None,
+                log=log,
+            )
+        # default: telegram
+        mid = send_card_telegram(
             instance_dir=instance_dir,
-            chat_id=chat_id,
+            chat_id=str(meta.get("chat_id") or ""),
             card=card,
-            reply_to_message_id=reply_to_message_id,
-            message_thread_id=message_thread_id,
+            reply_to_message_id=_int_or_none(meta.get("message_id")),
+            message_thread_id=_int_or_none(meta.get("message_thread_id")),
             log=log,
         )
+        return str(mid) if mid is not None else None
 
     def edit(
         self,
         *,
         instance_dir: Path,
-        chat_id: str,
-        message_id: int,
+        source: str,
+        meta: dict,
+        message_id: str,
         card: Card,
         log: LogFn,
     ) -> bool:
+        if source == "slack":
+            return edit_card_slack(
+                instance_dir=instance_dir,
+                channel=str(meta.get("channel") or ""),
+                ts=message_id,
+                card=card,
+                log=log,
+            )
+        if source == "discord":
+            return edit_card_discord(
+                instance_dir=instance_dir,
+                channel_id=str(meta.get("channel_id") or ""),
+                message_id=message_id,
+                card=card,
+                log=log,
+            )
+        # default: telegram
         return edit_card_telegram(
             instance_dir=instance_dir,
-            chat_id=chat_id,
-            message_id=message_id,
+            chat_id=str(meta.get("chat_id") or ""),
+            message_id=_int_or_none(message_id) or 0,
             card=card,
             log=log,
         )
