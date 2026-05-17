@@ -25,6 +25,9 @@ from .models import PhaseResult
 _BAR_WIDTH = 10
 _BAR_DECAY_SECONDS = 60.0
 
+_MINUTE_COLORS = ("🟩", "🟦", "🟪", "🟧", "🟥", "🟨")
+_MINUTES_PER_COLOR = 3
+
 
 _LABELS: dict[str, dict[str, str]] = {
     "phase":      {"en": "Phase",      "it": "Fase"},
@@ -59,7 +62,7 @@ def render_card(
     lang = language if language in ("en", "it") else "en"
     title_short = _truncate(title, 60)
 
-    elapsed = _format_elapsed(elapsed_seconds)
+    elapsed_line = _minute_bar(elapsed_seconds)
 
     lines = [
         f"{phase.emoji} {title_short}",
@@ -67,7 +70,7 @@ def render_card(
     ]
     if narration:
         lines.append(f"{_LABELS['signal'][lang]}: {narration}")
-    lines.append(f"{_LABELS['time'][lang]}: {elapsed}")
+    lines.append(elapsed_line)
 
     return Card(
         text="\n".join(lines),
@@ -86,9 +89,9 @@ def render_final_card(
     """Card shown after the event completes successfully (✅ replacement)."""
     lang = language if language in ("en", "it") else "en"
     title_short = _truncate(title, 60)
-    elapsed = _format_elapsed(elapsed_seconds)
+    elapsed_line = _minute_bar(elapsed_seconds)
     done_label = "completato" if lang == "it" else "done"
-    text = f"✅ {title_short}\n\n{_LABELS['time'][lang]}: {elapsed} · {done_label}"
+    text = f"✅ {title_short}\n\n{elapsed_line} · {done_label}"
     return Card(text=text, phase="done", emoji="✅", language=lang)
 
 
@@ -107,9 +110,9 @@ def render_stopped_card(
     """
     lang = language if language in ("en", "it") else "en"
     title_short = _truncate(title, 60)
-    elapsed = _format_elapsed(elapsed_seconds)
+    elapsed_line = _minute_bar(elapsed_seconds)
     stopped_label = "interrotto" if lang == "it" else "stopped"
-    text = f"⏹ {title_short}\n\n{_LABELS['time'][lang]}: {elapsed} · {stopped_label}"
+    text = f"⏹ {title_short}\n\n{elapsed_line} · {stopped_label}"
     return Card(text=text, phase="stopped", emoji="⏹", language=lang)
 
 
@@ -141,6 +144,22 @@ def _format_elapsed(seconds: float) -> str:
     minutes = total // 60
     secs = total % 60
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _minute_bar(seconds: float) -> str:
+    """Colored square per elapsed minute + "(N min)" text.
+
+    Colors cycle every 3 minutes through {green, blue, purple, orange, red,
+    yellow} for visual chunking. Output: "🟩🟩🟩🟦🟦🟦 (6 min)".
+    """
+    minutes = max(0, int(seconds)) // 60
+    if minutes == 0:
+        return "(0 min)"
+    squares = "".join(
+        _MINUTE_COLORS[(i // _MINUTES_PER_COLOR) % len(_MINUTE_COLORS)]
+        for i in range(minutes)
+    )
+    return f"{squares} ({minutes} min)"
 
 
 def _truncate(text: str, max_chars: int) -> str:

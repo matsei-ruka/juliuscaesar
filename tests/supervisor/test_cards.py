@@ -48,24 +48,27 @@ def test_card_no_phase_or_activity_lines():
     assert "Attività:" not in card.text
 
 
-def test_card_elapsed_label_english():
+def test_card_elapsed_minute_bar_zero():
+    """Below 1 min: just '(0 min)' text, no squares."""
     card = render_card(
         title="x",
         phase=_phase(),
         elapsed_seconds=10.0,
         language="en",
     )
-    assert "Elapsed:" in card.text
+    assert "(0 min)" in card.text
 
 
-def test_card_elapsed_label_italian():
+def test_card_elapsed_label_italian_same_format():
+    """Minute bar is language-agnostic ('min' works in EN+IT)."""
     card = render_card(
         title="x",
         phase=_phase(),
         elapsed_seconds=10.0,
         language="it",
     )
-    assert "Tempo:" in card.text
+    assert "(0 min)" in card.text
+    assert "Tempo:" not in card.text
 
 
 def test_card_includes_narration_when_present():
@@ -91,14 +94,38 @@ def test_card_omits_signal_line_when_narration_empty():
     assert "Last signal" not in card.text
 
 
-def test_elapsed_format_mmss():
+def test_elapsed_minute_bar_with_squares():
+    """130s → 2 min → 2 green squares + '(2 min)'."""
     card = render_card(
         title="x",
         phase=_phase(),
         elapsed_seconds=130.0,
         language="en",
     )
-    assert "02:10" in card.text
+    assert "🟩🟩 (2 min)" in card.text
+
+
+def test_elapsed_minute_bar_color_cycle():
+    """18 min cycles all 6 colors (3 squares each)."""
+    card = render_card(
+        title="x",
+        phase=_phase(),
+        elapsed_seconds=18 * 60.0,
+        language="en",
+    )
+    expected = "🟩🟩🟩🟦🟦🟦🟪🟪🟪🟧🟧🟧🟥🟥🟥🟨🟨🟨 (18 min)"
+    assert expected in card.text
+
+
+def test_elapsed_minute_bar_wraps_after_full_cycle():
+    """19 min → 18 colored + 1 green (cycle restarts)."""
+    card = render_card(
+        title="x",
+        phase=_phase(),
+        elapsed_seconds=19 * 60.0,
+        language="en",
+    )
+    assert "🟨🟩 (19 min)" in card.text
 
 
 def test_title_truncated_to_60_chars():
@@ -133,7 +160,7 @@ def test_unknown_language_falls_back_to_english():
         language="de",
     )
     assert card.language == "en"
-    assert "Elapsed:" in card.text
+    assert "(0 min)" in card.text
 
 
 def test_final_card_has_check_emoji():
@@ -146,10 +173,10 @@ def test_final_card_has_check_emoji():
 def test_final_card_italian():
     card = render_final_card(title="audit done", elapsed_seconds=180.0, language="it")
     assert "completato" in card.text
-    assert "Tempo:" in card.text
+    assert "🟩🟩🟩 (3 min)" in card.text
 
 
 def test_final_card_english():
     card = render_final_card(title="audit done", elapsed_seconds=180.0, language="en")
     assert "done" in card.text
-    assert "Elapsed:" in card.text
+    assert "🟩🟩🟩 (3 min)" in card.text
