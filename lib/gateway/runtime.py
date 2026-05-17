@@ -400,7 +400,19 @@ class GatewayRuntime:
             conn_t = queue.connect(self.instance_dir)
             try:
                 for eid in batch_ids:
-                    queue.complete(conn_t, eid, response="(auth token consumed)")
+                    try:
+                        queue.complete(
+                            conn_t,
+                            eid,
+                            response="(auth token consumed)",
+                            expected_locked_by=self.worker_id,
+                        )
+                    except KeyError:
+                        # Lease lost (e.g. supervisor reset / re-claim). Skip.
+                        self.log(
+                            f"complete skipped id={eid} reason=lease_lost "
+                            f"worker={self.worker_id}"
+                        )
             finally:
                 conn_t.close()
             if len(batch_ids) > 1:
@@ -412,7 +424,18 @@ class GatewayRuntime:
             conn2 = queue.connect(self.instance_dir)
             try:
                 for eid in batch_ids:
-                    queue.complete(conn2, eid, response=response)
+                    try:
+                        queue.complete(
+                            conn2,
+                            eid,
+                            response=response,
+                            expected_locked_by=self.worker_id,
+                        )
+                    except KeyError:
+                        self.log(
+                            f"complete skipped id={eid} reason=lease_lost "
+                            f"worker={self.worker_id}"
+                        )
             finally:
                 conn2.close()
             self._cancel_reengage_on_inbound_reply(event)
@@ -426,13 +449,20 @@ class GatewayRuntime:
             try:
                 failed_status: str | None = None
                 for eid in batch_ids:
-                    failed = queue.fail(
-                        conn3,
-                        eid,
-                        error=str(exc)[:1000],
-                        max_retries=self.config.max_retries,
-                    )
-                    failed_status = failed.status
+                    try:
+                        failed = queue.fail(
+                            conn3,
+                            eid,
+                            error=str(exc)[:1000],
+                            max_retries=self.config.max_retries,
+                            expected_locked_by=self.worker_id,
+                        )
+                        failed_status = failed.status
+                    except KeyError:
+                        self.log(
+                            f"fail skipped id={eid} reason=lease_lost "
+                            f"worker={self.worker_id}"
+                        )
             finally:
                 conn3.close()
             if len(batch_ids) > 1:

@@ -48,6 +48,7 @@ testpaths = [
   "tests/gateway/recovery",
   "tests/watchdog",
   "tests/company",
+  "tests/supervisor",
 ]
 python_files = ["test_*.py"]
 addopts = "-q"

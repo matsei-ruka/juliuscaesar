@@ -1,0 +1,25 @@
+# Failure-class regex patterns for supervisor silent recovery.
+# Match order: session_poison → segfault → provider_5xx → fallthrough to crash_no_exit.
+# Patterns are Python regex (re.IGNORECASE).
+
+session_poison:
+  - "unknown variant `image_url`"
+  - "unknown variant 'image_url'"
+  - 'unknown variant "image_url"'
+  - "invalid type: message_kind"
+  - "Stream ended without complete response"
+  - "session token expired"
+
+segfault:
+  - "Segmentation fault"
+  - "SIGSEGV"
+  - "signal: killed"
+
+provider_5xx:
+  - "HTTP 5\\d{2}"
+  - "status code 5\\d{2}"
+  - "status: 5\\d{2}"
+  - "upstream connect error"
+  - "503 Service Unavailable"
+  - "502 Bad Gateway"
+  - "504 Gateway Timeout"

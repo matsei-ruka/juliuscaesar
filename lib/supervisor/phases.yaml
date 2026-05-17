@@ -1,0 +1,112 @@
+phases:
+  starting:
+    emoji: "🟢"
+    labels:
+      en: "starting"
+      it: "avvio"
+    keywords: []
+    priority: 0
+
+  thinking:
+    emoji: "💭"
+    labels:
+      en: "thinking"
+      it: "elaborazione"
+    keywords:
+      - "thinking"
+    priority: 1
+
+  reading:
+    emoji: "📖"
+    labels:
+      en: "reading files"
+      it: "lettura file"
+    keywords:
+      - "Read("
+      - "Glob("
+      - "reading file"
+    priority: 2
+
+  searching:
+    emoji: "🔍"
+    labels:
+      en: "searching"
+      it: "ricerca"
+    keywords:
+      - "Grep("
+      - "searching for"
+    priority: 3
+
+  web_research:
+    emoji: "🌐"
+    labels:
+      en: "web research"
+      it: "ricerca web"
+    keywords:
+      - "WebFetch("
+      - "WebSearch("
+      - "fetching url"
+      - "brave"
+      - "tavily"
+      - "firecrawl"
+    priority: 4
+
+  coding:
+    emoji: "🛠️"
+    labels:
+      en: "coding"
+      it: "sviluppo"
+    keywords:
+      - "Edit("
+      - "Write("
+      - "Bash("
+    priority: 5
+
+  analyzing:
+    emoji: "🧮"
+    labels:
+      en: "analyzing"
+      it: "analisi"
+    keywords:
+      - "analyzing"
+      - "analysis"
+      - "scanning"
+    priority: 6
+
+  calling_api:
+    emoji: "📞"
+    labels:
+      en: "calling API"
+      it: "chiamata API"
+    keywords:
+      - "api call"
+      - "http request"
+    priority: 7
+
+  packaging:
+    emoji: "📦"
+    labels:
+      en: "packaging output"
+      it: "preparazione output"
+    keywords:
+      - "executive-deck"
+      - "infographics"
+    priority: 8
+
+  delivering:
+    emoji: "🎯"
+    labels:
+      en: "delivering"
+      it: "consegna"
+    keywords:
+      - "final answer"
+      - "response complete"
+    priority: 9
+
+  idle:
+    emoji: "⏸️"
+    labels:
+      en: "idle"
+      it: "in attesa"
+    keywords: []
+    priority: 10
