@@ -27,6 +27,7 @@ from .delivery import (
 )
 from .models import EventSnapshot, TickResult
 from .narrator import narrate
+from .recovery import apply_recovery, decide as recovery_decide, load_patterns
 from .snapshot import build_snapshots
 from .state import EventState, SupervisorState
 
@@ -81,9 +82,48 @@ def run_tick(
         now=now, dry_run=dry_run, sender=sender, log=log,
     )
 
-    # 2. Send/edit cards for events still running and past threshold.
+    # 2. Silent recovery — re-queue events whose adapter PID is gone.
+    recovered_ids: set[int] = set()
+    if cfg.recovery_enabled:
+        patterns = load_patterns(instance_dir, cfg.recovery_patterns)
+        for snap in snapshots:
+            ev_state = state.event(snap.event.id)
+            decision = recovery_decide(snap, ev_state, cfg, patterns=patterns)
+            if not decision.triggered:
+                continue
+            if not dry_run:
+                ok = apply_recovery(instance_dir, snap.event.id, decision, log=log)
+                if ok:
+                    ev_state.recovery_attempts += 1
+                    recovered_ids.add(snap.event.id)
+                    result.recoveries.append(
+                        {
+                            "event_id": snap.event.id,
+                            "class": decision.failure_class,
+                            "drop_resume_session": decision.drop_resume_session,
+                            "available_in_seconds": decision.available_in_seconds,
+                            "attempt": ev_state.recovery_attempts,
+                        }
+                    )
+                    _write_log(
+                        instance_dir,
+                        {
+                            "kind": "supervisor_recovery_triggered",
+                            "ts": now.isoformat(),
+                            "event_id": snap.event.id,
+                            "class": decision.failure_class,
+                            "drop_resume_session": decision.drop_resume_session,
+                            "available_in_seconds": decision.available_in_seconds,
+                            "attempt": ev_state.recovery_attempts,
+                        },
+                    )
+
+    # 3. Send/edit cards for events still running and past threshold.
     tick_narrator_calls = 0
     for snap in snapshots:
+        if snap.event.id in recovered_ids:
+            # Event was just re-queued; skip card emit to avoid stale render.
+            continue
         skip_reason = _should_skip(snap, cfg, state, now)
         if skip_reason:
             result.skipped.append({"event_id": snap.event.id, "reason": skip_reason})

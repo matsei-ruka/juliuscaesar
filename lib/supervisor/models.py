@@ -58,6 +58,7 @@ class TickResult:
     enabled: bool
     snapshots: list[EventSnapshot] = field(default_factory=list)
     skipped: list[dict[str, Any]] = field(default_factory=list)
+    recoveries: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
 
     def to_json(self) -> dict[str, Any]:
@@ -65,6 +66,7 @@ class TickResult:
             "enabled": self.enabled,
             "qualifying": len(self.snapshots),
             "skipped": len(self.skipped),
+            "recoveries": list(self.recoveries),
             "error": self.error,
             "events": [
                 {

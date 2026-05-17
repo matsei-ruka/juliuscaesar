@@ -35,6 +35,7 @@ class SupervisorConfig:
     recovery_patterns: str = ""
     recovery_enabled: bool = True
     max_recovery_attempts: int = 2
+    recovery_fallback_brain: str = ""
     groups_enabled: bool = False
     groups_show_phase: bool = False
     channels_enabled: dict[str, bool] = field(
@@ -106,6 +107,7 @@ def _parse(raw: dict[str, Any]) -> SupervisorConfig:
         recovery_patterns=str(raw.get("recovery_patterns") or ""),
         recovery_enabled=_bool((recovery_raw or {}).get("enabled"), True),
         max_recovery_attempts=_int((recovery_raw or {}).get("max_recovery_attempts"), 2),
+        recovery_fallback_brain=str((recovery_raw or {}).get("fallback_brain") or ""),
         groups_enabled=_bool((groups_raw or {}).get("enabled"), False),
         groups_show_phase=_bool((groups_raw or {}).get("show_phase"), False),
         channels_enabled=channels,

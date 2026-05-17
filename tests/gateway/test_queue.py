@@ -114,5 +114,98 @@ class ClaimBatchSameConversationTests(unittest.TestCase):
             conn.close()
 
 
+class ResetRunningToQueuedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-reset-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _running_event(self, conn, *, meta: dict | None = None) -> int:
+        import json as _json
+
+        meta_text = _json.dumps(meta or {"chat_id": "1"})
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, meta, status, received_at, available_at, started_at,
+               locked_by, locked_until)
+            VALUES ('telegram', 'x', ?, 'running', '2026-05-17T10:00:00+00:00',
+                    '2026-05-17T10:00:00+00:00', '2026-05-17T10:00:00+00:00',
+                    'worker-1', '2026-05-17T10:05:00+00:00')
+            """,
+            (meta_text,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_resets_status_to_queued(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn)
+            ok = queue.reset_running_to_queued(conn, eid)
+            self.assertTrue(ok)
+            row = conn.execute(
+                "SELECT status, locked_by, locked_until, started_at FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "queued")
+            self.assertIsNone(row["locked_by"])
+            self.assertIsNone(row["locked_until"])
+            self.assertIsNone(row["started_at"])
+        finally:
+            conn.close()
+
+    def test_refuses_to_reset_done_event(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn)
+            conn.execute("UPDATE events SET status='done' WHERE id=?", (eid,))
+            conn.commit()
+            ok = queue.reset_running_to_queued(conn, eid)
+            self.assertFalse(ok)
+            row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+            self.assertEqual(row["status"], "done")
+        finally:
+            conn.close()
+
+    def test_drops_resume_session_when_requested(self) -> None:
+        import json as _json
+
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(
+                conn, meta={"chat_id": "1", "resume_session": "abc-uuid"}
+            )
+            ok = queue.reset_running_to_queued(conn, eid, drop_resume_session=True)
+            self.assertTrue(ok)
+            row = conn.execute("SELECT meta FROM events WHERE id=?", (eid,)).fetchone()
+            meta = _json.loads(row["meta"])
+            self.assertNotIn("resume_session", meta)
+            self.assertEqual(meta.get("chat_id"), "1")
+        finally:
+            conn.close()
+
+    def test_available_in_seconds_backoff(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._running_event(conn)
+            queue.reset_running_to_queued(conn, eid, available_in_seconds=30)
+            row = conn.execute(
+                "SELECT available_at FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            from datetime import datetime
+            t = datetime.fromisoformat(row["available_at"].replace("Z", "+00:00"))
+            self.assertIsNotNone(t)
+        finally:
+            conn.close()
+
+    def test_missing_event_raises_keyerror(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            with self.assertRaises(KeyError):
+                queue.reset_running_to_queued(conn, 99999)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

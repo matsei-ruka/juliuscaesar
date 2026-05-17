@@ -527,6 +527,73 @@ def retry_now(conn: sqlite3.Connection, event_id: int) -> Event:
     return event
 
 
+def reset_running_to_queued(
+    conn: sqlite3.Connection,
+    event_id: int,
+    *,
+    drop_resume_session: bool = False,
+    available_in_seconds: int = 0,
+) -> bool:
+    """Reset a 'running' event back to 'queued' (supervisor silent recovery).
+
+    Returns True if the row was actually transitioned. Refuses to reset
+    rows not in 'running' status (safety check — avoids clobbering done
+    or failed events).
+
+    Optional:
+      - drop_resume_session: removes ``resume_session`` from meta JSON
+        (used for session-poison class).
+      - available_in_seconds: backoff before dispatcher re-picks the event.
+    """
+    row = conn.execute(
+        "SELECT status, meta FROM events WHERE id=?",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(event_id)
+    if row["status"] != "running":
+        return False
+
+    new_available_at = add_seconds(now_iso(), available_in_seconds)
+
+    if drop_resume_session:
+        try:
+            meta = json.loads(row["meta"]) if row["meta"] else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        if isinstance(meta, dict) and "resume_session" in meta:
+            meta.pop("resume_session", None)
+        meta_text = encode_meta(meta) if isinstance(meta, dict) else row["meta"]
+        conn.execute(
+            """
+            UPDATE events
+            SET status='queued',
+                available_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                started_at=NULL,
+                meta=?
+            WHERE id=? AND status='running'
+            """,
+            (new_available_at, meta_text, event_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE events
+            SET status='queued',
+                available_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                started_at=NULL
+            WHERE id=? AND status='running'
+            """,
+            (new_available_at, event_id),
+        )
+    conn.commit()
+    return True
+
+
 def update_meta(conn: sqlite3.Connection, event_id: int, meta: dict[str, Any]) -> Event:
     cur = conn.execute(
         "UPDATE events SET meta=? WHERE id=?",

@@ -4,6 +4,7 @@ Critical regression: tick MUST NOT write to state/transcripts/.
 """
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,7 +103,7 @@ def _make_running_event(
     # Write a gateway log entry so brain_map_from_log + pid_map_from_log find it
     log_path = queue.queue_dir(instance_dir) / "gateway.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    used_pid = pid if pid is not None else 1
+    used_pid = pid if pid is not None else os.getpid()
     with log_path.open("a") as fh:
         fh.write(
             f"2026-05-17 adapter spawn event={event_id} brain={brain} pid={used_pid} "
@@ -293,3 +294,114 @@ def test_card_count_increments_per_tick(tmp_path):
     assert len(state.events) == 1
     ev_state = next(iter(state.events.values()))
     assert ev_state.card_count >= 2
+
+
+# --- Phase 5: silent recovery integration ---
+
+def test_dead_pid_triggers_silent_recovery(tmp_path):
+    """Event with dead PID gets re-queued; no card sent that tick."""
+    _setup_instance(tmp_path)
+    # Use a definitely-dead PID — process 999999 won't exist in a fresh testbed
+    eid = _make_running_event(tmp_path, age_seconds=120.0, pid=999999)
+    sender = FakeSender()
+    result = run_tick(tmp_path, sender=sender)
+
+    # Recovery triggered → no card emitted
+    assert len(sender.sends) == 0
+    assert len(result.recoveries) == 1
+    assert result.recoveries[0]["event_id"] == eid
+
+    # Event status reset to 'queued'
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "queued"
+
+
+def test_session_poison_drops_resume(tmp_path):
+    """Session-poison stderr → drop resume_session from meta."""
+    _setup_instance(tmp_path)
+    eid = _make_running_event(
+        tmp_path,
+        age_seconds=120.0,
+        pid=999999,
+        stderr_tail="error: unknown variant `image_url`\n",
+    )
+    # Inject resume_session into meta
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT meta FROM events WHERE id=?", (eid,)).fetchone()
+        meta = json.loads(row["meta"])
+        meta["resume_session"] = "deadbeef-uuid"
+        conn.execute("UPDATE events SET meta=? WHERE id=?", (json.dumps(meta), eid))
+        conn.commit()
+    finally:
+        conn.close()
+
+    sender = FakeSender()
+    result = run_tick(tmp_path, sender=sender)
+
+    assert len(result.recoveries) == 1
+    assert result.recoveries[0]["class"] == "session_poison"
+    assert result.recoveries[0]["drop_resume_session"] is True
+
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT meta FROM events WHERE id=?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    new_meta = json.loads(row["meta"])
+    assert "resume_session" not in new_meta
+
+
+def test_recovery_loop_guard(tmp_path):
+    """After max_recovery_attempts, recovery stops triggering."""
+    _setup_instance(tmp_path)
+    # Pre-seed state so recovery_attempts is already at max
+    from supervisor.state import EventState, SupervisorState
+    eid = _make_running_event(tmp_path, age_seconds=120.0, pid=999999)
+    state = SupervisorState()
+    state.events[str(eid)] = EventState(recovery_attempts=2)
+    state.save(tmp_path)
+
+    sender = FakeSender()
+    result = run_tick(tmp_path, sender=sender)
+
+    # No new recovery triggered
+    assert result.recoveries == []
+    # Event still in 'running' (not reset)
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "running"
+
+
+def test_recovery_disabled_no_action(tmp_path):
+    """When recovery.enabled=false, dead PIDs do not trigger reset."""
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    yaml = (
+        "supervisor:\n"
+        "  enabled: true\n"
+        "  tick_interval_seconds: 0\n"
+        "  min_card_interval_seconds: 0\n"
+        "  recovery:\n"
+        "    enabled: false\n"
+    )
+    (ops / "gateway.yaml").write_text(yaml)
+
+    eid = _make_running_event(tmp_path, age_seconds=120.0, pid=999999)
+    sender = FakeSender()
+    result = run_tick(tmp_path, sender=sender)
+
+    assert result.recoveries == []
+    conn = queue.connect(tmp_path)
+    try:
+        row = conn.execute("SELECT status FROM events WHERE id=?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "running"
