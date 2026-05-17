@@ -50,6 +50,7 @@ from .telegram_routing import (
     forward_ident,
     should_process_message as should_process_telegram_message,
 )
+from voice.video import fused_video_event_text, ingest_video
 
 
 class TelegramChannel:
@@ -924,7 +925,8 @@ class TelegramChannel:
                             if isinstance(message.get("video_note"), dict)
                             else None
                         )
-                        attachment = voice or audio or video_note
+                        video = message.get("video") if isinstance(message.get("video"), dict) else None
+                        attachment = voice or audio or video_note  # audio-only attachments
                         if voice:
                             kind = "voice"
                         elif audio:
@@ -956,6 +958,47 @@ class TelegramChannel:
                             self.log(
                                 f"telegram {kind} transcribed update_id={update_id} chars={len(text)}"
                             )
+                        video_path_ingested: Path | None = None
+                        video_transcript: str = ""
+                        video_visual: str = ""
+                        if not text.strip() and video is not None:
+                            if self._video_enabled():
+                                try:
+                                    raw_path = self._ingest_video_attachment(video, update_id)
+                                    video_path_ingested = raw_path
+                                    vt, vv = ingest_video(raw_path, instance_dir=self.instance_dir)
+                                    video_transcript = vt
+                                    video_visual = vv
+                                    text = fused_video_event_text(vt, vv)
+                                except ValueError as exc:
+                                    self.log(
+                                        f"telegram video rejected update_id={update_id}: {exc}"
+                                    )
+                                    try:
+                                        send_text(
+                                            instance_dir=self.instance_dir,
+                                            token=self.token,
+                                            response="Video too large (>50 MB). Send a shorter clip.",
+                                            meta={
+                                                "chat_id": chat_id,
+                                                "message_thread_id": thread_id,
+                                            },
+                                            log=self.log,
+                                        )
+                                    except Exception as send_exc:  # noqa: BLE001
+                                        self.log(
+                                            f"telegram video reject notice failed: {send_exc}"
+                                        )
+                                    continue
+                                except Exception as exc:  # noqa: BLE001
+                                    self.log(
+                                        f"telegram video ingestion failed update_id={update_id}: {exc}"
+                                    )
+                                    text = "[video]"
+                                if not text.strip():
+                                    text = "[video]"
+                            else:
+                                text = "[video]"
                         photo = message.get("photo") if isinstance(message.get("photo"), list) else None
                         document = (
                             message.get("document")
@@ -1016,6 +1059,10 @@ class TelegramChannel:
                             meta["file_path"] = str(file_path)
                             if document and document.get("file_name"):
                                 meta["file_name"] = document.get("file_name")
+                        if video_path_ingested is not None:
+                            meta["video_path"] = str(video_path_ingested)
+                            meta["video_transcript"] = video_transcript
+                            meta["video_visual"] = video_visual
                         # Check for slash commands (e.g., /help, /models, /compact).
                         # If it's a command, handle it locally and skip enqueueing.
                         cmd = parse_slash_command(text)
@@ -1103,6 +1150,30 @@ class TelegramChannel:
             document=document,
             update_id=update_id,
         )
+
+    def _video_enabled(self) -> bool:
+        """Read `voice.video.enabled` from ops/gateway.yaml. Default False."""
+        from gateway.config import _load_raw, config_path
+
+        try:
+            raw = _load_raw(config_path(self.instance_dir))
+        except Exception:  # noqa: BLE001
+            return False
+        voice_cfg = raw.get("voice") if isinstance(raw.get("voice"), dict) else {}
+        video_cfg = voice_cfg.get("video") if isinstance(voice_cfg.get("video"), dict) else {}
+        return bool(video_cfg.get("enabled", False))
+
+    def _ingest_video_attachment(
+        self, payload: dict[str, Any], update_id: Any
+    ) -> Path:
+        """Download a Telegram `video` payload to `state/voice/inbound/` as .mp4."""
+        file_id = payload.get("file_id")
+        if not file_id:
+            raise RuntimeError("video payload missing file_id")
+        dest = (
+            self.instance_dir / "state" / "voice" / "inbound" / f"{update_id}.mp4"
+        )
+        return _download_telegram_file(self.token, file_id, dest)
 
     def _dm_title(self, chat: dict[str, Any]) -> str | None:
         """Compose a DM display name as `first_name + last_name` per spec.
