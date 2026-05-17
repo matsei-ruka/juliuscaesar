@@ -222,7 +222,7 @@ PYEOF
         ;;
 
     status)
-        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$INSTANCE_DIR" "${ARGS[@]}" <<'PYEOF'
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$INSTANCE_DIR" ${ARGS[@]+"${ARGS[@]}"} <<'PYEOF'
 import json, sys
 from pathlib import Path
 from supervisor.config import load_config
@@ -311,7 +311,11 @@ PYEOF
         ;;
 
     reset)
-        event_id="${ARGS[0]:-}"
+        if [[ ${#ARGS[@]} -gt 0 ]]; then
+            event_id="${ARGS[0]}"
+        else
+            event_id=""
+        fi
         if [[ -z "$event_id" ]]; then
             echo "Usage: jc-supervisor reset <event_id>" >&2; exit 1
         fi
