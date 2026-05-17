@@ -63,6 +63,38 @@ def send_card_telegram(
     return _post_or_fallback(url, payload, card.text, log=log)
 
 
+def delete_card_telegram(
+    *,
+    instance_dir: Path,
+    chat_id: str,
+    message_id: int,
+    log: LogFn | None = None,
+) -> bool:
+    """Delete a card message. Returns True on success or if already gone."""
+    token = env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
+    if not token or not chat_id or not message_id:
+        return False
+    payload: dict[str, Any] = {
+        "chat_id": str(chat_id),
+        "message_id": int(message_id),
+    }
+    url = f"https://api.telegram.org/bot{token}/deleteMessage"
+    try:
+        data = http_json(url, data=payload, timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor delete_card_telegram error: {exc}")
+        return False
+    if data.get("ok"):
+        return True
+    description = str(data.get("description") or "").lower()
+    if "message to delete not found" in description or "message can't be deleted" in description:
+        return True  # already gone — treat as success
+    if log:
+        log(f"supervisor delete_card_telegram failed: {data}")
+    return False
+
+
 def edit_card_telegram(
     *,
     instance_dir: Path,
@@ -192,6 +224,34 @@ def send_card_slack(
     return str(ts) if ts is not None else None
 
 
+def delete_card_slack(
+    *,
+    instance_dir: Path,
+    channel: str,
+    ts: str,
+    log: LogFn | None = None,
+) -> bool:
+    """Delete card via chat.delete. Returns True on success or already gone."""
+    token = env_value(instance_dir, "SLACK_BOT_TOKEN")
+    if not token or not channel or not ts:
+        return False
+    payload: dict[str, Any] = {"channel": channel, "ts": ts}
+    try:
+        data = http_json("https://slack.com/api/chat.delete", token=token, data=payload, timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"supervisor delete_card_slack error: {exc}")
+        return False
+    if data.get("ok"):
+        return True
+    err = str(data.get("error") or "").lower()
+    if "message_not_found" in err or "cant_delete_message" in err:
+        return True
+    if log:
+        log(f"supervisor delete_card_slack failed: {data}")
+    return False
+
+
 def edit_card_slack(
     *,
     instance_dir: Path,
@@ -268,6 +328,35 @@ def send_card_discord(
         return None
     mid = data.get("id")
     return str(mid) if mid is not None else None
+
+
+def delete_card_discord(
+    *,
+    instance_dir: Path,
+    channel_id: str,
+    message_id: str,
+    log: LogFn | None = None,
+) -> bool:
+    """Delete card via Discord REST DELETE. Returns True on success or already gone."""
+    token = env_value(instance_dir, "DISCORD_BOT_TOKEN")
+    if not token or not channel_id or not message_id:
+        return False
+    url = f"{_DISCORD_API}/channels/{channel_id}/messages/{message_id}"
+    try:
+        http_json(
+            url,
+            extra_headers={"Authorization": f"Bot {token}"},
+            method="DELETE",
+            timeout=15,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        exc_str = str(exc).lower()
+        if "404" in exc_str or "unknown message" in exc_str:
+            return True
+        if log:
+            log(f"supervisor delete_card_discord error: {exc}")
+        return False
 
 
 def edit_card_discord(

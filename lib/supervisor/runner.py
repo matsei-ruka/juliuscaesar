@@ -15,9 +15,12 @@ from typing import Any, Callable
 
 from gateway import queue
 
-from .cards import Card, render_card, render_final_card, render_stopped_card
+from .cards import Card, render_card, render_stopped_card
 from .config import SupervisorConfig, load_config as load_supervisor_config
 from .delivery import (
+    delete_card_discord,
+    delete_card_slack,
+    delete_card_telegram,
     edit_card_discord,
     edit_card_slack,
     edit_card_telegram,
@@ -286,36 +289,38 @@ def _render_and_send(
         ev_state.language = snap.language
         ev_state.first_card_at = now.timestamp()
 
-    # Narrator: call if budget allows and event hasn't hit its cap.
+    # Narrator: always called (fast path for empty stderr), AI gated by budget.
     narrator_called = False
-    narration_text = ""
     event_narrator_cap = ev_state.narration_count < cfg.narrator_calls_per_event_max
-    if narrator_budget and event_narrator_cap:
-        result = narrate(
-            snap, ev_state, cfg.narrator_brain, instance_dir, log=log,
-        )
-        narration_text = result.text
-        narrator_called = result.from_model
-        if result.from_model:
-            ev_state.narration_count += 1
-            ev_state.last_narration = result.text
-        _write_log(
-            instance_dir,
-            {
-                "kind": "supervisor_narrator_call",
-                "ts": now.isoformat(),
-                "event_id": snap.event.id,
-                "from_model": result.from_model,
-                "narration": result.text,
-            },
-        )
+    result = narrate(
+        snap,
+        ev_state,
+        cfg.narrator_brain,
+        instance_dir,
+        narrator_budget=narrator_budget and event_narrator_cap,
+        log=log,
+    )
+    narration_text = result.text
+    narrator_called = result.from_model
+    if result.from_model:
+        ev_state.narration_count += 1
+        ev_state.last_narration = result.text
+    _write_log(
+        instance_dir,
+        {
+            "kind": "supervisor_narrator_call",
+            "ts": now.isoformat(),
+            "event_id": snap.event.id,
+            "from_model": result.from_model,
+            "narration": result.text,
+        },
+    )
 
     title = _title_from_meta(snap.meta, snap.event.content)
     card = render_card(
         title=title,
         phase=snap.phase,
         elapsed_seconds=snap.age_seconds,
-        activity_age_seconds=snap.adapter.activity_age_seconds,
         narration=narration_text,
         language=ev_state.language,
     )
@@ -431,32 +436,18 @@ def _finalize_completed(
         if status not in ("done", "failed", "escalated"):
             continue
         ev_state = state.events[str(eid)]
-        title = _title_from_status_row(status_row)
-        elapsed = _elapsed_from_status_row(status_row, now)
-        if status == "done":
-            card = render_final_card(
-                title=title,
-                elapsed_seconds=elapsed,
-                language=ev_state.language or "en",
-            )
-        else:
-            card = render_stopped_card(
-                title=title,
-                elapsed_seconds=elapsed,
-                language=ev_state.language or "en",
-            )
         if dry_run:
             continue
         source = str(status_row.get("source") or "telegram")
         meta = status_row.get("meta") or {}
         if not _delivery_address(source, meta):
             continue
-        ok = sender.edit(
+        # Delete the progress card — user doesn't need a residual ✅ in chat.
+        ok = sender.delete(
             instance_dir=instance_dir,
             source=source,
             meta=meta,
             message_id=ev_state.channel_message_id,
-            card=card,
             log=log,
         )
         _write_log(
@@ -467,10 +458,11 @@ def _finalize_completed(
                 "event_id": eid,
                 "status": status,
                 "message_id": ev_state.channel_message_id,
+                "action": "delete",
                 "ok": ok,
             },
         )
-        # Drop the event from state — final card sent, no more updates.
+        # Drop the event from state — card deleted, no more updates.
         del state.events[str(eid)]
 
 
@@ -598,6 +590,17 @@ class CardSender:
     ) -> bool:
         raise NotImplementedError
 
+    def delete(
+        self,
+        *,
+        instance_dir: Path,
+        source: str,
+        meta: dict,
+        message_id: str,
+        log: LogFn,
+    ) -> bool:
+        raise NotImplementedError
+
 
 class _MultiChannelSender(CardSender):
     def send(
@@ -669,5 +672,36 @@ class _MultiChannelSender(CardSender):
             chat_id=str(meta.get("chat_id") or ""),
             message_id=_int_or_none(message_id) or 0,
             card=card,
+            log=log,
+        )
+
+    def delete(
+        self,
+        *,
+        instance_dir: Path,
+        source: str,
+        meta: dict,
+        message_id: str,
+        log: LogFn,
+    ) -> bool:
+        if source == "slack":
+            return delete_card_slack(
+                instance_dir=instance_dir,
+                channel=str(meta.get("channel") or ""),
+                ts=message_id,
+                log=log,
+            )
+        if source == "discord":
+            return delete_card_discord(
+                instance_dir=instance_dir,
+                channel_id=str(meta.get("channel_id") or ""),
+                message_id=message_id,
+                log=log,
+            )
+        # default: telegram
+        return delete_card_telegram(
+            instance_dir=instance_dir,
+            chat_id=str(meta.get("chat_id") or ""),
+            message_id=_int_or_none(message_id) or 0,
             log=log,
         )

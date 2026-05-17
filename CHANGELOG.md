@@ -5,6 +5,25 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.05.17.05
+
+Supervisor: delete card on completion, simplified format, real brain signal.
+
+- **Card deleted on completion** (`_finalize_completed` now calls
+  `sender.delete()` via new `delete_card_telegram/slack/discord` helpers).
+  No ✅ residue left in chat — card simply disappears when the reply lands.
+- **Simplified card format**: removed "Phase:" and "Activity:" lines.
+  Neither line was informative for claude-brain events (empty stderr =
+  always showed "starting" and a stale activity bar). New format: emoji +
+  title, "Last signal:" (if any), elapsed time.
+- **Real brain signal for empty-stderr brains**: narrator now returns
+  "elaborando…" / "processing…" immediately when `stderr_tail` is empty
+  and `pid_alive=True`, without calling the AI (no narrator budget wasted).
+  PID-dead + no-stderr falls back to last known narration.
+  `narrator_budget` param added to `narrate()` for caller-side gating.
+- `render_card()` `activity_age_seconds` param removed (unused after
+  format change). Tests updated throughout.
+
 ## 2026.05.17.04
 
 Supervisor: daemon mode (`start`/`stop`/`watch`) + watchdog child entry.

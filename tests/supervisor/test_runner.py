@@ -22,6 +22,7 @@ class FakeSender(CardSender):
     def __init__(self):
         self.sends: list[dict] = []
         self.edits: list[dict] = []
+        self.deletes: list[dict] = []
         self.next_message_id = 1000
 
     def send(self, *, instance_dir, source, meta, card, log):
@@ -41,6 +42,14 @@ class FakeSender(CardSender):
             "meta": meta,
             "message_id": message_id,
             "card": card,
+        })
+        return True
+
+    def delete(self, *, instance_dir, source, meta, message_id, log):
+        self.deletes.append({
+            "source": source,
+            "meta": meta,
+            "message_id": message_id,
         })
         return True
 
@@ -225,7 +234,7 @@ def test_worker_linked_skipped(tmp_path):
     assert any(s["reason"] == "worker_linked" for s in result.skipped)
 
 
-def test_completed_event_renders_final_card(tmp_path):
+def test_completed_event_deletes_card(tmp_path):
     _setup_instance(tmp_path)
     eid = _make_running_event(tmp_path, age_seconds=120.0)
     sender = FakeSender()
@@ -233,15 +242,16 @@ def test_completed_event_renders_final_card(tmp_path):
     # Tick 1: send initial card
     run_tick(tmp_path, sender=sender)
     assert len(sender.sends) == 1
+    initial_message_id = sender.sends[0]["message_id"]
 
     # Mark event done and tick again
     _mark_event_done(tmp_path, eid)
     run_tick(tmp_path, sender=sender)
 
-    # Should have edited the original card to ✅
-    assert len(sender.edits) >= 1
-    final_edit = sender.edits[-1]
-    assert "✅" in final_edit["card"].text
+    # Card should be deleted (not edited to ✅)
+    assert len(sender.deletes) >= 1
+    delete = sender.deletes[-1]
+    assert delete["message_id"] == initial_message_id
 
 
 # --- CRITICAL: loop guard ---

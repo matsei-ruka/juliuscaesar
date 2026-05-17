@@ -147,21 +147,44 @@ def _call_model(
         return None
 
 
+_PID_ALIVE_SIGNAL: dict[str, str] = {
+    "en": "processing…",
+    "it": "elaborando…",
+}
+
+
 def narrate(
     snap: EventSnapshot,
     ev_state: EventState,
     narrator_brain: str,
     instance_dir: Path,
     *,
+    narrator_budget: bool = True,
     log: LogFn | None = None,
 ) -> NarratorResult:
     """Return narration for the card's Last signal field.
 
+    Fast path: when stderr is empty and the adapter PID is alive, we return a
+    generic "processing…" string without calling the AI. This avoids wasting
+    narrator budget on claude-brain events that write nothing to stderr.
+
     Falls back to phase label if model is unavailable or output fails validation.
-    Callers must check event + tick budgets before calling.
     """
     lang = snap.language if snap.language in _PROMPTS else "en"
     fallback_text = snap.phase.label_for(lang)
+
+    tail_raw = snap.adapter.stderr_tail or ""
+
+    # Fast path: no stderr content → use pid-alive signal (free, no AI call).
+    if not tail_raw:
+        if snap.adapter.pid_alive:
+            return NarratorResult(text=_PID_ALIVE_SIGNAL.get(lang, "processing…"), from_model=False)
+        # PID dead + no stderr → brain just finished; finalize will delete card.
+        # Return last known narration or fallback so the card stays meaningful.
+        return NarratorResult(text=ev_state.last_narration or fallback_text, from_model=False)
+
+    if not narrator_budget:
+        return NarratorResult(text=ev_state.last_narration or fallback_text, from_model=False)
 
     provider, model = _parse_brain_spec(narrator_brain)
     if provider != "openrouter":
@@ -170,7 +193,6 @@ def narrate(
         return NarratorResult(text=fallback_text, from_model=False)
 
     prompts = _PROMPTS[lang]
-    tail_raw = snap.adapter.stderr_tail or ""
     tail_redacted = redact_stderr(tail_raw[-2000:])
     prior = ev_state.last_narration or "none"
     phase_label = snap.phase.label_for(lang)

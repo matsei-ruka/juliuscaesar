@@ -52,7 +52,6 @@ def render_card(
     title: str,
     phase: PhaseResult,
     elapsed_seconds: float,
-    activity_age_seconds: float | None,
     narration: str = "",
     language: str = "en",
 ) -> Card:
@@ -60,16 +59,11 @@ def render_card(
     lang = language if language in ("en", "it") else "en"
     title_short = _truncate(title, 60)
 
-    phase_label = phase.label_for(lang)
-    activity_bar = _activity_bar(activity_age_seconds)
-    freshness = _freshness_note(activity_age_seconds, lang)
     elapsed = _format_elapsed(elapsed_seconds)
 
     lines = [
         f"{phase.emoji} {title_short}",
         "",
-        f"{_LABELS['phase'][lang]}: {phase_label}",
-        f"{_LABELS['activity'][lang]}: `{activity_bar}`  {freshness}",
     ]
     if narration:
         lines.append(f"{_LABELS['signal'][lang]}: {narration}")
