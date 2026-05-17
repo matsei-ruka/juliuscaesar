@@ -5,6 +5,23 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.05.17.01
+
+Release for the WhatsApp channel.
+
+- New WhatsApp channel ships end-to-end: TypeScript sidecar
+  (`lib/gateway/channels/whatsapp_sidecar/`) talks to WhatsApp Web via
+  Baileys; the Python channel (`lib/gateway/channels/whatsapp.py`) hosts
+  the inbound DM path, policy, protocol, sidecar supervisor, and state.
+- `bin/jc-whatsapp` operator CLI drives pairing / approval / health.
+- Approval flow integrates with the unified approvals table; blocked
+  senders are rejected before policy evaluation; watchdog health check
+  exposes `auth_valid` for the sidecar.
+- Phase 5 media download pipes inbound WhatsApp media through the
+  gateway's `voice/inbound/` directory for parity with Telegram.
+- Spec at `docs/specs/whatsapp-channel.md`; KB entry at
+  `docs/kb/subsystem/channel-whatsapp.md`.
+
 ## 2026.05.15.02
 
 Release for accountabilities and deep-research operator tooling.
