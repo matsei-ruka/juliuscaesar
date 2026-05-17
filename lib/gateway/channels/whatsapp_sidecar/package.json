@@ -1,0 +1,24 @@
+{
+  "name": "jc-whatsapp-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JuliusCaesar WhatsApp channel sidecar — Baileys WhatsApp Web socket over stdio JSON lines",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc11",
+    "pino": "^9.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""jc-whatsapp — WhatsApp channel operations.
+
+Subcommands:
+  status            Show connection state and known chats summary.
+  login             Start login mode and display QR code.
+  logout            Clear auth state for an account.
+  chats list        List known WhatsApp chats with tiers.
+  chats trust <jid> Promote a sender/group JID to Trusted.
+  chats block <jid> Move a sender/group JID to Blocked.
+  doctor            Check WhatsApp channel health.
+
+Instance dir resolution mirrors other jc-* tools.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from gateway.channels import whatsapp_policy as _policy  # type: ignore  # noqa: E402
+from gateway.channels import whatsapp_state as _state  # type: ignore  # noqa: E402
+from gateway.config import load_config  # type: ignore  # noqa: E402
+from jc_paths import InstanceResolutionError, resolve_instance_dir  # type: ignore  # noqa: E402
+
+
+def _resolve(args: argparse.Namespace) -> Path:
+    try:
+        return resolve_instance_dir(
+            args.instance_dir, fallback_markers=("memory",)
+        )
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _account_id(args: argparse.Namespace) -> str:
+    aid = getattr(args, "account", None) or "default"
+    return str(aid).strip()
+
+
+def _load_config(instance: Path) -> dict:
+    path = instance / "ops" / "gateway.yaml"
+    if not path.exists():
+        return {}
+    import yaml
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    channels = data.get("channels") or {}
+    wa = channels.get("whatsapp") or {}
+    return wa if isinstance(wa, dict) else {}
+
+
+# ── status ──────────────────────────────────────────────────────────────
+
+def cmd_status(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    wa_cfg = _load_config(instance)
+    account_id = _account_id(args)
+    accounts = wa_cfg.get("accounts") if isinstance(wa_cfg.get("accounts"), dict) else {}
+
+    if args.json:
+        info: dict = {
+            "account_id": account_id,
+            "configured": account_id in accounts,
+            "enabled": bool(wa_cfg.get("enabled", False)),
+        }
+        if account_id in accounts:
+            acct = accounts[account_id]
+            info["dm_policy"] = acct.get("dm_policy", "external")
+            info["group_policy"] = acct.get("group_policy", "external")
+            info["require_group_mention"] = acct.get("require_group_mention", True)
+        chats = _state.read_chats(instance)
+        info["known_chats"] = len(chats)
+        info["by_tier"] = {
+            t: len([c for c in chats if c.tier == t])
+            for t in ("trusted", "external", "blocked")
+        }
+        events = _state.recent_events(instance, limit=5)
+        info["recent_events"] = events
+        print(json.dumps(info, indent=2))
+        return 0
+
+    print(f"account: {account_id}")
+    if account_id not in accounts:
+        print("  (not configured — add accounts.{account_id} to ops/gateway.yaml)")
+        return 0
+
+    acct = accounts[account_id]
+    print(f"  dm_policy:    {acct.get('dm_policy', 'external')}")
+    print(f"  group_policy: {acct.get('group_policy', 'external')}")
+    print(f"  require_group_mention: {acct.get('require_group_mention', True)}")
+
+    policy = _policy.read_policy(instance, account_id)
+    print(f"  allow_from:   {len(policy.allow_from)} JID(s)")
+    print(f"  blocklist:    {len(policy.blocklist)} JID(s)")
+
+    chats = _state.read_chats(instance)
+    acct_chats = [c for c in chats if c.account_id == account_id]
+    print(f"  known_chats:  {len(acct_chats)}")
+    trusted = sum(1 for c in acct_chats if c.tier == "trusted")
+    external = sum(1 for c in acct_chats if c.tier == "external")
+    blocked = sum(1 for c in acct_chats if c.tier == "blocked")
+    print(f"    trusted:  {trusted}")
+    print(f"    external: {external}")
+    print(f"    blocked:  {blocked}")
+
+    drafts = _state.pending_drafts(instance)
+    if drafts:
+        print(f"  pending_drafts: {len(drafts)}")
+        for d in drafts[:5]:
+            jid = d.meta.get("sender_jid", "?")
+            print(f"    {d.draft_id} → {jid}")
+            if len(drafts) > 5:
+                print(f"    ... and {len(drafts) - 5} more")
+    return 0
+
+
+# ── login ───────────────────────────────────────────────────────────────
+
+def cmd_login(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    account_id = _account_id(args)
+    auth_dir = instance / "state" / "channels" / "whatsapp" / "auth" / account_id
+
+    # Check if already authenticated
+    creds_file = auth_dir / "creds.json"
+    if creds_file.exists():
+        try:
+            data = json.loads(creds_file.read_text(encoding="utf-8"))
+            if data.get("me") and data.get("noiseKey"):
+                print(f"Already authenticated (creds.json exists).")
+                print(f"To re-authenticate, run 'jc whatsapp logout' first.")
+                return 0
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    print("Starting WhatsApp login...")
+    print(f"Auth dir: {auth_dir}")
+    print()
+
+    sidecar_dir = Path(__file__).resolve().parent.parent / "lib" / "gateway" / "channels" / "whatsapp_sidecar"
+    entry = sidecar_dir / "dist" / "index.js"
+
+    if not entry.exists():
+        print(f"Sidecar not built. Run: cd {sidecar_dir} && npm install && npm run build")
+        return 1
+
+    if args.print_qr:
+        # Start sidecar briefly, capture QR, print it, stop
+        print("Scanning for QR code...")
+        env = os.environ.copy()
+        env.setdefault("NODE_ENV", "production")
+        proc = subprocess.Popen(
+            ["node", str(entry), "--auth-dir", str(auth_dir), "--account-id", account_id],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        found = False
+        try:
+            import signal as _signal
+            start = __import__("time").monotonic()
+            while (__import__("time").monotonic() - start) < 30:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    evt = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if evt.get("type") == "qr":
+                    qr_str = str(evt.get("qr", ""))
+                    if qr_str:
+                        print(qr_str)
+                        found = True
+                        break
+                elif evt.get("type") == "connection" and evt.get("state") == "open":
+                    print("Connected! No QR needed (auth existed).")
+                    found = True
+                    break
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+        if not found:
+            print("No QR received within 30s. Check sidecar stderr output.")
+            return 1
+        return 0
+
+    if args.send_qr_to_telegram:
+        # Start sidecar, capture QR, render to PNG, send via Telegram
+        import tempfile
+        import time
+        try:
+            import qrcode  # type: ignore
+        except ImportError:
+            print("qrcode[pil] package required for --send-qr-to-telegram.")
+            print("Install: pip install qrcode[pil]")
+            return 1
+
+        print("Scanning for QR code (30s timeout)...")
+        env = os.environ.copy()
+        env.setdefault("NODE_ENV", "production")
+        proc = subprocess.Popen(
+            ["node", str(entry), "--auth-dir", str(auth_dir), "--account-id", account_id],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        qr_str = ""
+        try:
+            start_t = time.monotonic()
+            while (time.monotonic() - start_t) < 30:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    evt = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if evt.get("type") == "qr":
+                    qr_str = str(evt.get("qr", ""))
+                    if qr_str:
+                        break
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+        if not qr_str:
+            print("No QR received within 30s.")
+            return 1
+
+        # Render QR to temp PNG
+        img = qrcode.make(qr_str)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            img.save(tmp, format="PNG")
+            qr_path = tmp.name
+
+        # Send via Telegram
+        sender = (
+            Path(__file__).resolve().parent.parent
+            / "lib" / "heartbeat" / "lib" / "send_telegram.py"
+        )
+        if not sender.exists():
+            print("Telegram sender not found. QR saved to:", qr_path)
+            return 0
+
+        subprocess.run(
+            [
+                sys.executable, str(sender),
+                "📱 *WhatsApp QR Login*\n\n"
+                f"Scan this QR from WhatsApp → Linked Devices.\n"
+                f"Account: `{account_id}`\n"
+                f"Instance: `{instance}`",
+                "--image", qr_path,
+            ],
+            env={**os.environ, "JC_INSTANCE_DIR": str(instance)},
+        )
+        os.unlink(qr_path)
+        print("QR sent to Telegram.")
+        return 0
+
+    # Default: start sidecar interactively (QR rendered to terminal)
+    print("Starting sidecar in interactive mode. Scan the QR from WhatsApp → Linked Devices.")
+    print("Press Ctrl+C to stop after scanning.")
+    print()
+    env = os.environ.copy()
+    env.setdefault("NODE_ENV", "production")
+
+    proc = subprocess.Popen(
+        ["node", str(entry), "--auth-dir", str(auth_dir), "--account-id", account_id],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            print(f"[sidecar] {line}")
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if evt.get("type") == "connection":
+                state = evt.get("state", "")
+                if state == "open":
+                    print(f"\nConnected as {evt.get('self_jid', 'unknown')}!")
+                    print("Login successful. Auth state saved.")
+                    break
+                elif state == "logged_out":
+                    print("\nLogged out by WhatsApp. Try again.")
+                    break
+            elif evt.get("type") == "error" and evt.get("fatal"):
+                print(f"\nFatal error: {evt.get('reason')}")
+                break
+    except KeyboardInterrupt:
+        print("\nLogin interrupted.")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    return 0
+
+
+# ── logout ──────────────────────────────────────────────────────────────
+
+def cmd_logout(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    account_id = _account_id(args)
+    auth_dir = instance / "state" / "channels" / "whatsapp" / "auth" / account_id
+
+    if not auth_dir.exists():
+        print(f"No auth state found for account '{account_id}'.")
+        return 0
+
+    # Remove auth files
+    import shutil
+    shutil.rmtree(auth_dir)
+    print(f"Auth state removed for account '{account_id}'.")
+    print("Run 'jc whatsapp login' to re-authenticate.")
+    return 0
+
+
+# ── chats ───────────────────────────────────────────────────────────────
+
+def cmd_chats_list(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    account_id = _account_id(args)
+    chats = _state.read_chats(instance)
+    acct_chats = [
+        c for c in chats
+        if (not account_id or account_id == "default" or c.account_id == account_id)
+    ]
+
+    if args.json:
+        print(json.dumps([
+            {
+                "jid": c.jid,
+                "push_name": c.push_name,
+                "chat_type": c.chat_type,
+                "tier": c.tier,
+                "last_message_at": c.last_message_at,
+                "account_id": c.account_id,
+            }
+            for c in acct_chats
+        ], indent=2))
+        return 0
+
+    if not acct_chats:
+        print("(no known WhatsApp chats)")
+        return 0
+
+    def _trunc(s: str, w: int) -> str:
+        return s if len(s) <= w else s[: w - 1] + "…"
+
+    print(
+        f"{'JID':<28}  {'NAME':<20}  {'TYPE':<6}  {'TIER':<10}  {'LAST_SEEN':<19}"
+    )
+    print("-" * 95)
+    for c in acct_chats:
+        print(
+            f"{_trunc(c.jid, 28):<28}  "
+            f"{_trunc(c.push_name or '-', 20):<20}  "
+            f"{c.chat_type:<6}  "
+            f"{c.tier:<10}  "
+            f"{c.last_message_at[:19] if c.last_message_at else '-':<19}"
+        )
+    return 0
+
+
+def cmd_chats_trust(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    account_id = _account_id(args)
+    jid = args.jid.strip()
+    if not jid:
+        raise SystemExit("trust: JID is required")
+
+    changed = _policy.set_tier(instance, account_id, jid, "trusted")
+    if changed:
+        print(f"ops/gateway.yaml updated: {jid} → trusted")
+    else:
+        print(f"{jid} already trusted (no-op)")
+
+    # Send any pending drafts
+    drafts = _state.pending_drafts(instance)
+    sent = 0
+    for d in drafts:
+        if d.meta.get("sender_jid", "").lower().strip() == jid.lower().strip():
+            _state.update_draft_state(instance, d.draft_id, "approved")
+            sent += 1
+    if sent:
+        print(f"{sent} pending draft(s) approved for sending.")
+    return 0
+
+
+def cmd_chats_block(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    account_id = _account_id(args)
+    jid = args.jid.strip()
+    if not jid:
+        raise SystemExit("block: JID is required")
+
+    changed = _policy.set_tier(instance, account_id, jid, "blocked")
+    if changed:
+        print(f"ops/gateway.yaml updated: {jid} → blocked")
+    else:
+        print(f"{jid} already blocked (no-op)")
+
+    # Drop any pending drafts
+    drafts = _state.pending_drafts(instance)
+    dropped = 0
+    for d in drafts:
+        if d.meta.get("sender_jid", "").lower().strip() == jid.lower().strip():
+            _state.update_draft_state(instance, d.draft_id, "denied")
+            _state.remove_draft(instance, d.draft_id)
+            dropped += 1
+    if dropped:
+        print(f"{dropped} pending draft(s) dropped.")
+    return 0
+
+
+# ── doctor ──────────────────────────────────────────────────────────────
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    instance = _resolve(args)
+    wa_cfg = _load_config(instance)
+    account_id = _account_id(args)
+    accounts = wa_cfg.get("accounts") if isinstance(wa_cfg.get("accounts"), dict) else {}
+    enabled = bool(wa_cfg.get("enabled", False))
+    issues: list[str] = []
+
+    # Node availability
+    import shutil
+    node_path = shutil.which("node")
+    if node_path:
+        node_ver = subprocess.run(
+            ["node", "--version"], capture_output=True, text=True
+        ).stdout.strip()
+        print(f"node: {node_ver} ({node_path})")
+        # Parse major version
+        try:
+            major = int(node_ver.lstrip("v").split(".")[0])
+            if major < 18:
+                issues.append(f"node {node_ver} is too old (need >= 18)")
+        except (ValueError, IndexError):
+            issues.append(f"could not parse node version: {node_ver}")
+    else:
+        issues.append("node not found in PATH")
+        print("node: NOT FOUND")
+
+    # Sidecar build
+    sidecar_dir = (
+        Path(__file__).resolve().parent.parent
+        / "lib" / "gateway" / "channels" / "whatsapp_sidecar"
+    )
+    node_modules = sidecar_dir / "node_modules"
+    dist = sidecar_dir / "dist" / "index.js"
+    if not node_modules.exists():
+        issues.append(f"sidecar dependencies not installed (run: cd {sidecar_dir} && npm install)")
+    if not dist.exists():
+        issues.append(f"sidecar not built (run: cd {sidecar_dir} && npm run build)")
+
+    # Auth state
+    auth_dir = instance / "state" / "channels" / "whatsapp" / "auth" / account_id
+    creds = auth_dir / "creds.json"
+    if creds.exists():
+        try:
+            data = json.loads(creds.read_text(encoding="utf-8"))
+            me = data.get("me", {})
+            jid = me.get("id", "unknown") if isinstance(me, dict) else "unknown"
+            print(f"auth: authenticated as {jid}")
+        except (json.JSONDecodeError, OSError):
+            issues.append("creds.json exists but is unreadable")
+            print("auth: creds.json corrupted")
+    else:
+        print("auth: not authenticated (run 'jc whatsapp login')")
+
+    # Config
+    if not enabled:
+        print("config: channel DISABLED")
+    else:
+        print("config: channel enabled")
+        if account_id not in accounts:
+            issues.append(f"account '{account_id}' not in accounts config")
+
+    if issues:
+        print(f"\n⚠ {len(issues)} issue(s):")
+        for i in issues:
+            print(f"  - {i}")
+        return 1
+
+    print("\nAll checks passed.")
+    return 0
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jc-whatsapp")
+    p.add_argument("--instance-dir", help="override instance dir")
+    p.add_argument("--account", default="default", help="account id (default: default)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    p_status = sub.add_parser("status", help="show connection state and chat summary")
+    p_status.add_argument("--json", action="store_true")
+    p_status.set_defaults(func=cmd_status)
+
+    p_login = sub.add_parser("login", help="start login mode and display QR code")
+    p_login.add_argument("--print-qr", action="store_true", help="output raw QR string")
+    p_login.add_argument("--send-qr-to-telegram", action="store_true", help="send QR image to operator via Telegram")
+    p_login.set_defaults(func=cmd_login)
+
+    p_logout = sub.add_parser("logout", help="clear auth state")
+    p_logout.set_defaults(func=cmd_logout)
+
+    chats = sub.add_parser("chats", help="chat management")
+    chats_sub = chats.add_subparsers(dest="chats_cmd", required=True)
+
+    p_list = chats_sub.add_parser("list", help="list known chats")
+    p_list.add_argument("--json", action="store_true")
+    p_list.set_defaults(func=cmd_chats_list)
+
+    p_trust = chats_sub.add_parser("trust", help="promote sender/group to Trusted")
+    p_trust.add_argument("jid", help="WhatsApp JID to trust")
+    p_trust.set_defaults(func=cmd_chats_trust)
+
+    p_block = chats_sub.add_parser("block", help="move sender/group to Blocked")
+    p_block.add_argument("jid", help="WhatsApp JID to block")
+    p_block.set_defaults(func=cmd_chats_block)
+
+    p_doctor = sub.add_parser("doctor", help="check WhatsApp channel health")
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.cmd == "chats":
+        return args.func(args)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
