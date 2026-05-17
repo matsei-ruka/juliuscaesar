@@ -380,12 +380,16 @@ def narrate(
     if raw is None:
         return NarratorResult(text=ev_state.last_narration or fallback_text, from_model=False)
 
-    # Parse JSON {"narration": "..."}; accept plain text as fallback
+    # Parse JSON {"narration": "..."}; reject raw JSON bleed as fallback
     try:
         obj = json.loads(raw)
         text = str(obj.get("narration") or "").strip()
     except (json.JSONDecodeError, AttributeError):
-        text = raw.strip()
+        raw_stripped = raw.strip()
+        # If it looks like JSON but failed to parse, don't render it in the card.
+        if raw_stripped.startswith("{") or raw_stripped.startswith("["):
+            return NarratorResult(text=ev_state.last_narration or fallback_text, from_model=False)
+        text = raw_stripped
 
     if not _validate(text):
         if log:

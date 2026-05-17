@@ -40,12 +40,14 @@ def classify(
     *,
     mtime_age_seconds: float | None = None,
     has_stderr: bool = True,
+    elapsed_seconds: float = 0.0,
     override_path: str = "",
 ) -> PhaseResult:
     """Classify the current phase from stderr content + mtime signal.
 
     Rules (in order):
-    - No stderr output yet → `starting`
+    - No stderr output yet AND elapsed < 30s → `starting`
+    - No stderr output yet AND elapsed >= 30s → `thinking` (brain is working, just no stderr)
     - stderr mtime_age > 30s → `idle`
     - Latest keyword match in tail → phase
     - No match → `thinking`
@@ -53,7 +55,8 @@ def classify(
     phases = _load_phases(override_path)
 
     if not has_stderr:
-        return _make("starting", phases)
+        phase = "starting" if elapsed_seconds < 30 else "thinking"
+        return _make(phase, phases)
 
     if mtime_age_seconds is not None and mtime_age_seconds > 30:
         return _make("idle", phases)

@@ -4,9 +4,20 @@ from supervisor.phases import classify
 
 
 def test_no_stderr_returns_starting():
-    result = classify("", has_stderr=False)
+    result = classify("", has_stderr=False, elapsed_seconds=0)
     assert result.phase == "starting"
     assert result.emoji == "🟢"
+
+
+def test_no_stderr_long_elapsed_returns_thinking():
+    """After 30s with no stderr, demote 'starting' → 'thinking'."""
+    result = classify("", has_stderr=False, elapsed_seconds=30.0)
+    assert result.phase == "thinking"
+
+
+def test_no_stderr_just_under_threshold_still_starting():
+    result = classify("", has_stderr=False, elapsed_seconds=29.9)
+    assert result.phase == "starting"
 
 
 def test_idle_when_mtime_stale():
@@ -72,12 +83,12 @@ def test_no_match_returns_thinking():
 
 
 def test_label_for_it():
-    result = classify("", has_stderr=False)  # starting
+    result = classify("", has_stderr=False, elapsed_seconds=0)  # starting
     assert result.label_for("it") == "avvio"
 
 
 def test_label_for_en():
-    result = classify("", has_stderr=False)  # starting
+    result = classify("", has_stderr=False, elapsed_seconds=0)  # starting
     assert result.label_for("en") == "starting"
 
 

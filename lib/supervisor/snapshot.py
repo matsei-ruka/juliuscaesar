@@ -80,6 +80,7 @@ def _read_qualifying(
             adapter.stderr_tail,
             mtime_age_seconds=adapter.activity_age_seconds,
             has_stderr=bool(adapter.stderr_tail),
+            elapsed_seconds=age,
         )
         out.append(
             EventSnapshot(
