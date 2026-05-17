@@ -23,7 +23,14 @@ Usage:
   jc-supervisor [--instance-dir <path>] <subcommand>
 
 Subcommands:
-  tick              Run one supervisor tick (for cron).
+  tick              Run one supervisor tick (one-shot).
+  watch [--interval N]
+                    Foreground loop: tick every N seconds (default 5).
+                    Receives SIGTERM cleanly. Used by `start` as the worker.
+  start [--interval N]
+                    Daemonize watch loop, write state/supervisor/jc-supervisor.pid.
+                    Returns immediately. Intended for jc-watchdog.
+  stop              SIGTERM the daemon, remove pidfile.
   status [--json]   Show current supervisor state.
   enable            Enable supervisor in ops/gateway.yaml.
   disable           Disable supervisor in ops/gateway.yaml.
@@ -57,7 +64,7 @@ while [[ $# -gt 0 ]]; do
             INSTANCE_DIR="$2"; shift 2 ;;
         --instance-dir=*)
             INSTANCE_DIR="${1#--instance-dir=}"; shift ;;
-        tick|status|enable|disable|reset|help|--help|-h)
+        tick|watch|start|stop|status|enable|disable|reset|help|--help|-h)
             CMD="$1"; shift; ARGS=("$@"); break ;;
         *)
             CMD="$1"; shift; ARGS=("$@"); break ;;
@@ -78,6 +85,139 @@ if result.error:
     print(f"error: {result.error}", file=sys.stderr)
     sys.exit(1)
 PYEOF
+        ;;
+
+    watch)
+        interval=5
+        i=0
+        while [[ $i -lt ${#ARGS[@]} ]]; do
+            case "${ARGS[$i]}" in
+                --interval)
+                    interval="${ARGS[$((i+1))]}"; i=$((i+2)) ;;
+                --interval=*)
+                    interval="${ARGS[$i]#--interval=}"; i=$((i+1)) ;;
+                *)
+                    echo "Unknown arg for watch: ${ARGS[$i]}" >&2; exit 1 ;;
+            esac
+        done
+        if ! [[ "$interval" =~ ^[0-9]+$ ]] || [[ "$interval" -lt 1 ]]; then
+            echo "error: --interval must be a positive integer (got: $interval)" >&2
+            exit 1
+        fi
+        echo "jc-supervisor watch — instance=$INSTANCE_DIR interval=${interval}s"
+        # Stamp pidfile so `status` / external monitors can find this watcher
+        # whether it was launched via `start` (already stamped) or directly.
+        pid_dir="$INSTANCE_DIR/state/supervisor"
+        pid_file="$pid_dir/jc-supervisor.pid"
+        mkdir -p "$pid_dir"
+        echo "$$" > "$pid_file"
+        # Use python with signal handling so SIGTERM exits cleanly (watchdog
+        # restarts won't hang on a stuck bash sleep loop).
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 - "$INSTANCE_DIR" "$interval" <<'PYEOF'
+import signal
+import sys
+import time
+from pathlib import Path
+from supervisor.runner import run_tick
+
+instance_dir = Path(sys.argv[1])
+interval = int(sys.argv[2])
+
+_stop = False
+
+def _handle_signal(signum, _frame):
+    global _stop
+    _stop = True
+    print(f"jc-supervisor watch: received signal {signum}, stopping", flush=True)
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
+
+while not _stop:
+    try:
+        result = run_tick(instance_dir)
+        if result.error:
+            print(f"tick error: {result.error}", file=sys.stderr, flush=True)
+    except Exception as exc:
+        print(f"tick crashed: {exc!r}", file=sys.stderr, flush=True)
+    # Interruptible sleep — break early on signal.
+    for _ in range(interval):
+        if _stop:
+            break
+        time.sleep(1)
+
+sys.exit(0)
+PYEOF
+        ;;
+
+    start)
+        # Daemonize a `watch` loop. Pidfile points at the watch process (not
+        # the bash wrapper), so jc-watchdog's `pid_alive` check sees the loop.
+        # We exec the watch subcommand in a new session so it survives the
+        # parent shell exiting.
+        interval=5
+        i=0
+        while [[ $i -lt ${#ARGS[@]} ]]; do
+            case "${ARGS[$i]}" in
+                --interval)
+                    interval="${ARGS[$((i+1))]}"; i=$((i+2)) ;;
+                --interval=*)
+                    interval="${ARGS[$i]#--interval=}"; i=$((i+1)) ;;
+                *)
+                    echo "Unknown arg for start: ${ARGS[$i]}" >&2; exit 1 ;;
+            esac
+        done
+        pid_dir="$INSTANCE_DIR/state/supervisor"
+        pid_file="$pid_dir/jc-supervisor.pid"
+        log_dir="$INSTANCE_DIR/state/logs"
+        log_file="$log_dir/supervisor-watch.log"
+        mkdir -p "$pid_dir" "$log_dir"
+
+        if [[ -s "$pid_file" ]]; then
+            existing="$(cat "$pid_file" 2>/dev/null || true)"
+            if [[ -n "$existing" ]] && kill -0 "$existing" 2>/dev/null; then
+                echo "jc-supervisor already running (pid $existing)"
+                exit 0
+            fi
+            # stale pidfile — fall through and restart
+        fi
+
+        self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+        setsid "$self" --instance-dir "$INSTANCE_DIR" watch --interval "$interval" \
+            >> "$log_file" 2>&1 < /dev/null &
+        child_pid=$!
+        disown "$child_pid" 2>/dev/null || true
+        # The child writes its own pidfile inside `watch`; stamp it here too
+        # so a fast `status` right after `start` sees a pid even if the child
+        # is still in import phase.
+        echo "$child_pid" > "$pid_file"
+        echo "jc-supervisor started (pid $child_pid) — interval=${interval}s log=$log_file"
+        ;;
+
+    stop)
+        pid_file="$INSTANCE_DIR/state/supervisor/jc-supervisor.pid"
+        if [[ ! -s "$pid_file" ]]; then
+            echo "jc-supervisor not running (no pidfile)"
+            exit 0
+        fi
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            echo "jc-supervisor not running (stale pidfile, removing)"
+            rm -f "$pid_file"
+            exit 0
+        fi
+        kill -TERM "$pid" 2>/dev/null || true
+        # Wait up to 10s for graceful exit
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "jc-supervisor pid $pid did not exit after SIGTERM, sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+        echo "jc-supervisor stopped (pid $pid)"
         ;;
 
     status)

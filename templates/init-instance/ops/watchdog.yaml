@@ -27,6 +27,20 @@ children:
       window_seconds: 600
       start_grace_seconds: 15
 
+  - name: jc-supervisor
+    type: daemon
+    enabled: true
+    start: jc-supervisor --instance-dir $INSTANCE_DIR start --interval 5
+    pidfile: state/supervisor/jc-supervisor.pid
+    health:
+      pid_alive: true
+      cwd_match: $INSTANCE_DIR
+    restart:
+      backoff: [5, 10, 30, 60, 300]
+      max_in_window: 5
+      window_seconds: 600
+      start_grace_seconds: 5
+
   # Legacy entry — uncomment only on instances pre-0.3.0 that still need the
   # screen + claude + bun-plugin path. Slated for removal in 0.5.0.
   #

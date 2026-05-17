@@ -5,6 +5,28 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.05.17.04
+
+Supervisor: daemon mode (`start`/`stop`/`watch`) + watchdog child entry.
+
+The 2026.05.17.03 cut shipped a one-shot `tick` subcommand intended for
+cron, which left card latency capped at ~60s (cron's minimum granularity)
+even though the throttle inside the tick is 30s. This release lets the
+supervisor run continuously under the existing watchdog so cards land in
+sub-10s after a slow event crosses its notice threshold.
+
+- `bin/jc-supervisor` gains `start [--interval N]`, `stop`, and
+  `watch [--interval N]` subcommands. `start` daemonizes via `setsid`,
+  writes `state/supervisor/jc-supervisor.pid`, and exits — same shape
+  as `jc-gateway start` so the watchdog's blocking `_start_daemon` can
+  launch it. `watch` is the foreground loop (SIGTERM-clean) the
+  daemonized process exec's; safe to run directly for debugging.
+- `templates/init-instance/ops/watchdog.yaml` adds a `jc-supervisor`
+  child entry (pid-alive + cwd-match health check, same restart
+  backoff as the gateway). New instances get the daemon for free; on
+  existing instances, append the entry and run `jc watchdog tick` once
+  to spawn it.
+
 ## 2026.05.17.03
 
 Supervisor: progress cards, silent recovery ladder, audit fixes.
