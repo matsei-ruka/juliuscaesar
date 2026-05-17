@@ -5,6 +5,28 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.05.17.02
+
+Release for video ingestion + WhatsApp shim wiring.
+
+- Video ingestion uses split-and-fuse: DashScope omni (`asr.py`)
+  transcribes the audio track; `lib/voice/vlm.py` describes frames via
+  `qwen3.6-plus` (DashScope intl compatible-mode endpoint).
+  `lib/voice/video.py` orchestrates the ffmpeg audio split, VLM call,
+  cleanup, and fuses the two outputs into a single brain-ready event
+  text.
+- `lib/gateway/channels/telegram.py` recognises Telegram `video`
+  payloads, downloads under `state/voice/inbound/`, ingests when
+  `voice.video.enabled` is true in `ops/gateway.yaml`, and forwards the
+  fused text plus paths in event meta. Files larger than 50 MB receive a
+  polite rejection notice and are skipped.
+- `voice` added to gateway config `allowed_top` so `voice.video.*`
+  passes validation.
+- `bin/jc-whatsapp` added to `install.sh` BINARIES — shim missing from
+  the 2026.05.17.01 release. Re-run `./install.sh` on any host upgrading
+  from `2026.05.17.01` to land the shim.
+- Spec at `docs/specs/video-ingestion.md`.
+
 ## 2026.05.17.01
 
 Release for the WhatsApp channel.
