@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# jc-supervisor — per-event progress supervisor for JuliusCaesar instances.
+#
+# Subcommands:
+#   tick              Run one supervisor tick (throttled to tick_interval_seconds).
+#   status [--json]   Show current supervisor state.
+#   enable            Set supervisor.enabled: true in ops/gateway.yaml.
+#   disable           Set supervisor.enabled: false in ops/gateway.yaml.
+#   reset <event_id>  Clear supervisor state for one event.
+#
+# Instance dir: --instance-dir <path> | $JC_INSTANCE_DIR | walk up for .jc | cwd
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+LIB_DIR="$(cd "$HERE/../lib" && pwd)"
+
+usage() {
+    cat <<'EOF'
+jc-supervisor — per-event progress narration and silent recovery.
+
+Usage:
+  jc-supervisor [--instance-dir <path>] <subcommand>
+
+Subcommands:
+  tick              Run one supervisor tick (for cron).
+  status [--json]   Show current supervisor state.
+  enable            Enable supervisor in ops/gateway.yaml.
+  disable           Disable supervisor in ops/gateway.yaml.
+  reset <event_id>  Clear supervisor state for a specific event.
+EOF
+}
+
+resolve_instance_dir() {
+    local arg="${1:-}"
+    if [[ -n "$arg" ]]; then
+        echo "$arg"; return
+    fi
+    if [[ -n "${JC_INSTANCE_DIR:-}" ]]; then
+        echo "$JC_INSTANCE_DIR"; return
+    fi
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        [[ -f "$dir/.jc" ]] && { echo "$dir"; return; }
+        dir="$(dirname "$dir")"
+    done
+    echo "$PWD"
+}
+
+INSTANCE_DIR=""
+CMD=""
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --instance-dir)
+            INSTANCE_DIR="$2"; shift 2 ;;
+        --instance-dir=*)
+            INSTANCE_DIR="${1#--instance-dir=}"; shift ;;
+        tick|status|enable|disable|reset|help|--help|-h)
+            CMD="$1"; shift; ARGS=("$@"); break ;;
+        *)
+            CMD="$1"; shift; ARGS=("$@"); break ;;
+    esac
+done
+
+INSTANCE_DIR="$(resolve_instance_dir "$INSTANCE_DIR")"
+
+case "${CMD:-}" in
+    tick)
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$INSTANCE_DIR" <<'PYEOF'
+import sys
+from pathlib import Path
+from supervisor.runner import run_tick
+
+result = run_tick(Path(sys.argv[1]), log=print)
+if result.error:
+    print(f"error: {result.error}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+        ;;
+
+    status)
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$INSTANCE_DIR" "${ARGS[@]}" <<'PYEOF'
+import json, sys
+from pathlib import Path
+from supervisor.config import load_config
+from supervisor.state import SupervisorState
+
+instance_dir = Path(sys.argv[1])
+as_json = "--json" in sys.argv[2:]
+cfg = load_config(instance_dir)
+state = SupervisorState.load(instance_dir)
+
+data = {
+    "enabled": cfg.enabled,
+    "last_tick_at": state.last_tick_at,
+    "tracked_events": len(state.events),
+    "events": {
+        k: {
+            "last_phase": v.last_phase,
+            "card_count": v.card_count,
+            "recovery_attempts": v.recovery_attempts,
+            "language": v.language,
+        }
+        for k, v in state.events.items()
+    },
+}
+if as_json:
+    print(json.dumps(data, indent=2))
+else:
+    print(f"Supervisor: {'enabled' if cfg.enabled else 'disabled'}")
+    print(f"Last tick:  {state.last_tick_at or 'never'}")
+    print(f"Tracked:    {len(state.events)} event(s)")
+    for eid, ev in state.events.items():
+        print(
+            f"  event {eid}: phase={ev.last_phase or '-'} "
+            f"cards={ev.card_count} recovery={ev.recovery_attempts}"
+        )
+PYEOF
+        ;;
+
+    enable|disable)
+        enabled="$([[ "$CMD" == "enable" ]] && echo "true" || echo "false")"
+        YAML="$INSTANCE_DIR/ops/gateway.yaml"
+        if grep -q "^supervisor:" "$YAML" 2>/dev/null; then
+            if grep -A5 "^supervisor:" "$YAML" | grep -q "^ *enabled:"; then
+                sed -i "s/^\(  *\)enabled: .*/\1enabled: $enabled/" "$YAML"
+            else
+                sed -i "/^supervisor:/a\\  enabled: $enabled" "$YAML"
+            fi
+        else
+            printf '\nsupervisor:\n  enabled: %s\n' "$enabled" >> "$YAML"
+        fi
+        echo "supervisor.enabled → $enabled in $YAML"
+        ;;
+
+    reset)
+        event_id="${ARGS[0]:-}"
+        if [[ -z "$event_id" ]]; then
+            echo "Usage: jc-supervisor reset <event_id>" >&2; exit 1
+        fi
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$INSTANCE_DIR" "$event_id" <<'PYEOF'
+import sys
+from pathlib import Path
+from supervisor.state import SupervisorState
+
+instance_dir = Path(sys.argv[1])
+event_id = int(sys.argv[2])
+state = SupervisorState.load(instance_dir)
+key = str(event_id)
+if key in state.events:
+    del state.events[key]
+    state.save(instance_dir)
+    print(f"Cleared supervisor state for event {event_id}")
+else:
+    print(f"No supervisor state for event {event_id}")
+PYEOF
+        ;;
+
+    help|--help|-h|"")
+        usage ;;
+
+    *)
+        echo "Unknown subcommand: $CMD" >&2
+        usage >&2
+        exit 1 ;;
+esac
