@@ -25,7 +25,7 @@ from .models import PhaseResult
 _BAR_WIDTH = 10
 _BAR_DECAY_SECONDS = 60.0
 
-_MINUTE_COLORS = ("🟩", "🟦", "🟪", "🟧", "🟥", "🟨")
+_MINUTE_COLORS = ("🟦", "🟩", "🟨", "🟧", "🟥", "🟪", "⬛")
 _MINUTES_PER_COLOR = 3
 
 
@@ -149,8 +149,9 @@ def _format_elapsed(seconds: float) -> str:
 def _minute_bar(seconds: float) -> str:
     """Colored square per elapsed minute + "(N min)" text.
 
-    Colors cycle every 3 minutes through {green, blue, purple, orange, red,
-    yellow} for visual chunking. Output: "🟩🟩🟩🟦🟦🟦 (6 min)".
+    Colors cycle every 3 minutes through {blue, green, yellow, orange, red,
+    purple, black} for visual chunking. Output: "🟦🟦🟦🟩🟩🟩 (6 min)".
+    Wraps back to blue after black (21 min).
     """
     minutes = max(0, int(seconds)) // 60
     if minutes == 0:

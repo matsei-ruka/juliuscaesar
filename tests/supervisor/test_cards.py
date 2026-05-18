@@ -95,37 +95,37 @@ def test_card_omits_signal_line_when_narration_empty():
 
 
 def test_elapsed_minute_bar_with_squares():
-    """130s → 2 min → 2 green squares + '(2 min)'."""
+    """130s → 2 min → 2 blue squares + '(2 min)'."""
     card = render_card(
         title="x",
         phase=_phase(),
         elapsed_seconds=130.0,
         language="en",
     )
-    assert "🟩🟩 (2 min)" in card.text
+    assert "🟦🟦 (2 min)" in card.text
 
 
 def test_elapsed_minute_bar_color_cycle():
-    """18 min cycles all 6 colors (3 squares each)."""
+    """21 min cycles all 7 colors (3 each): blue/green/yellow/orange/red/purple/black."""
     card = render_card(
         title="x",
         phase=_phase(),
-        elapsed_seconds=18 * 60.0,
+        elapsed_seconds=21 * 60.0,
         language="en",
     )
-    expected = "🟩🟩🟩🟦🟦🟦🟪🟪🟪🟧🟧🟧🟥🟥🟥🟨🟨🟨 (18 min)"
+    expected = "🟦🟦🟦🟩🟩🟩🟨🟨🟨🟧🟧🟧🟥🟥🟥🟪🟪🟪⬛⬛⬛ (21 min)"
     assert expected in card.text
 
 
 def test_elapsed_minute_bar_wraps_after_full_cycle():
-    """19 min → 18 colored + 1 green (cycle restarts)."""
+    """22 min → 21 colored + 1 blue (cycle restarts after black)."""
     card = render_card(
         title="x",
         phase=_phase(),
-        elapsed_seconds=19 * 60.0,
+        elapsed_seconds=22 * 60.0,
         language="en",
     )
-    assert "🟨🟩 (19 min)" in card.text
+    assert "⬛🟦 (22 min)" in card.text
 
 
 def test_title_truncated_to_60_chars():
@@ -173,10 +173,10 @@ def test_final_card_has_check_emoji():
 def test_final_card_italian():
     card = render_final_card(title="audit done", elapsed_seconds=180.0, language="it")
     assert "completato" in card.text
-    assert "🟩🟩🟩 (3 min)" in card.text
+    assert "🟦🟦🟦 (3 min)" in card.text
 
 
 def test_final_card_english():
     card = render_final_card(title="audit done", elapsed_seconds=180.0, language="en")
     assert "done" in card.text
-    assert "🟩🟩🟩 (3 min)" in card.text
+    assert "🟦🟦🟦 (3 min)" in card.text
