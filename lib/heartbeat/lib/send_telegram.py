@@ -14,9 +14,16 @@ Instance resolution (in order):
   2. Walk up from cwd for a `.jc` marker
   3. cwd if it looks like an instance (`memory/` exists)
 
-Env precedence for chat_id:
-  1. $TELEGRAM_CHAT_ID_OVERRIDE
-  2. $TELEGRAM_CHAT_ID from the instance's `.env`
+Precedence for chat_id (highest first):
+  1. --chat-id CLI flag
+  2. $TELEGRAM_CHAT_ID_OVERRIDE env var
+  3. $TELEGRAM_CHAT_ID env var
+  4. TELEGRAM_CHAT_ID in instance `.env`
+
+Precedence for bot token (highest first):
+  1. --bot-token CLI flag
+  2. $TELEGRAM_BOT_TOKEN env var
+  3. TELEGRAM_BOT_TOKEN in instance `.env`
 
 Exits non-zero on failure; stderr carries a short error note. Prints the
 resulting `message_id` to stdout on success.
@@ -24,6 +31,7 @@ resulting `message_id` to stdout on success.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -179,23 +187,49 @@ def _write_push_marker(instance: Path, *, chat_id: str, message_id: str, body: s
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="send_telegram",
+        description="Send a Telegram message from stdin for a JuliusCaesar instance.",
+        add_help=True,
+    )
+    parser.add_argument(
+        "--chat-id",
+        metavar="CHAT_ID",
+        help="Destination chat/group/channel ID (overrides env vars and .env).",
+    )
+    parser.add_argument(
+        "--bot-token",
+        metavar="TOKEN",
+        help="Bot token (overrides env vars and .env).",
+    )
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        sys.stderr.write(
+            f"send_telegram: unrecognized arguments ignored: {' '.join(unknown)}\n"
+        )
+
     instance = _resolve_instance_dir()
     env_path = instance / ".env"
     env = _load_env_file(env_path, ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN")
+    token = (
+        args.bot_token
+        or os.environ.get("TELEGRAM_BOT_TOKEN")
+        or env.get("TELEGRAM_BOT_TOKEN")
+    )
     if not token:
         sys.exit(f"send_telegram: TELEGRAM_BOT_TOKEN not set (define in {env_path})")
 
     chat_id = (
-        os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
+        args.chat_id
+        or os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
         or os.environ.get("TELEGRAM_CHAT_ID")
         or env.get("TELEGRAM_CHAT_ID")
     )
     if not chat_id:
         sys.exit(
             f"send_telegram: TELEGRAM_CHAT_ID not set "
-            f"(define in {env_path} or pass TELEGRAM_CHAT_ID_OVERRIDE)"
+            f"(define in {env_path}, pass --chat-id, or set TELEGRAM_CHAT_ID_OVERRIDE)"
         )
 
     body = sys.stdin.read()
