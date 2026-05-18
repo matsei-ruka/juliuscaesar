@@ -24,6 +24,7 @@ from .channels.telegram import TelegramChannel
 from .config import ChannelConfig, GatewayConfig, clear_env_cache, load_config
 from .delivery import deliver_response
 from .logging_setup import configure_logger
+from .brain_failure import BrainFailureStore
 from .recovery_integration import RecoveryIntegration
 from .triage import MetricsRecorder, TriageBackend, TriageCache, build_backend
 from .triage.base import TriageResult
@@ -149,6 +150,7 @@ class GatewayRuntime:
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
         self._recovery = RecoveryIntegration(self)
+        self._brain_failure = BrainFailureStore(self.instance_dir)
         self._company_reporter = self._init_company_reporter()
 
     def _init_company_reporter(self) -> Any:
@@ -674,6 +676,15 @@ class GatewayRuntime:
         spec = self.config.triage.routing.get(result.class_) or self.config.triage.fallback_brain
         if not spec:
             return None
+        brain_name = spec.partition(":")[0]
+        if self._brain_failure.is_failed(brain_name):
+            backup_spec = self.config.triage.backup.get(result.class_)
+            if backup_spec:
+                self.log(
+                    f"brain_backup: class={result.class_} primary={spec} failed"
+                    f" → backup={backup_spec}"
+                )
+                spec = backup_spec
         brain, _, model = spec.partition(":")
         if not brain:
             return None

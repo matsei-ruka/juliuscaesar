@@ -71,6 +71,7 @@ class TriageConfig:
     cache_ttl_seconds: int = 30
     sticky_idle_seconds: int = 0
     routing: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TRIAGE_ROUTING))
+    backup: dict[str, str] = field(default_factory=dict)
     ollama_model: str = "phi3:mini"
     ollama_host: str = "http://localhost:11434"
     ollama_timeout_seconds: int = 5
@@ -530,6 +531,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "inter_agent_protocol",
         "adaptive_discovery",
         "voice",
+        "triage_backup",
     }
     for key in data:
         if key not in allowed_top:
@@ -757,6 +759,10 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
     if isinstance(triage_raw, dict) and isinstance(triage_raw.get("routing"), dict):
         for key, value in triage_raw["routing"].items():
             _validate_brain_spec(errors, f"triage.routing.{key}", value)
+
+    if isinstance(data.get("triage_backup"), dict):
+        for key, value in data["triage_backup"].items():
+            _validate_brain_spec(errors, f"triage_backup.{key}", value)
 
     channels_raw = data.get("channels")
     if channels_raw is not None:
@@ -1188,6 +1194,13 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
     if unsafe_fallback is None:
         unsafe_fallback = ""
 
+    backup_raw = data.get("triage_backup") or {}
+    backup: dict[str, str] = {}
+    if isinstance(backup_raw, dict):
+        for _bk, _bv in backup_raw.items():
+            if isinstance(_bv, str) and _bv:
+                backup[str(_bk)] = _bv
+
     return TriageConfig(
         backend=str(backend or "none"),
         confidence_threshold=float(_opt("triage_confidence_threshold", 0.7)),
@@ -1216,6 +1229,7 @@ def _load_triage(data: dict[str, Any]) -> TriageConfig:
         claude_triage_screen=str(_opt("claude_triage_screen", "jc-triage")),
         claude_triage_model=str(_opt("claude_triage_model", "claude-haiku-4-5")),
         claude_triage_port=int(_opt("claude_triage_port", 9876)),
+        backup=backup,
     )
 
 

@@ -62,6 +62,20 @@ class RecoveryDispatcher:
         if classification.source == "fallback":
             # Classifier outage — fall back to legacy retry contract.
             return TransientHandler().handle(event, classification, ctx)
+
+        # Brain backup: on auth failure, if a backup is configured, mark the
+        # brain as failed and retry immediately — suppresses the operator DM.
+        if classification.kind == "session_expired":
+            backup_decision = self._try_brain_backup(failure.brain, ctx)
+            if backup_decision is not None:
+                self.runtime.log(
+                    f"brain_backup: brain={failure.brain} marked failed"
+                    f" id={event.id} — retrying with backup",
+                    event_id=event.id,
+                    kind="brain_backup",
+                )
+                return backup_decision
+
         handler = self.handlers.get(classification.kind, self.handlers["unknown"])
         try:
             return handler.handle(event, classification, ctx)
@@ -73,6 +87,25 @@ class RecoveryDispatcher:
                 kind="recovery_handler_error",
             )
             return Retry(reason=f"handler error: {exc}", delay_seconds=10.0)
+
+    def _try_brain_backup(self, brain: str, ctx: RecoveryContext) -> RecoveryDecision | None:
+        """Mark `brain` as failed and return Retry(0) iff a backup is configured."""
+        brain_failure = getattr(self.runtime, "_brain_failure", None)
+        if brain_failure is None:
+            return None
+        backup_map = ctx.config.triage.backup
+        if not backup_map:
+            return None
+        # Check that at least one triage class routes to this brain and has a backup.
+        routing = ctx.config.triage.routing
+        for class_, spec in routing.items():
+            if spec.partition(":")[0] == brain and class_ in backup_map:
+                brain_failure.mark_failed(brain)
+                return Retry(
+                    reason=f"brain_backup: primary {brain} failed, routing to backup",
+                    delay_seconds=0,
+                )
+        return None
 
     # --- pre-triage auth-token hook --------------------------------------
 
