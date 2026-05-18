@@ -57,11 +57,36 @@ _PLACEHOLDER_OPEN = "\x00"
 _PLACEHOLDER_CLOSE = "\x00"
 
 
+# Idempotent escape: treat `\<reserved>` as already-escaped (skip), escape
+# bare reserved chars, and double bare backslashes only when NOT preceding a
+# reserved char. Brains routinely pre-escape (`\_`, `\.`, `\(`) and the
+# non-idempotent variant produced `\\_` → Telegram rendered the literal
+# backslash + char.
+_ALREADY_ESCAPED_RE = re.compile(r"\\([" + re.escape(_RESERVED) + r"])")
+_BARE_BACKSLASH_RE = re.compile(r"\\(?![" + re.escape(_RESERVED) + r"])")
+
+
 def _escape_text(text: str) -> str:
-    # Escape literal backslashes first so the reserved-char pass below
-    # does not see "\" + reserved as an already-escaped sequence.
-    text = text.replace("\\", "\\\\")
-    return _RESERVED_RE.sub(r"\\\1", text)
+    # 1. Stash `\<reserved>` sequences as placeholders so they survive the
+    #    later escape pass untouched (idempotency).
+    escaped_spans: list[str] = []
+
+    def _stash_already(match: re.Match[str]) -> str:
+        escaped_spans.append(match.group(0))
+        return f"\x01{len(escaped_spans) - 1}\x01"
+
+    text = _ALREADY_ESCAPED_RE.sub(_stash_already, text)
+    # 2. Double any bare backslashes that are NOT preceding a reserved char.
+    text = _BARE_BACKSLASH_RE.sub(r"\\\\", text)
+    # 3. Escape reserved chars in the rest.
+    text = _RESERVED_RE.sub(r"\\\1", text)
+    # 4. Restore stashed already-escaped sequences.
+    restore_re = re.compile(r"\x01(\d+)\x01")
+
+    def _restore(match: re.Match[str]) -> str:
+        return escaped_spans[int(match.group(1))]
+
+    return restore_re.sub(_restore, text)
 
 
 def _escape_code_body(text: str) -> str:
