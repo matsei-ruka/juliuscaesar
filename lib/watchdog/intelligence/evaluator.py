@@ -12,7 +12,7 @@ from .models import Decision, EventSummary, Snapshot
 
 
 AUTH_RE = re.compile(
-    r"(authentication|auth failed|please run.*login|/login|session (?:has )?expired|401|unauthorized|invalid api key|refresh token)",
+    r"(authentication|auth failed|please run.*login|/login|session (?:has )?expired|\b401\b|unauthorized|invalid api key|refresh token)",
     re.IGNORECASE,
 )
 TIMEOUT_RE = re.compile(r"(adapter timeout|timeout|timed out|deadline exceeded)", re.IGNORECASE)
