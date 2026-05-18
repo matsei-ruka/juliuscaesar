@@ -414,6 +414,7 @@ def test_edit_failure_forces_resend_in_same_tick(tmp_path):
         def __init__(self):
             self.sends: list[str] = []
             self.edits: list[str] = []
+            self.deletes: list[str] = []
             self.next_mid = 5000
 
         def send(self, *, instance_dir, source, meta, card, log):
@@ -425,6 +426,10 @@ def test_edit_failure_forces_resend_in_same_tick(tmp_path):
         def edit(self, *, instance_dir, source, meta, message_id, card, log):
             self.edits.append(message_id)
             return False  # simulate message_not_found / 404
+
+        def delete(self, *, instance_dir, source, meta, message_id, log):
+            self.deletes.append(message_id)
+            return True
 
     sender = FailingEditSender()
 
@@ -438,9 +443,12 @@ def test_edit_failure_forces_resend_in_same_tick(tmp_path):
     for p in stderr_dir.glob("*"):
         p.write_text("Bash(ls)\n")
 
-    # Tick 2: edit fails → runner must clear id and send fresh
+    # Tick 2: edit fails → runner must delete stale card then send fresh
     run_tick(tmp_path, sender=sender)
     assert sender.edits == ["5000"]
+    assert sender.deletes == ["5000"], (
+        "edit returned False but runner did not delete the stale card first"
+    )
     assert sender.sends == ["5000", "5001"], (
         "edit returned False but runner did not fall back to send (Bug #8/#9)"
     )

@@ -353,11 +353,19 @@ def _render_and_send(
         )
         action = "edit"
         if not ok:
-            # Edit failed (message deleted, expired edit window, etc.). Clear
-            # the stale id and send a fresh card in the same tick so the user
-            # gets continued visibility instead of a permanently orphaned card
+            # Edit failed (message deleted, expired edit window, daemon restart
+            # state mismatch, etc.). Delete the stale card first so it doesn't
+            # linger as a duplicate alongside the fresh card we're about to send
             # (Bug #9, partner to Bug #8).
+            stale_id = ev_state.channel_message_id
             ev_state.channel_message_id = None
+            sender.delete(
+                instance_dir=instance_dir,
+                source=source,
+                meta=snap.meta,
+                message_id=stale_id,
+                log=log,
+            )
             mid = sender.send(
                 instance_dir=instance_dir,
                 source=source,
