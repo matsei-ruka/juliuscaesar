@@ -12,6 +12,8 @@ Telegram wired in Phase 2. Slack + Discord wired in Phase 4.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +25,27 @@ from .cards import Card
 
 
 LogFn = Callable[[str], None]
+
+
+def _log_delivery_failure(instance_dir: Path, record: dict) -> None:
+    """Append a structured failure entry to supervisor.jsonl.
+
+    Edit failures are silent otherwise (the runner's ``log`` is a no-op in the
+    daemon), so the actual Telegram/Slack/Discord error description is lost.
+    Writing it here surfaces the root cause without changing the sender API.
+    """
+    log_path = instance_dir / "state" / "logs" / "supervisor.jsonl"
+    record = {
+        "kind": "supervisor_delivery_failure",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **record,
+    }
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
 
 class DeliveryError(RuntimeError):
@@ -124,6 +147,10 @@ def edit_card_telegram(
     except Exception as exc:  # noqa: BLE001
         if log:
             log(f"supervisor edit_card_telegram error: {exc}")
+        _log_delivery_failure(instance_dir, {
+            "op": "edit_telegram", "chat_id": chat_id,
+            "message_id": message_id, "exc": repr(exc),
+        })
         return False
 
     if data.get("ok"):
@@ -138,14 +165,34 @@ def edit_card_telegram(
         fallback.pop("parse_mode", None)
         fallback["text"] = card.text
         try:
-            data = http_json(url, data=fallback, timeout=15)
-            return bool(data.get("ok"))
+            data2 = http_json(url, data=fallback, timeout=15)
+            if data2.get("ok"):
+                return True
+            _log_delivery_failure(instance_dir, {
+                "op": "edit_telegram_plain", "chat_id": chat_id,
+                "message_id": message_id,
+                "first_error": data.get("description"),
+                "fallback_error": data2.get("description"),
+            })
+            return False
         except Exception as exc:  # noqa: BLE001
             if log:
                 log(f"supervisor edit_card_telegram fallback error: {exc}")
+            _log_delivery_failure(instance_dir, {
+                "op": "edit_telegram_plain", "chat_id": chat_id,
+                "message_id": message_id,
+                "first_error": data.get("description"),
+                "fallback_exc": repr(exc),
+            })
             return False
     if log:
         log(f"supervisor edit_card_telegram failed: {data}")
+    _log_delivery_failure(instance_dir, {
+        "op": "edit_telegram", "chat_id": chat_id,
+        "message_id": message_id,
+        "error_code": data.get("error_code"),
+        "description": data.get("description"),
+    })
     return False
 
 
