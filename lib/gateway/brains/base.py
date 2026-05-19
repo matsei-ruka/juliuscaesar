@@ -59,6 +59,24 @@ class AdapterFailure(RuntimeError):
         self.stderr_tail = stderr_tail or ""
 
 
+class AdapterTimeout(AdapterFailure):
+    """Raised when an adapter exceeds its wall-clock timeout and is killed.
+
+    Subclasses AdapterFailure so the runtime routes it through the same
+    recovery path as a non-zero exit — otherwise a plain TimeoutError lands
+    in the generic Exception arm of process_event and the user sees nothing.
+    rc is set to -15 (SIGTERM convention) and a synthetic stderr_tail is
+    provided so the classifier matches its existing 'timeout' regex and
+    classifies the failure as transient.
+    """
+
+    def __init__(self, brain: str, timeout_seconds: int, stderr_tail: str = ""):
+        synthetic = f"adapter timeout after {timeout_seconds}s — subprocess killed"
+        tail = (stderr_tail + "\n" + synthetic).strip() if stderr_tail else synthetic
+        super().__init__(brain, -15, tail)
+        self.timeout_seconds = timeout_seconds
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -406,7 +424,7 @@ Your reply is only the text the user reads.
                     except subprocess.TimeoutExpired:
                         killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
-                    raise TimeoutError(f"adapter timeout after {timeout}s")
+                    raise AdapterTimeout(self.name, timeout, _read_tail(stderr_path))
                 duration = time.monotonic() - wall_start
                 log(
                     f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "

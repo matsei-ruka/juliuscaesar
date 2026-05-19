@@ -184,6 +184,22 @@ def _decode_meta(event: "Event") -> dict:
 
 
 def _format_failure_message(failure: "AdapterFailure", reason: str) -> str:
+    # Timeout is the most operationally common terminal failure — give it a
+    # plain-language header so the user understands "the model took too long"
+    # rather than seeing "Exit code: -15" with no context.
+    from .brains import AdapterTimeout
+
+    if isinstance(failure, AdapterTimeout):
+        lines = [
+            f"Adapter exceeded {failure.timeout_seconds}s timeout — subprocess killed.",
+            "",
+            f"Brain: {failure.brain}",
+            f"Reason: {reason}",
+            "",
+            "Send the message again to retry, or shorten the request.",
+        ]
+        return "\n".join(lines)
+
     lines = [
         "Gateway adapter failed before it could reply.",
         "",
