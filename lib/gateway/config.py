@@ -532,6 +532,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "adaptive_discovery",
         "voice",
         "triage_backup",
+        "supervisor",
     }
     for key in data:
         if key not in allowed_top:
