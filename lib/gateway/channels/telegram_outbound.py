@@ -176,7 +176,9 @@ def send_voice(
         fields.append(("reply_to_message_id", str(meta["message_id"])))
         fields.append(("allow_sending_without_reply", "true"))
     if caption:
-        fields.append(("caption", caption[:1024]))
+        escaped_caption = to_markdown_v2(caption)[:1024]
+        fields.append(("caption", escaped_caption))
+        fields.append(("parse_mode", "MarkdownV2"))
     files: list[tuple[str, str, bytes, str]] = [
         ("voice", path.name, path.read_bytes(), "audio/ogg"),
     ]
