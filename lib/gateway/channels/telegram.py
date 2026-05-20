@@ -1243,7 +1243,7 @@ class TelegramChannel:
         ogg_path = meta.get("synthesized_audio_path")
         if ogg_path:
             try:
-                return self.send_voice(str(ogg_path), meta)
+                return self.send_voice(str(ogg_path), meta, caption=response)
             except Exception as exc:  # noqa: BLE001
                 self.log(f"telegram sendVoice failed, falling back to text: {exc}")
         return send_text(
@@ -1254,7 +1254,7 @@ class TelegramChannel:
             log=self.log,
         )
 
-    def send_voice(self, ogg_path: str, meta: dict[str, Any]) -> str | None:
+    def send_voice(self, ogg_path: str, meta: dict[str, Any], caption: str = "") -> str | None:
         """Upload an OGG/Opus file and post it as a Telegram voice message."""
         if not self.ready():
             return None
@@ -1263,4 +1263,5 @@ class TelegramChannel:
             token=self.token,
             ogg_path=ogg_path,
             meta=meta,
+            caption=caption,
         )

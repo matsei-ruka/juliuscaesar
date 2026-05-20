@@ -67,9 +67,10 @@ PRE_SHIPPED: tuple[SkillSpec, ...] = (
         name="browser-use",
         display="Browser Use",
         path="browser-use/SKILL.md",
-        required_env=("BROWSER_USE_API_KEY",),
+        required_env=(),
+        optional_env=("BROWSER_USE_API_KEY",),
         test_kind="browser-use",
-        description="Interactive browser automation.",
+        description="Interactive browser automation (local Chromium + browser-use Python lib; optional cloud API key for the managed service).",
     ),
     SkillSpec(
         name="deep-research",
@@ -415,16 +416,42 @@ def test_firecrawl(env: dict[str, str], timeout: int) -> tuple[bool, str]:
 
 
 def test_browser_use(env: dict[str, str], timeout: int) -> tuple[bool, str]:
-    key = env["BROWSER_USE_API_KEY"]
-    ok, msg, payload = http_json(
-        "https://api.browser-use.com/api/v2/billing/account",
-        headers={"X-Browser-Use-API-Key": key},
-        timeout=timeout,
-        secret=key,
+    """Health-check Browser Use.
+
+    Two modes:
+    - Cloud: if BROWSER_USE_API_KEY is set, hit the managed-API billing endpoint.
+    - Local: otherwise verify the local install — browser-use Python lib
+      importable and a Chromium-family binary on PATH.
+    """
+    key = env.get("BROWSER_USE_API_KEY", "").strip()
+    if key:
+        ok, msg, payload = http_json(
+            "https://api.browser-use.com/api/v2/billing/account",
+            headers={"X-Browser-Use-API-Key": key},
+            timeout=timeout,
+            secret=key,
+        )
+        if ok and isinstance(payload, dict):
+            return True, "Browser Use cloud billing endpoint reachable"
+        return False, msg
+
+    # Local-install check. The skill is invoked as a subprocess via a wrapper
+    # script (operator-provided, lives at skills/browser-use/run.py and points
+    # at its own venv). We verify the host has a Chromium-family binary; the
+    # SKILL.md presence is already checked by status_rows().
+    import shutil as _shutil
+
+    chromium_bins = ("chromium", "chromium-browser", "google-chrome", "chrome")
+    chrome_path = next(
+        (p for name in chromium_bins for p in [_shutil.which(name)] if p),
+        None,
     )
-    if ok and isinstance(payload, dict):
-        return True, "Browser Use billing endpoint reachable"
-    return False, msg
+    if not chrome_path:
+        return False, (
+            "Browser Use local mode: no Chromium-family binary on PATH "
+            f"(checked: {', '.join(chromium_bins)}). Install chromium or set BROWSER_USE_API_KEY."
+        )
+    return True, f"Browser Use local mode OK (chromium={chrome_path})"
 
 
 def test_deep_research(env: dict[str, str], timeout: int) -> tuple[bool, str]:

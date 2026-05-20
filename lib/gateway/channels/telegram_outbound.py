@@ -152,6 +152,7 @@ def send_voice(
     token: str,
     ogg_path: str,
     meta: dict[str, Any],
+    caption: str = "",
 ) -> str | None:
     """Upload an OGG/Opus file and post it as a Telegram voice message."""
     if not token:
@@ -174,6 +175,8 @@ def send_voice(
     if meta.get("message_id"):
         fields.append(("reply_to_message_id", str(meta["message_id"])))
         fields.append(("allow_sending_without_reply", "true"))
+    if caption:
+        fields.append(("caption", caption[:1024]))
     files: list[tuple[str, str, bytes, str]] = [
         ("voice", path.name, path.read_bytes(), "audio/ogg"),
     ]
