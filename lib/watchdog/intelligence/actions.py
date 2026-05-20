@@ -41,18 +41,18 @@ def notify_brain_issue(
     decision: Decision,
     log: LogFn,
 ) -> bool:
-    preview = _preview_request(summary.event.content)
-    if preview:
-        body = (
-            f"I could not get a clean answer for {preview} because the current "
-            "brain hit a runtime/auth issue. I notified the operator."
-        )
+    if not getattr(gateway_config, "intelligence_user_notice_enabled", True):
+        delivered = False
     else:
-        body = (
-            "The current brain hit a runtime/auth issue before it could answer. "
-            "I notified the operator."
-        )
-    delivered = _deliver(instance_dir, gateway_config, summary, body, log=log)
+        preview = _preview_request(summary.event.content)
+        if preview:
+            body = (
+                f"I'm having trouble answering {preview} right now. "
+                "Looking into it."
+            )
+        else:
+            body = "I'm having trouble with this one. Looking into it."
+        delivered = _deliver(instance_dir, gateway_config, summary, body, log=log)
     if decision.kind == "auth_expired":
         _notify_operator_auth(instance_dir, gateway_config, summary, log=log)
     return delivered
@@ -139,15 +139,20 @@ def _operator_chat(instance_dir: Path, summary: EventSummary) -> str:
 
 
 def _operator_auth_message(summary: EventSummary) -> str:
-    brain = summary.brain
-    if brain in ("codex", "codex_api"):
-        return (
-            "Codex authentication appears expired for a pending gateway request. "
-            "Run `jc codex-auth refresh` on the instance host."
-        )
+    brain = summary.brain or "agent"
+    commands = {
+        "claude": "`claude /login`",
+        "codex": "`jc codex-auth refresh`",
+        "codex_api": "`jc codex-auth refresh`",
+        "pi": "verify DEEPSEEK_API_KEY / OPENROUTER_API_KEY in the instance `.env`",
+        "openrouter": "verify OPENROUTER_API_KEY in the instance `.env`",
+        "ollama": "verify the local ollama daemon is reachable",
+    }
+    primary = brain.split(":", 1)[0]
+    action = commands.get(primary, "check the brain adapter credentials in the instance `.env`")
     return (
-        "Claude authentication appears expired for a pending gateway request. "
-        "Run `claude /login` on the instance host."
+        f"Agent backend ({primary}) auth/runtime issue on a pending request. "
+        f"Operator action: {action}."
     )
 
 
