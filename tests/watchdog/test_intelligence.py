@@ -166,7 +166,8 @@ def test_running_auth_issue_notifies_without_replaying_event(tmp_path: Path, mon
         "brain_issue_notice",
     ]
     assert len(delivered) == 2
-    assert any("I notified the operator" in message for message in delivered)
+    assert any("having trouble" in message for message in delivered)
+    assert any("Operator action" in message for message in delivered)
     assert not any("retrying it with" in message for message in delivered)
     conn = queue.connect(inst)
     updated = queue.get(conn, event.id)
@@ -212,6 +213,60 @@ def test_queued_retry_with_error_is_left_to_gateway_retry(
     meta = json.loads(unchanged.meta or "{}")
     assert meta["brain_override"] == "claude"
     assert "watchdog_switch" not in meta
+
+
+def test_pi_help_text_does_not_trigger_false_auth_expired(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression: pi adapter help text 'Use /login to log into a provider'
+    must not be classified as auth_expired for an unrelated running event."""
+    inst = _instance(tmp_path)
+    conn = queue.connect(inst)
+    event, _ = queue.enqueue(
+        conn,
+        source="telegram",
+        content="answer this please",
+        user_id="123",
+        conversation_id="123",
+        meta={"chat_id": "123", "chat_type": "private", "brain_override": "claude"},
+    )
+    conn.execute(
+        "UPDATE events SET status='running', started_at=?, locked_until=? WHERE id=?",
+        (_old_ts(240), _old_ts(60), event.id),
+    )
+    conn.commit()
+    conn.close()
+    log_dir = inst / "state" / "gateway"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # Simulate pi adapter help text in gateway log (no event_id) and a normal
+    # dispatch line for our event (no auth markers).
+    (log_dir / "gateway.log").write_text(
+        "Use /login to log into a provider via OAuth or API key. See:\n"
+        + json.dumps(
+            {
+                "event_id": event.id,
+                "brain": "claude",
+                "msg": f"dispatch begin id={event.id} brain=claude model=opus resume=yes",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        "watchdog.intelligence.actions.deliver_response",
+        lambda **kwargs: delivered.append(kwargs["response"]) or "msg-1",
+    )
+
+    result = run_tick(inst)
+
+    # Must NOT cooldown the brain or notify auth issue — adapter output is
+    # generic help text, not a real auth failure.
+    assert "brain_cooldown" not in [a["action"] for a in result.actions]
+    assert "brain_issue_notice" not in [a["action"] for a in result.actions]
+    assert delivered == []
 
 
 def test_brain_cooldown_expires(tmp_path: Path) -> None:

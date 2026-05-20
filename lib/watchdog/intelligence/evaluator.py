@@ -12,7 +12,13 @@ from .models import Decision, EventSummary, Snapshot
 
 
 AUTH_RE = re.compile(
-    r"(authentication|auth failed|please run.*login|/login|session (?:has )?expired|\b401\b|unauthorized|invalid api key|refresh token)",
+    r"(?:authentication|auth|api[\s-]?keys?|credentials?|tokens?)\s+(?:failed|expired|invalid|missing|error|required|rejected|denied)"
+    r"|please\s+(?:re-?)?(?:log\s*in|sign\s*in|run\s+\S*\s*/login)"
+    r"|\b(?:401|403)\s+(?:unauthorized|forbidden)"
+    r"|no\s+api\s+key\s+(?:found|set|configured)"
+    r"|refresh\s+token\s+(?:expired|invalid|missing)"
+    r"|oauth\s+(?:failed|expired|invalid)"
+    r"|session\s+(?:has\s+)?expired",
     re.IGNORECASE,
 )
 TIMEOUT_RE = re.compile(r"(adapter timeout|timeout|timed out|deadline exceeded)", re.IGNORECASE)
@@ -38,7 +44,7 @@ class Evaluator:
                 *[
                     entry.msg or entry.raw
                     for entry in snapshot.logs
-                    if entry.event_id in (None, summary.event.id)
+                    if entry.event_id == summary.event.id
                 ],
             ]
         )
