@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
+import string
 import threading
 import time
 import urllib.error
@@ -107,6 +109,86 @@ def _elapsed_seconds(event: queue.Event, monotonic_start: float | None) -> float
     if monotonic_start is not None:
         return max(0.0, time.monotonic() - monotonic_start)
     return _seconds_since(event.received_at)
+
+
+_STOPWORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "is", "in", "on", "at", "to", "for", "of", "and", "or", "but",
+    "it", "its", "this", "that", "i", "you", "we", "they", "he", "she", "what", "how",
+    "do", "did", "can", "could", "will", "would", "please", "ok", "yes", "no", "not",
+    "about", "with", "from", "by", "as", "be", "are", "was", "were", "have", "has",
+    "had", "so", "then", "when", "where", "which", "who", "also", "just", "still",
+    "now", "there", "here", "up", "down", "out", "get", "set", "all", "any", "one",
+    "more", "my", "your", "our", "their", "me", "him", "her", "us", "them", "let",
+    "cosa", "che", "di", "il", "la", "lo", "le", "gli", "un", "una", "come", "hai",
+    "ho", "ha", "sei", "si", "sono", "era", "non", "per", "con", "su", "da",
+})
+
+_JACCARD_LOW = 0.05
+_JACCARD_HIGH = 0.35
+
+# Common imperative verbs / sentence starters that look like proper nouns when
+# title-cased. Used to filter entity extraction so "Check Florian" → {"Florian"}.
+_COMMON_VERBS: frozenset[str] = frozenset({
+    "check", "restart", "run", "stop", "start", "verify", "fix", "reset",
+    "test", "send", "show", "look", "tell", "help", "try", "use", "create",
+    "open", "close", "add", "remove", "delete", "move", "copy", "read",
+    "write", "update", "make", "give", "take", "status", "ping", "build",
+    "deploy", "kill", "spawn", "list", "find", "post", "ship", "review",
+    "controlla", "riavvia", "verifica", "ferma", "avvia", "mostra", "fai",
+})
+
+_TOKEN_RE = re.compile(r"[^\s" + re.escape(string.punctuation) + r"]+")
+_ENTITY_TITLE_RE = re.compile(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b")
+_ENTITY_ALLCAPS_RE = re.compile(r"\b[A-Z]{2,}\b")
+_ENTITY_VMIP_RE = re.compile(r"\b(?:[Vv][Mm]\d+|\d{1,3}(?:\.\d{1,3}){1,3})\b")
+
+
+def _tokenize(text: str) -> frozenset[str]:
+    """Lowercase content-word token set: strips punctuation, stopwords, numbers."""
+    if not text:
+        return frozenset()
+    lowered = text.lower()
+    raw = _TOKEN_RE.findall(lowered)
+    cleaned: set[str] = set()
+    for tok in raw:
+        tok = tok.strip(string.punctuation)
+        if not tok or tok in _STOPWORDS:
+            continue
+        if tok.isdigit():
+            continue
+        cleaned.add(tok)
+    return frozenset(cleaned)
+
+
+def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    """Jaccard similarity |A∩B|/|A∪B|. Returns 0.0 for empty sets."""
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    if union == 0:
+        return 0.0
+    return inter / union
+
+
+def _extract_entities(text: str) -> frozenset[str]:
+    """Title-cased tokens, ALL-CAPS (>=2 chars), and VM/IP patterns.
+
+    Common imperative verbs and stopwords are filtered out of the title-case
+    pass so sentence-initial words like "Check" or "Restart" don't pollute
+    entity sets.
+    """
+    if not text:
+        return frozenset()
+    out: set[str] = set()
+    for tok in _ENTITY_TITLE_RE.findall(text):
+        low = tok.lower()
+        if low in _STOPWORDS or low in _COMMON_VERBS:
+            continue
+        out.add(tok)
+    out.update(_ENTITY_ALLCAPS_RE.findall(text))
+    out.update(_ENTITY_VMIP_RE.findall(text))
+    return frozenset(out)
 
 
 def _parse_slot_verdict(text: str) -> int | None:
@@ -979,6 +1061,74 @@ class GatewayRuntime:
             return ""
         return "[recent conversation context]\n" + body
 
+    def _prefilter_slot_affinity(
+        self,
+        message: str,
+        slot_summaries: dict[int, str],
+    ) -> tuple[str, int | None]:
+        """Deterministic pre-filter before the LLM classifier.
+
+        Returns:
+          ("unrelated", None)  — skip LLM, route as unrelated (new slot)
+          ("related", slot_id) — currently unused; reserved for strong signal
+          ("ambiguous", None)  — fall through to LLM
+
+        See docs/specs/parallel-slots-smart-classifier.md.
+        """
+        if not slot_summaries:
+            return ("ambiguous", None)
+
+        msg_tokens = _tokenize(message)
+        slot_tokens: dict[int, frozenset[str]] = {
+            s: _tokenize(summary or "") for s, summary in slot_summaries.items()
+        }
+
+        if len(msg_tokens) < 2:
+            # Short messages are noisy under Jaccard. Use token-or-entity
+            # overlap against any slot; no overlap anywhere → unrelated.
+            msg_entities = _extract_entities(message)
+            signals: set[str] = set(msg_tokens) | {e.lower() for e in msg_entities}
+            if not signals:
+                return ("ambiguous", None)
+            for slot_id, toks in slot_tokens.items():
+                summary_lower = (slot_summaries.get(slot_id) or "").lower()
+                for sig in signals:
+                    if sig in toks or sig in summary_lower:
+                        return ("ambiguous", None)
+            return ("unrelated", None)
+
+        max_j = 0.0
+        for toks in slot_tokens.values():
+            j = _jaccard(msg_tokens, toks)
+            if j > max_j:
+                max_j = j
+
+        if max_j < _JACCARD_LOW:
+            return ("unrelated", None)
+        if max_j >= _JACCARD_HIGH:
+            return ("ambiguous", None)
+
+        # Mid-range Jaccard — entity check decides.
+        msg_entities = _extract_entities(message)
+        if not msg_entities:
+            return ("ambiguous", None)
+        all_slot_signals: set[str] = set()
+        for summary in slot_summaries.values():
+            text = summary or ""
+            all_slot_signals.update(_extract_entities(text))
+            all_slot_signals.update(_tokenize(text))
+            all_slot_signals.add(text.lower())
+        for ent in msg_entities:
+            ent_lower = ent.lower()
+            in_any = False
+            for sig in all_slot_signals:
+                if ent == sig or ent_lower == sig or ent_lower in sig:
+                    in_any = True
+                    break
+            if not in_any:
+                return ("unrelated", None)
+        return ("ambiguous", None)
+
     def _classify_slot_affinity(
         self,
         event: queue.Event,
@@ -991,6 +1141,16 @@ class GatewayRuntime:
         (fall through to LRU free slot). Results are memoized for the
         configured TTL to dedupe repeat lookups.
         """
+        verdict, _ = self._prefilter_slot_affinity(event.content, slot_summaries)
+        if verdict == "unrelated":
+            self.log(
+                f"slot prefilter id={event.id} verdict=unrelated — skipping LLM",
+                kind="slot_prefilter",
+            )
+            return None
+        # "ambiguous" → continue to LLM. "related" path reserved for future
+        # strong-signal short-circuit; today only "unrelated" fast-paths.
+
         cfg = self.config.parallel.classifier
         if cfg.backend != "openrouter":
             return None
