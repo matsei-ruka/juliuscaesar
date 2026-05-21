@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..config import env_value
 from ..queue import Event
-from .base import Brain
+from .base import Brain, parse_iso
 
 # pi session filename format: <ISO-timestamp>_<uuid>.jsonl
 # e.g. 2026-05-14T13-28-21-813Z_019e26ac-8834-7582-93d5-e2aec599fe45.jsonl
@@ -46,20 +46,6 @@ def _pi_session_dir(cwd: str) -> Path:
     slug = "--" + real.lstrip("/").replace("/", "-") + "--"
     return Path.home() / ".pi" / "agent" / "sessions" / slug
 
-
-def _snapshot_session_paths(root: Path) -> frozenset[str]:
-    """Snapshot all session JSONL paths under root.
-
-    Matches CodexBrain._snapshot_session_paths pattern. Used by
-    pre_invoke_snapshot/capture_session_id for safe set-difference
-    session identification.
-    """
-    if not root.is_dir():
-        return frozenset()
-    try:
-        return frozenset(str(p) for p in root.rglob("*.jsonl"))
-    except OSError:
-        return frozenset()
 
 
 class PiBrain(Brain):
@@ -204,42 +190,39 @@ class PiBrain(Brain):
     # chats) is sufficient.
 
     # ------------------------------------------------------------------
-    # Session capture (matches CodexBrain pre/post snapshot pattern)
+    # Session capture (mtime-based, mirrors ClaudeBrain pattern)
     # ------------------------------------------------------------------
 
-    def pre_invoke_snapshot(self) -> frozenset[str]:
-        """Snapshot session JSONL paths before pi -p spawns.
-
-        Brain.invoke() stores the return value on self._pre_state before
-        spawning the adapter, making it available to capture_session_id
-        for safe set-difference identification.
-        """
-        return _snapshot_session_paths(
-            _pi_session_dir(str(self.instance_dir))
-        )
-
     def capture_session_id(self, started_at: str) -> str | None:
-        """Return the session UUID created by this invocation, or None.
+        """Return UUID of the session pi wrote or appended during this invoke.
 
-        Diffs pre/post snapshots of the pi session directory. Returns the
-        UUID from the new filename stem. Returns None when:
+        Uses mtime to find the newest *.jsonl in the pi session dir with
+        mtime >= started_at. This handles both cases:
+        - New session: pi creates a fresh JSONL → appears with mtime >= t0.
+        - Resumed session: pi appends to existing JSONL → mtime bumps >= t0.
 
-        - No new session file was created (adapter failed, or pi chose
-          not to write one).
-        - More than one new file appeared (concurrent pi activity created
-          ambiguous state — safer to let the next turn fall back to
-          transcript priming).
-        - The new filename doesn't match the <ts>_<uuid>.jsonl pattern.
+        Previous set-diff approach (snapshot before/after) failed on resume
+        because no new file is created — diff was empty → returned None →
+        footer showed empty session id even though DB had the correct UUID.
         """
-        before = getattr(self, "_pre_state", None)
-        if not isinstance(before, frozenset):
-            before = frozenset()
-        after = _snapshot_session_paths(
-            _pi_session_dir(str(self.instance_dir))
-        )
-        new_paths = after - before
-        if not new_paths or len(new_paths) > 1:
+        t0 = parse_iso(started_at)
+        if t0 is None:
             return None
-        stem = Path(next(iter(new_paths))).stem
-        match = _PI_SESSION_UUID_RE.search(stem)
+        session_dir = _pi_session_dir(str(self.instance_dir))
+        if not session_dir.is_dir():
+            return None
+        t0_epoch = t0.timestamp()
+        newest: Path | None = None
+        newest_mtime = 0.0
+        for p in session_dir.glob("*.jsonl"):
+            try:
+                mt = p.stat().st_mtime
+            except OSError:
+                continue
+            if mt >= t0_epoch and mt > newest_mtime:
+                newest_mtime = mt
+                newest = p
+        if newest is None:
+            return None
+        match = _PI_SESSION_UUID_RE.search(newest.stem)
         return match.group(0) if match else None
