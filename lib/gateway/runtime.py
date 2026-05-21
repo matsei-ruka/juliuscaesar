@@ -7,6 +7,8 @@ import json
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +23,7 @@ from .brain_output import (
 from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
-from .config import ChannelConfig, GatewayConfig, clear_env_cache, load_config
+from .config import ChannelConfig, GatewayConfig, clear_env_cache, env_value, load_config
 from .delivery import deliver_response
 from .logging_setup import configure_logger
 from .brain_failure import BrainFailureStore
@@ -107,6 +109,25 @@ def _elapsed_seconds(event: queue.Event, monotonic_start: float | None) -> float
     return _seconds_since(event.received_at)
 
 
+def _parse_slot_verdict(text: str) -> int | None:
+    """Decode the classifier reply (`related:<N>` or `unrelated`).
+
+    Tolerant of surrounding whitespace, code-fence backticks, and quoted
+    output. Returns None for `unrelated`, an unparseable verdict, or a
+    non-integer slot id.
+    """
+    raw = (text or "").strip().strip("`'\"").lower()
+    if not raw or raw.startswith("unrelated"):
+        return None
+    if raw.startswith("related:"):
+        tail = raw.split(":", 1)[1].strip().strip("`'\"")
+        try:
+            return int(tail)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 class GatewayRuntime:
     HEARTBEAT_INTERVAL_SECONDS = 5.0
     TRIAGE_REJECTION_MESSAGE = (
@@ -152,6 +173,17 @@ class GatewayRuntime:
         self._recovery = RecoveryIntegration(self)
         self._brain_failure = BrainFailureStore(self.instance_dir)
         self._company_reporter = self._init_company_reporter()
+        # Parallel-slot bookkeeping. `_busy_slots` maps (channel, conv_id) → set
+        # of slot ids currently running a brain invocation. Only used when
+        # `config.parallel.max_concurrent > 1`; the N=1 dispatch path never
+        # touches it so behavior stays byte-identical with the serial gateway.
+        self._slot_busy_lock = threading.Lock()
+        self._busy_slots: dict[tuple[str, str], set[int]] = {}
+        self._slot_active_threads: set[threading.Thread] = set()
+        # Memoize classifier verdicts per (event content, slot summary tuple)
+        # so the same message doesn't pay the openrouter call twice. TTL is
+        # config-driven (`parallel.classifier.cache_ttl_seconds`).
+        self._slot_classifier_cache: dict[tuple[str, str], tuple[float, str]] = {}
 
     def _init_company_reporter(self) -> Any:
         """Build a company.Reporter iff company integration is configured.
@@ -364,9 +396,20 @@ class GatewayRuntime:
                 handler.close()
 
     def dispatch_once(self) -> bool:
+        max_concurrent = self.config.parallel.max_concurrent
         conn = queue.connect(self.instance_dir)
         try:
-            if self.config.reliability.coalesce_same_conversation:
+            if max_concurrent > 1:
+                # Parallel slot dispatch claims one event at a time; coalescing
+                # is suppressed because messages on different slots run in
+                # parallel and shouldn't get bundled.
+                single = queue.claim_next(
+                    conn,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.config.lease_seconds,
+                )
+                events_batch = [single] if single is not None else []
+            elif self.config.reliability.coalesce_same_conversation:
                 events_batch = queue.claim_batch_same_conversation(
                     conn,
                     worker_id=self.worker_id,
@@ -420,6 +463,12 @@ class GatewayRuntime:
             if len(batch_ids) > 1:
                 self.log(f"coalesce: marked {len(batch_ids)} events done ids={batch_ids}")
             self.log(f"event auth-token consumed id={event.id}")
+            return True
+        # Parallel mode: hand the (already-claimed) event off to a slot worker.
+        # The worker thread owns the row's complete/fail transition; we return
+        # immediately so the dispatch loop can claim the next event.
+        if max_concurrent > 1 and len(events_batch) == 1:
+            self._dispatch_parallel(event)
             return True
         try:
             response = self.process_event(event)
@@ -707,7 +756,14 @@ class GatewayRuntime:
         brain, _, model = sticky.brain.partition(":")
         return router.StickyHint(brain=brain or sticky.brain, model=model or None)
 
-    def _resume_id(self, channel: str, conversation_id: str | None, brain: str) -> str | None:
+    def _resume_id(
+        self,
+        channel: str,
+        conversation_id: str | None,
+        brain: str,
+        *,
+        slot: int = 0,
+    ) -> str | None:
         if not conversation_id:
             return None
         conn = queue.connect(self.instance_dir)
@@ -717,6 +773,7 @@ class GatewayRuntime:
                 channel=channel,
                 conversation_id=conversation_id,
                 brain=brain,
+                slot=slot,
             )
         finally:
             conn.close()
@@ -728,6 +785,8 @@ class GatewayRuntime:
         conversation_id: str | None,
         brain: str,
         session_id: str,
+        *,
+        slot: int = 0,
     ) -> None:
         if not conversation_id:
             return
@@ -739,11 +798,364 @@ class GatewayRuntime:
                 conversation_id=conversation_id,
                 brain=brain,
                 session_id=session_id,
+                slot=slot,
             )
         finally:
             conn.close()
 
-    def process_event(self, event: queue.Event) -> str:
+    # --- parallel slots --------------------------------------------------
+
+    def _pick_slot(self, event: queue.Event) -> tuple[int, bool]:
+        """Return `(slot, should_queue)` for `event` under parallel dispatch.
+
+        - For `max_concurrent <= 1` always returns `(0, False)` — serial path.
+        - Otherwise asks the relatedness classifier (best-effort) and follows
+          the spec rules (docs/specs/parallel-slots.md §Dispatch logic):
+            related→busy  → enqueue behind that slot
+            related→free  → resume that slot
+            unrelated+free → pick LRU free slot (tie-break: lowest id)
+            all busy      → queue on slot 0 (main lane)
+        """
+        max_concurrent = self.config.parallel.max_concurrent
+        if max_concurrent <= 1:
+            return 0, False
+        channel = router.channel_name(event)
+        conv = event.conversation_id or ""
+        if not conv:
+            # No conversation_id → no slot affinity to compute. Run on slot 0.
+            return 0, False
+        with self._slot_busy_lock:
+            busy = set(self._busy_slots.get((channel, conv), set()))
+        free = [i for i in range(max_concurrent) if i not in busy]
+
+        # Classifier hint (None = unrelated / no opinion).
+        related: int | None = None
+        try:
+            summaries = self._slot_summaries(channel, conv, max_concurrent)
+            if summaries:
+                related = self._classify_slot_affinity(event, summaries)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"slot classifier error id={event.id}: {exc}", kind="slot_classifier_error")
+            related = None
+
+        if related is not None and 0 <= related < max_concurrent:
+            if related in busy:
+                self.log(
+                    f"slot pick id={event.id} related={related} busy=yes → queue",
+                    kind="slot_pick",
+                )
+                return related, True
+            self.log(
+                f"slot pick id={event.id} related={related} busy=no → resume",
+                kind="slot_pick",
+            )
+            return related, False
+
+        if free:
+            picked = self._lru_free_slot(channel, conv, free)
+            self.log(
+                f"slot pick id={event.id} unrelated → lru-free={picked}",
+                kind="slot_pick",
+            )
+            return picked, False
+
+        self.log(
+            f"slot pick id={event.id} all-busy → queue slot 0",
+            kind="slot_pick",
+        )
+        return 0, True
+
+    def _lru_free_slot(self, channel: str, conv: str, free: list[int]) -> int:
+        """Pick the free slot with the oldest `sessions.updated_at`.
+
+        Tie-break: lowest slot id. Falls back to lowest free id when no slot
+        row exists yet (cold conversation). Mirrors spec rule
+        "unrelated + free → LRU".
+        """
+        conn = queue.connect(self.instance_dir)
+        try:
+            brain = self.config.default_brain
+            rows = sessions.list_sessions_for_conversation(
+                conn,
+                channel=channel,
+                conversation_id=conv,
+                brain=brain,
+            )
+        finally:
+            conn.close()
+        updated_by_slot = {r.slot: r.updated_at for r in rows}
+        # Slot with no row counts as oldest (never used); pick that first.
+        candidates = sorted(
+            free,
+            key=lambda s: (updated_by_slot.get(s, ""), s),
+        )
+        return candidates[0]
+
+    def _slot_summaries(
+        self,
+        channel: str,
+        conv: str,
+        max_concurrent: int,
+    ) -> dict[int, str]:
+        """Recent activity summary per slot (last ~3 user turns), for classifier.
+
+        Reads the per-conversation transcript JSONL once and walks it from the
+        tail, attaching user turns to slot ids in `sessions` order. Returns an
+        empty mapping when the transcript file does not yet exist.
+        """
+        path = transcripts.transcript_path(self.instance_dir, conv)
+        if not path.exists():
+            return {}
+        # Per spec, slots only exist on brains we've actually invoked. Pull
+        # the slot map from `sessions` rows for context.
+        conn = queue.connect(self.instance_dir)
+        try:
+            brain = self.config.default_brain
+            rows = sessions.list_sessions_for_conversation(
+                conn, channel=channel, conversation_id=conv, brain=brain
+            )
+        finally:
+            conn.close()
+        # Without slot rows we have no per-slot history; the classifier
+        # bypasses cleanly (returns None) on an empty input.
+        active_slots = sorted({r.slot for r in rows} | {0})
+        active_slots = [s for s in active_slots if s < max_concurrent]
+        if not active_slots:
+            return {}
+        # Approximation: slots share the transcript file. We use the last 3
+        # user turns as a global summary, attributed to all known slots, so
+        # the classifier can decide which is closest in topic. Per-slot
+        # attribution would require slot stamps on each transcript line —
+        # left as a follow-up (see spec Open Questions).
+        events = transcripts.tail(path, lines=12)
+        recent_user_turns = [ev.text for ev in events if ev.role == "user"][-3:]
+        if not recent_user_turns:
+            return {}
+        joined = "\n- ".join(recent_user_turns)
+        joined = "- " + joined
+        return {s: joined for s in active_slots}
+
+    def _build_global_transcript_context(self, event: queue.Event) -> str:
+        """Render the last N transcript lines as a context block for parallel mode.
+
+        Output is plain text (no markdown headers) so brains can splice it
+        in front of the user input without breaking their own preamble.
+        Returns "" when there's no transcript or the lines count is <= 0.
+        """
+        n = self.config.parallel.transcript_context_lines
+        if n <= 0 or not event.conversation_id:
+            return ""
+        path = transcripts.transcript_path(self.instance_dir, event.conversation_id)
+        if not path.exists():
+            return ""
+        # Drop the trailing user turn that the gateway just appended — it's
+        # already present in event.content, no point sending it twice.
+        events = transcripts.tail(path, lines=n + 1)
+        if events and events[-1].role == "user" and events[-1].text == event.content:
+            events = events[:-1]
+        body = transcripts.render_priming_block(events)
+        if not body:
+            return ""
+        return "[recent conversation context]\n" + body
+
+    def _classify_slot_affinity(
+        self,
+        event: queue.Event,
+        slot_summaries: dict[int, str],
+    ) -> int | None:
+        """Ask openrouter whether `event` is related to a known slot.
+
+        Returns the slot id when the model emits `related:<N>`, None
+        otherwise. Best-effort: any HTTP / parsing error returns None
+        (fall through to LRU free slot). Results are memoized for the
+        configured TTL to dedupe repeat lookups.
+        """
+        cfg = self.config.parallel.classifier
+        if cfg.backend != "openrouter":
+            return None
+        api_key = env_value(self.instance_dir, "OPENROUTER_API_KEY")
+        if not api_key:
+            return None
+        slots_repr = "|".join(
+            f"{s}:{(slot_summaries.get(s) or '').strip()[:200]}"
+            for s in sorted(slot_summaries)
+        )
+        cache_key = (event.content[:400], slots_repr)
+        now = time.time()
+        cached = self._slot_classifier_cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return _parse_slot_verdict(cached[1])
+        prompt = self._slot_affinity_prompt(event.content, slot_summaries)
+        body = {
+            "model": cfg.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 16,
+        }
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/matsei-ruka/juliuscaesar",
+                "X-Title": "JuliusCaesar Gateway parallel-slots",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            self.log(f"slot classifier unreachable: {exc}", kind="slot_classifier_error")
+            return None
+        try:
+            payload = json.loads(raw)
+            text = (
+                payload.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content")
+                or ""
+            ).strip().lower()
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            self.log(f"slot classifier bad payload: {exc}", kind="slot_classifier_error")
+            return None
+        expires_at = now + max(1, cfg.cache_ttl_seconds)
+        self._slot_classifier_cache[cache_key] = (expires_at, text)
+        return _parse_slot_verdict(text)
+
+    @staticmethod
+    def _slot_affinity_prompt(
+        message: str,
+        slot_summaries: dict[int, str],
+    ) -> str:
+        """Build the classifier prompt for slot affinity.
+
+        Output format: a single line — `related:<slot>` or `unrelated`. No
+        explanation, no Markdown. Slot summaries are the last ~3 user turns
+        per slot.
+        """
+        slot_blocks: list[str] = []
+        for slot_id in sorted(slot_summaries):
+            summary = slot_summaries[slot_id].strip() or "(no recent activity)"
+            slot_blocks.append(f"--- slot {slot_id} ---\n{summary}")
+        slots_text = "\n\n".join(slot_blocks)
+        return (
+            "You route a new chat message to a parallel work slot. Each slot "
+            "is a long-lived thread of conversation with the assistant. Decide "
+            "whether the new message is a follow-up on an existing slot or an "
+            "unrelated topic.\n\n"
+            "Existing slot histories (last ~3 user turns each):\n\n"
+            f"{slots_text}\n\n"
+            "New message:\n"
+            f"{message.strip()[:1500]}\n\n"
+            "Reply with EXACTLY one token on a single line:\n"
+            "  - `related:<N>` where <N> is the slot id the message continues\n"
+            "  - `unrelated` if it starts a fresh topic\n"
+            "No prose, no Markdown."
+        )
+
+    def _dispatch_parallel(self, event: queue.Event) -> None:
+        """Slot-aware dispatch for a single claimed event.
+
+        Picks a slot. If the slot is busy, the event is reset to `queued`
+        with a 1-second backoff so the next poll re-claims it once the slot
+        frees. Otherwise spawns a daemon thread to invoke the brain on the
+        chosen slot. Slot bookkeeping is released in `_run_in_slot` finally.
+        """
+        slot, should_queue = self._pick_slot(event)
+        channel = router.channel_name(event)
+        conv = event.conversation_id or ""
+        key = (channel, conv)
+        if should_queue:
+            conn = queue.connect(self.instance_dir)
+            try:
+                queue.reset_running_to_queued(
+                    conn,
+                    event.id,
+                    available_in_seconds=1,
+                    expected_locked_by=self.worker_id,
+                )
+            finally:
+                conn.close()
+            self.log(
+                f"event slot-queued id={event.id} slot={slot} "
+                f"(retry in 1s)",
+                event_id=event.id,
+                kind="slot_queue",
+            )
+            return
+        with self._slot_busy_lock:
+            self._busy_slots.setdefault(key, set()).add(slot)
+        thread = threading.Thread(
+            target=self._run_in_slot,
+            args=(event, slot, key),
+            daemon=True,
+            name=f"gateway-slot-{slot}",
+        )
+        with self._slot_busy_lock:
+            self._slot_active_threads.add(thread)
+        thread.start()
+
+    def _run_in_slot(
+        self,
+        event: queue.Event,
+        slot: int,
+        key: tuple[str, str],
+    ) -> None:
+        """Worker-thread body: invoke the brain on `slot` and finalize the row."""
+        from .brains import AdapterFailure
+
+        try:
+            response = self.process_event(event, slot=slot)
+            conn = queue.connect(self.instance_dir)
+            try:
+                try:
+                    queue.complete(
+                        conn,
+                        event.id,
+                        response=response,
+                        expected_locked_by=self.worker_id,
+                    )
+                except KeyError:
+                    self.log(
+                        f"complete skipped (slot {slot}) id={event.id} "
+                        f"reason=lease_lost worker={self.worker_id}"
+                    )
+            finally:
+                conn.close()
+            self._cancel_reengage_on_inbound_reply(event)
+            self.log(f"event done (slot {slot}) id={event.id} source={event.source}")
+        except AdapterFailure as failure:
+            self._recovery.handle_adapter_failure(event, failure)
+        except Exception as exc:  # noqa: BLE001
+            conn = queue.connect(self.instance_dir)
+            try:
+                try:
+                    queue.fail(
+                        conn,
+                        event.id,
+                        error=str(exc)[:1000],
+                        max_retries=self.config.max_retries,
+                        expected_locked_by=self.worker_id,
+                    )
+                except KeyError:
+                    self.log(
+                        f"fail skipped (slot {slot}) id={event.id} "
+                        f"reason=lease_lost worker={self.worker_id}"
+                    )
+            finally:
+                conn.close()
+            self.log(f"event errored (slot {slot}) id={event.id} error={exc}")
+        finally:
+            with self._slot_busy_lock:
+                busy = self._busy_slots.get(key)
+                if busy is not None:
+                    busy.discard(slot)
+                    if not busy:
+                        self._busy_slots.pop(key, None)
+                self._slot_active_threads.discard(threading.current_thread())
+
+    def process_event(self, event: queue.Event, *, slot: int = 0) -> str:
         monotonic_start = time.monotonic()
         meta = decode_meta(event)
         if meta.get("deliver_only"):
@@ -796,15 +1208,26 @@ class GatewayRuntime:
             f"model={model or '-'} reason={selection.reason}"
         )
 
-        resume_session = self._resume_id(channel, event.conversation_id, brain)
+        resume_session = self._resume_id(channel, event.conversation_id, brain, slot=slot)
         self.log(
             f"session resume id={event.id} conv={event.conversation_id or '-'} "
-            f"brain={brain} session={resume_session or 'none'}"
+            f"brain={brain} slot={slot} session={resume_session or 'none'}"
         )
         self.log(
             f"dispatch begin id={event.id} brain={brain} model={model or '-'} "
-            f"resume={'yes' if resume_session else 'no'}"
+            f"slot={slot} resume={'yes' if resume_session else 'no'}"
         )
+        # Parallel mode: prepend the last N global transcript lines so each
+        # slot stays loosely aware of activity in sibling slots. Off by default
+        # (N=1) — the brain's own priming path handles serial resume.
+        if (
+            self.config.parallel.max_concurrent > 1
+            and event.conversation_id
+            and not coalesced
+        ):
+            extra_ctx = self._build_global_transcript_context(event)
+            if extra_ctx:
+                event = dataclasses.replace(event, content=extra_ctx + "\n\n" + event.content)
 
         typing_stop = self._start_typing(channel, meta)
         try:
@@ -829,7 +1252,9 @@ class GatewayRuntime:
         self.log(f"dispatch ok id={event.id} brain={brain}")
 
         if result.session_id:
-            self._record_session(channel, event.conversation_id, brain, result.session_id)
+            self._record_session(
+                channel, event.conversation_id, brain, result.session_id, slot=slot
+            )
 
         # Sticky brain is only set by an explicit user action: `/brain X` slash
         # or `[brain] ...` inline prefix. Triage runs every message otherwise,
@@ -872,6 +1297,8 @@ class GatewayRuntime:
                 model=model,
                 session_id=result.session_id,
                 elapsed_seconds=_elapsed_seconds(event, monotonic_start),
+                slot=slot,
+                max_concurrent=self.config.parallel.max_concurrent,
             )
             message_out = parsed.message + ("\n\n" + footer if footer else "")
             response_text = message_out

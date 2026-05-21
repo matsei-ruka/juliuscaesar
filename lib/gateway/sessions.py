@@ -1,9 +1,13 @@
 """Session manager for the gateway.
 
-Stores per-(channel, conversation_id, brain) native session ids so subsequent
-messages can resume the same brain conversation. Also tracks a sticky-brain
-window per (channel, conversation_id) so the triage layer (Sprint 4) does not
-re-classify mid-conversation.
+Stores per-(channel, conversation_id, brain, slot) native session ids so
+subsequent messages can resume the same brain conversation chain. The slot
+axis exists for parallel dispatch (docs/specs/parallel-slots.md); for the
+default `max_concurrent: 1` config every row sits at slot 0 and behavior is
+identical to the pre-parallel-slots schema.
+
+Also tracks a sticky-brain window per (channel, conversation_id) so the
+triage layer (Sprint 4) does not re-classify mid-conversation.
 
 The session and sticky tables share the same SQLite database as the event
 queue (`<instance>/state/gateway/queue.db`).
@@ -23,6 +27,7 @@ class Session:
     channel: str
     conversation_id: str
     brain: str
+    slot: int
     session_id: str
     created_at: str
     updated_at: str
@@ -60,10 +65,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             channel TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
             brain TEXT NOT NULL,
+            slot INTEGER NOT NULL DEFAULT 0,
             session_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(channel, conversation_id, brain)
+            UNIQUE(channel, conversation_id, brain, slot)
         );
 
         CREATE INDEX IF NOT EXISTS idx_sessions_updated
@@ -82,7 +88,50 @@ def init_db(conn: sqlite3.Connection) -> None:
         ON sticky_brain(sticky_until);
         """
     )
+    _migrate_add_slot(conn)
     conn.commit()
+
+
+def _migrate_add_slot(conn: sqlite3.Connection) -> bool:
+    """Idempotent migration: add `slot` column + new UNIQUE constraint.
+
+    Existing rows pre-parallel-slots used UNIQUE(channel, conversation_id,
+    brain). SQLite can't ALTER a UNIQUE constraint in place, so we rebuild
+    the table when `slot` is missing. Pre-existing rows get slot=0, matching
+    serial behavior.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "slot" in cols:
+        return False
+    conn.executescript(
+        """
+        CREATE TABLE sessions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            brain TEXT NOT NULL,
+            slot INTEGER NOT NULL DEFAULT 0,
+            session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(channel, conversation_id, brain, slot)
+        );
+
+        INSERT INTO sessions_new
+            (id, channel, conversation_id, brain, slot, session_id, created_at, updated_at)
+        SELECT
+            id, channel, conversation_id, brain, 0, session_id, created_at, updated_at
+        FROM sessions;
+
+        DROP TABLE sessions;
+
+        ALTER TABLE sessions_new RENAME TO sessions;
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_updated
+        ON sessions(updated_at DESC);
+        """
+    )
+    return True
 
 
 def _row_to_session(row: sqlite3.Row | None) -> Session | None:
@@ -97,16 +146,41 @@ def get_session(
     channel: str,
     conversation_id: str,
     brain: str,
+    slot: int = 0,
 ) -> Session | None:
     return _row_to_session(
         conn.execute(
             """
             SELECT * FROM sessions
-            WHERE channel=? AND conversation_id=? AND brain=?
+            WHERE channel=? AND conversation_id=? AND brain=? AND slot=?
             """,
-            (channel, conversation_id, brain),
+            (channel, conversation_id, brain, int(slot)),
         ).fetchone()
     )
+
+
+def list_sessions_for_conversation(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    conversation_id: str,
+    brain: str,
+) -> list[Session]:
+    """All slot rows for a conversation + brain, ordered by slot ascending.
+
+    Used by the parallel-slots dispatcher to decide which slot a new event
+    should land on. Empty when no slot has captured a session yet (cold
+    conversation).
+    """
+    rows = conn.execute(
+        """
+        SELECT * FROM sessions
+        WHERE channel=? AND conversation_id=? AND brain=?
+        ORDER BY slot ASC
+        """,
+        (channel, conversation_id, brain),
+    ).fetchall()
+    return [s for row in rows if (s := _row_to_session(row)) is not None]
 
 
 def upsert_session(
@@ -116,20 +190,27 @@ def upsert_session(
     conversation_id: str,
     brain: str,
     session_id: str,
+    slot: int = 0,
 ) -> Session:
     ts = now_iso()
     conn.execute(
         """
-        INSERT INTO sessions(channel, conversation_id, brain, session_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(channel, conversation_id, brain) DO UPDATE SET
+        INSERT INTO sessions(channel, conversation_id, brain, slot, session_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(channel, conversation_id, brain, slot) DO UPDATE SET
             session_id=excluded.session_id,
             updated_at=excluded.updated_at
         """,
-        (channel, conversation_id, brain, session_id, ts, ts),
+        (channel, conversation_id, brain, int(slot), session_id, ts, ts),
     )
     conn.commit()
-    session = get_session(conn, channel=channel, conversation_id=conversation_id, brain=brain)
+    session = get_session(
+        conn,
+        channel=channel,
+        conversation_id=conversation_id,
+        brain=brain,
+        slot=slot,
+    )
     if session is None:
         raise RuntimeError("failed to read upserted session")
     return session

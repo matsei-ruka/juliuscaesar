@@ -136,23 +136,48 @@ class TelegramChannel:
     # list (Bot API v6.5+ free reactions). All entries below are verified
     # members of that list and read as "agent is busy / on it".
     _BUSY_EMOJIS = ("👀", "🤔", "✍", "👨‍💻", "🫡", "🤓")
+    # `🏃` reads as "running now on a parallel slot" (vs. `👀` = queued behind).
+    # Used only when `parallel.max_concurrent > 1`; serial gateways keep the
+    # random `_BUSY_EMOJIS` reaction for backward compatibility.
+    _RUNNING_EMOJI = "🏃"
 
-    def _busy_react(self, chat_id: str, message_id: int) -> None:
+    def _busy_react(
+        self,
+        chat_id: str,
+        message_id: int,
+        conversation_id: str | None = None,
+    ) -> None:
         """React to a message when the gateway is processing another event.
 
         Checks the queue for any currently-running event. If one exists,
-        adds a random emoji reaction immediately, then removes it after 30 s
-        via a daemon thread. Best-effort throughout — never raises.
+        adds an emoji reaction immediately, then removes it after 30 s via
+        a daemon thread. Best-effort throughout — never raises.
+
+        For the default `parallel.max_concurrent: 1` config the reaction is
+        a random pick from `_BUSY_EMOJIS` — byte-identical to the pre-
+        parallel-slots behavior. For `max_concurrent > 1` the reaction is
+        deterministic per slot availability for the current conversation:
+
+          - `🏃` — at least one slot is free, this event will run now.
+          - `👀` — all slots are busy, this event will queue.
         """
+        max_concurrent = self._max_concurrent()
         try:
             # Fresh connection avoids stale WAL snapshots from _chats_conn's
             # ongoing transaction (upsert_chat writes leave the connection
             # mid-transaction in Python 3.12+ implicit-transaction mode).
             conn = queue_module.connect(self.instance_dir)
             try:
-                row = conn.execute(
-                    "SELECT COUNT(*) AS n FROM events WHERE status='running'"
-                ).fetchone()
+                if max_concurrent > 1 and conversation_id:
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS n FROM events "
+                        "WHERE status='running' AND conversation_id=?",
+                        (conversation_id,),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS n FROM events WHERE status='running'"
+                    ).fetchone()
                 running = int(row["n"]) if row else 0
             finally:
                 conn.close()
@@ -161,13 +186,27 @@ class TelegramChannel:
             return
         if running == 0:
             return
-        emoji = random.choice(self._BUSY_EMOJIS)
+        if max_concurrent > 1:
+            emoji = self._RUNNING_EMOJI if running < max_concurrent else "👀"
+        else:
+            emoji = random.choice(self._BUSY_EMOJIS)
         token = self.token
         self.log(
             f"telegram busy_react chat_id={chat_id} message_id={message_id} "
-            f"emoji={emoji} running={running}"
+            f"emoji={emoji} running={running} max_concurrent={max_concurrent}"
         )
         set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=emoji, log=self.log)
+
+    def _max_concurrent(self) -> int:
+        """Return the configured `parallel.max_concurrent` (default 1).
+
+        Best-effort: any config-load failure falls back to 1 so the serial
+        path stays the safe default.
+        """
+        try:
+            return int(load_config_cached(self.instance_dir).parallel.max_concurrent)
+        except Exception:  # noqa: BLE001
+            return 1
 
         def _remove() -> None:
             time.sleep(30)
@@ -1093,7 +1132,9 @@ class TelegramChannel:
                         _chat_id = str(meta.get("chat_id", ""))
                         _msg_id = meta.get("message_id")
                         if _chat_id and isinstance(_msg_id, int):
-                            self._busy_react(_chat_id, _msg_id)
+                            self._busy_react(
+                                _chat_id, _msg_id, conversation_id=conversation_id
+                            )
                     self.close()
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"telegram poll error: {exc}")

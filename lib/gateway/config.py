@@ -101,6 +101,29 @@ class ReplyFooterConfig:
 
 
 @dataclass(frozen=True)
+class ParallelClassifierConfig:
+    backend: str = "openrouter"
+    model: str = "deepseek/deepseek-chat"
+    timeout_seconds: int = 3
+    cache_ttl_seconds: int = 30
+
+
+@dataclass(frozen=True)
+class ParallelConfig:
+    """Per-conversation parallel-slot dispatch.
+
+    Default `max_concurrent=1` reproduces today's strictly-serial behavior;
+    all gateway code paths must short-circuit on N=1 to stay byte-identical
+    with the pre-parallel-slots implementation (no classifier call, no slot
+    suffixes anywhere). See docs/specs/parallel-slots.md.
+    """
+
+    max_concurrent: int = 1
+    transcript_context_lines: int = 20
+    classifier: ParallelClassifierConfig = field(default_factory=ParallelClassifierConfig)
+
+
+@dataclass(frozen=True)
 class BrainOverrideConfig:
     bin: str | None = None
     sandbox: str | None = None
@@ -196,6 +219,7 @@ class GatewayConfig:
     adaptive_discovery: AdaptiveDiscoveryConfig = field(
         default_factory=AdaptiveDiscoveryConfig
     )
+    parallel: ParallelConfig = field(default_factory=ParallelConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -533,6 +557,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "voice",
         "triage_backup",
         "supervisor",
+        "parallel",
     }
     for key in data:
         if key not in allowed_top:
@@ -1107,6 +1132,60 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                         f"adaptive_discovery.high_stakes_escalation_channel: must be one of {supported}"
                     )
 
+    parallel_raw = data.get("parallel")
+    if parallel_raw is not None:
+        if not isinstance(parallel_raw, dict):
+            errors.append("parallel: must be a mapping")
+        else:
+            allowed_parallel = {
+                "max_concurrent",
+                "transcript_context_lines",
+                "classifier",
+            }
+            for key in parallel_raw:
+                if key not in allowed_parallel:
+                    errors.append(f"parallel.{key}: unknown field")
+            max_concurrent = parallel_raw.get("max_concurrent")
+            if max_concurrent is not None:
+                if not _is_int_like(max_concurrent) or int(max_concurrent) < 1 or int(max_concurrent) > 10:
+                    errors.append("parallel.max_concurrent: must be an integer between 1 and 10")
+            ctx_lines = parallel_raw.get("transcript_context_lines")
+            if ctx_lines is not None:
+                _validate_nonnegative_int(
+                    errors, "parallel.transcript_context_lines", ctx_lines
+                )
+            classifier_raw = parallel_raw.get("classifier")
+            if classifier_raw is not None:
+                if not isinstance(classifier_raw, dict):
+                    errors.append("parallel.classifier: must be a mapping")
+                else:
+                    allowed_classifier = {
+                        "backend",
+                        "model",
+                        "timeout_seconds",
+                        "cache_ttl_seconds",
+                    }
+                    for key in classifier_raw:
+                        if key not in allowed_classifier:
+                            errors.append(
+                                f"parallel.classifier.{key}: unknown field"
+                            )
+                    backend_val = classifier_raw.get("backend")
+                    if backend_val is not None and backend_val != "openrouter":
+                        errors.append(
+                            "parallel.classifier.backend: only 'openrouter' is supported"
+                        )
+                    model_val = classifier_raw.get("model")
+                    if model_val is not None and (
+                        not isinstance(model_val, str) or not model_val.strip()
+                    ):
+                        errors.append("parallel.classifier.model: must be a non-empty string")
+                    for key in ("timeout_seconds", "cache_ttl_seconds"):
+                        if classifier_raw.get(key) is not None:
+                            _validate_positive_int(
+                                errors, f"parallel.classifier.{key}", classifier_raw[key]
+                            )
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1371,6 +1450,39 @@ def _load_adaptive_discovery(data: dict[str, Any]) -> AdaptiveDiscoveryConfig:
     )
 
 
+def _load_parallel(data: dict[str, Any]) -> ParallelConfig:
+    raw = data.get("parallel") if isinstance(data.get("parallel"), dict) else {}
+    defaults = ParallelConfig()
+    classifier_raw = raw.get("classifier") if isinstance(raw.get("classifier"), dict) else {}
+    classifier = ParallelClassifierConfig(
+        backend=str(classifier_raw.get("backend") or defaults.classifier.backend),
+        model=str(classifier_raw.get("model") or defaults.classifier.model),
+        timeout_seconds=int(
+            classifier_raw.get("timeout_seconds")
+            if classifier_raw.get("timeout_seconds") is not None
+            else defaults.classifier.timeout_seconds
+        ),
+        cache_ttl_seconds=int(
+            classifier_raw.get("cache_ttl_seconds")
+            if classifier_raw.get("cache_ttl_seconds") is not None
+            else defaults.classifier.cache_ttl_seconds
+        ),
+    )
+    return ParallelConfig(
+        max_concurrent=int(
+            raw.get("max_concurrent")
+            if raw.get("max_concurrent") is not None
+            else defaults.max_concurrent
+        ),
+        transcript_context_lines=int(
+            raw.get("transcript_context_lines")
+            if raw.get("transcript_context_lines") is not None
+            else defaults.transcript_context_lines
+        ),
+        classifier=classifier,
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1487,6 +1599,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         entities=_load_entities(data),
         inter_agent_protocol=_load_inter_agent_protocol(data),
         adaptive_discovery=_load_adaptive_discovery(data),
+        parallel=_load_parallel(data),
     )
 
 
@@ -1525,6 +1638,19 @@ reply_footer:
   show_session: true
   show_elapsed: true
   session_chars: 8
+# parallel: per-conversation slots for concurrent brain dispatch.
+# Default max_concurrent=1 keeps strictly-serial (today's) behavior.
+# Increase to allow N concurrent brain invocations per conversation —
+# unrelated quick messages don't queue behind long-running ones.
+# See docs/specs/parallel-slots.md.
+parallel:
+  max_concurrent: 1
+  transcript_context_lines: 20
+  classifier:
+    backend: openrouter
+    model: deepseek/deepseek-chat
+    timeout_seconds: 3
+    cache_ttl_seconds: 30
 triage_routing:
   smalltalk: claude:haiku-4-5
   quick: claude:sonnet-4-6

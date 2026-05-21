@@ -31,14 +31,24 @@ def render_footer(
     model: str | None,
     session_id: str | None,
     elapsed_seconds: float | None,
+    slot: int | None = None,
+    max_concurrent: int = 1,
 ) -> str | None:
-    """Render a single-line reply footer, or None when disabled/empty."""
+    """Render a single-line reply footer, or None when disabled/empty.
+
+    When `slot is not None` AND `max_concurrent > 1`, a `slot N` segment is
+    inserted after `brain` and before `sess`. For `max_concurrent <= 1`
+    (default) the slot is suppressed so the footer is byte-identical to the
+    pre-parallel-slots output.
+    """
     if not cfg.enabled:
         return None
 
     parts: list[str] = []
     if cfg.show_model and brain:
         parts.append(f"{brain}:{model}" if model else brain)
+    if slot is not None and max_concurrent > 1:
+        parts.append(f"slot {int(slot)}")
     if cfg.show_session:
         parts.append(f"sess {_abbrev_session(session_id, cfg.session_chars)}")
     if cfg.show_elapsed:

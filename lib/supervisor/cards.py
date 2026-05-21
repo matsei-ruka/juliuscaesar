@@ -28,6 +28,25 @@ _BAR_DECAY_SECONDS = 60.0
 _MINUTE_COLORS = ("🟦", "🟩", "🟨", "🟧", "🟥", "🟪", "⬛")
 _MINUTES_PER_COLOR = 3
 
+_SLOT_EMOJIS = (
+    "0️⃣",
+    "1️⃣",
+    "2️⃣",
+    "3️⃣",
+    "4️⃣",
+    "5️⃣",
+    "6️⃣",
+    "7️⃣",
+    "8️⃣",
+    "9️⃣",
+)
+
+
+def _slot_emoji(n: int) -> str:
+    """Return the keycap emoji for slot N (0-9). Caps at 9."""
+    idx = max(0, min(9, int(n)))
+    return _SLOT_EMOJIS[idx]
+
 
 _LABELS: dict[str, dict[str, str]] = {
     "phase":      {"en": "Phase",      "it": "Fase"},
@@ -57,20 +76,44 @@ def render_card(
     elapsed_seconds: float,
     narration: str = "",
     language: str = "en",
+    slot: int | None = None,
+    max_concurrent: int = 1,
 ) -> Card:
-    """Build the card text. Pure function; no I/O."""
+    """Build the card text. Pure function; no I/O.
+
+    When `slot` is provided AND `max_concurrent > 1`, the leading emoji is the
+    slot keycap (`0️⃣`..`9️⃣`) and the phase emoji moves to a second line. This
+    keeps multiple parallel cards in the same conversation visually
+    distinguishable. For `max_concurrent <= 1` (default), behavior is
+    identical to the pre-parallel-slots renderer.
+    """
     lang = language if language in ("en", "it") else "en"
     title_short = _truncate(title, 60)
 
     elapsed_line = _minute_bar(elapsed_seconds)
 
-    lines = [
-        f"{phase.emoji} {title_short}",
-        "",
-    ]
-    if narration:
-        lines.append(f"{_LABELS['signal'][lang]}: {narration}")
-    lines.append(elapsed_line)
+    show_slot = slot is not None and max_concurrent > 1
+
+    if show_slot:
+        head_emoji = _slot_emoji(int(slot))  # type: ignore[arg-type]
+        lines = [
+            f"{head_emoji} {title_short}",
+            "",
+        ]
+        # Phase emoji on line 2, embedded in the activity line.
+        activity_bits: list[str] = [phase.emoji]
+        if narration:
+            activity_bits.append(f"{_LABELS['signal'][lang]}: {narration}")
+        activity_bits.append(elapsed_line)
+        lines.append(" · ".join(activity_bits))
+    else:
+        lines = [
+            f"{phase.emoji} {title_short}",
+            "",
+        ]
+        if narration:
+            lines.append(f"{_LABELS['signal'][lang]}: {narration}")
+        lines.append(elapsed_line)
 
     return Card(
         text="\n".join(lines),
