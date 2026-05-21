@@ -10,7 +10,7 @@ These tests pin down the observable side-effects we care about:
 - the footer rendering does NOT include `slot N`;
 - the supervisor card has phase emoji as leading char (no slot keycap);
 - the telegram busy reaction draws from `_BUSY_EMOJIS` (random pick), not the
-  deterministic `🏃` reserved for the parallel path.
+  deterministic `⚡` reserved for the parallel path.
 - session rows are upsertable with no slot kwarg.
 """
 

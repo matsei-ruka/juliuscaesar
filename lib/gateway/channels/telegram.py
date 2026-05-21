@@ -136,10 +136,12 @@ class TelegramChannel:
     # list (Bot API v6.5+ free reactions). All entries below are verified
     # members of that list and read as "agent is busy / on it".
     _BUSY_EMOJIS = ("👀", "🤔", "✍", "👨‍💻", "🫡", "🤓")
-    # `🏃` reads as "running now on a parallel slot" (vs. `👀` = queued behind).
+    # `⚡` reads as "running now on a parallel slot" (vs. `👀` = queued behind).
     # Used only when `parallel.max_concurrent > 1`; serial gateways keep the
     # random `_BUSY_EMOJIS` reaction for backward compatibility.
-    _RUNNING_EMOJI = "🏃"
+    # `🏃` was the original spec pick but Telegram rejects it (REACTION_INVALID
+    # via Bot API setMessageReaction — emoji not in the curated allowed list).
+    _RUNNING_EMOJI = "⚡"
 
     def _busy_react(
         self,
@@ -158,7 +160,7 @@ class TelegramChannel:
         parallel-slots behavior. For `max_concurrent > 1` the reaction is
         deterministic per slot availability for the current conversation:
 
-          - `🏃` — at least one slot is free, this event will run now.
+          - `⚡` — at least one slot is free, this event will run now.
           - `👀` — all slots are busy, this event will queue.
         """
         max_concurrent = self._max_concurrent()
