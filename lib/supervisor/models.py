@@ -49,6 +49,7 @@ class EventSnapshot:
     phase: PhaseResult
     worker_linked: bool
     language: str
+    slot: int | None = None
 
     @property
     def brain_spec(self) -> str:

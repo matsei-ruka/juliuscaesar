@@ -336,6 +336,8 @@ def _render_and_send(
         elapsed_seconds=snap.age_seconds,
         narration=narration_text,
         language=ev_state.language,
+        slot=snap.slot,
+        max_concurrent=2 if snap.slot is not None else 1,
     )
 
     source = snap.event.source or "telegram"

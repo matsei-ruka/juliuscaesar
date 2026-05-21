@@ -82,6 +82,11 @@ def _read_qualifying(
             has_stderr=bool(adapter.stderr_tail),
             elapsed_seconds=age,
         )
+        slot_val = meta.get("slot")
+        try:
+            slot_int = int(slot_val) if slot_val is not None else None
+        except (TypeError, ValueError):
+            slot_int = None
         out.append(
             EventSnapshot(
                 event=event,
@@ -93,6 +98,7 @@ def _read_qualifying(
                 phase=phase,
                 worker_linked=worker_linked,
                 language=language,
+                slot=slot_int,
             )
         )
     return out

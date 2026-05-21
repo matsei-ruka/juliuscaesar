@@ -563,6 +563,27 @@ class GatewayRuntime:
             latest, id=first.id, content=bundled_content, meta=bundled_meta
         )
 
+    def _persist_slot_in_meta(self, event: queue.Event, slot: int) -> None:
+        """Write the assigned slot into event.meta so the supervisor can show it.
+
+        Supervisor runs in a separate process and doesn't see the in-memory
+        slot assignment. Persisting it on the event row makes it readable via
+        `queue.row_to_event` without a new schema column.
+        """
+        meta = decode_meta(event)
+        if meta.get("slot") == int(slot):
+            return
+        meta["slot"] = int(slot)
+        conn = queue.connect(self.instance_dir)
+        try:
+            queue.update_meta(conn, event.id, meta)
+        except KeyError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"persist_slot_in_meta failed event={event.id} slot={slot}: {exc}")
+        finally:
+            conn.close()
+
     def _cancel_reengage_on_inbound_reply(self, event: queue.Event) -> None:
         """Cancel pending re-engagement touches when a tracked chat replies."""
         if event.source not in self._TRANSCRIPT_CHANNELS:
@@ -1106,6 +1127,7 @@ class GatewayRuntime:
         from .brains import AdapterFailure
 
         try:
+            self._persist_slot_in_meta(event, slot)
             response = self.process_event(event, slot=slot)
             conn = queue.connect(self.instance_dir)
             try:
