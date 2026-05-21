@@ -31,6 +31,16 @@ class EventState:
     card_count: int = 0
     # AI-generated short activity title (set once on first card, persists).
     title: str = ""
+    # the-company worker reporter — fires worker.started/finished exactly once
+    # per (event_id, instance_boot_id) so dashboards don't double-count or
+    # leave dangling "still running" rows. brain/model/started_at_iso are
+    # captured at start time so finalize can close the row without needing
+    # the events row to still carry them.
+    company_reported_started: bool = False
+    company_reported_finished: bool = False
+    company_brain: str = ""
+    company_model: str = ""
+    company_started_at_iso: str = ""
     # Wall-clock timestamp (seconds since epoch) when the entry should become
     # eligible for prune. Set whenever recovery_attempts is bumped or the row
     # transitions out of the active set with non-zero counter; 0 means
