@@ -170,7 +170,7 @@ def _read_pyproject_version(pyproject: Path) -> str | None:
 def _git_short_sha(framework_root: Path) -> str:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "-c", "safe.directory=*", "rev-parse", "--short", "HEAD"],
             cwd=framework_root,
             capture_output=True,
             text=True,
@@ -187,7 +187,7 @@ def _git_short_sha(framework_root: Path) -> str:
 def _git_is_dirty(framework_root: Path) -> bool:
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "-c", "safe.directory=*", "status", "--porcelain"],
             cwd=framework_root,
             capture_output=True,
             text=True,
