@@ -9,10 +9,13 @@ Phase 3: AI narrator — cheap model call fills "Last signal" card field.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from company import supervisor_conf as company_conf
+from company.supervisor_reporter import Reporter as CompanyReporter
 from gateway import queue
 
 from .cards import Card, render_card, render_stopped_card
@@ -38,17 +41,58 @@ from .state import RECOVERY_STATE_TTL_SECONDS, EventState, SupervisorState
 LogFn = Callable[[str], None]
 
 
+# Process-wide cache: build the company reporter once and reuse the same
+# instance_boot_id for every tick within a gateway lifetime. Keyed by
+# instance_dir so multi-instance test runs don't share boot ids.
+_REPORTER_CACHE: dict[str, "CompanyReporter | None"] = {}
+
+
+def _build_default_reporter(instance_dir: Path, log: LogFn) -> "CompanyReporter | None":
+    """Return a process-scoped Reporter (or None when disabled / misconfigured).
+
+    Reads ``ops/the_company.yaml`` and caches the result. If the file or key
+    is missing, returns None — the supervisor then skips reporting silently.
+    """
+    key = str(Path(instance_dir).resolve())
+    if key in _REPORTER_CACHE:
+        return _REPORTER_CACHE[key]
+    cfg = company_conf.load(Path(instance_dir))
+    if cfg.disabled:
+        _REPORTER_CACHE[key] = None
+        return None
+    boot_id = str(uuid.uuid4())
+    reporter = CompanyReporter(
+        api_url=cfg.api_url,
+        agent_id=cfg.agent_id,
+        api_key=cfg.api_key,
+        instance_boot_id=boot_id,
+        log_fn=log,
+    )
+    _REPORTER_CACHE[key] = reporter
+    return reporter
+
+
+# Sentinel so callers can explicitly pass ``reporter=None`` to disable
+# reporting (e.g. in tests) without us falling back to the default loader.
+_USE_DEFAULT_REPORTER: Any = object()
+
+
 def run_tick(
     instance_dir: Path,
     *,
     dry_run: bool = False,
     log: LogFn | None = None,
     sender: "CardSender | None" = None,
+    reporter: "CompanyReporter | None | Any" = _USE_DEFAULT_REPORTER,
 ) -> TickResult:
     """Run one supervisor tick.
 
     ``sender`` is an injection point used by tests to capture card I/O without
     hitting Telegram. Defaults to the real Telegram delivery functions.
+
+    ``reporter`` is an injection point for the the-company worker reporter.
+    Pass an explicit ``None`` to disable reporting, a fake to capture calls
+    in tests, or omit to load from ``ops/the_company.yaml``.
     """
     log = log or (lambda _: None)
     cfg = load_supervisor_config(instance_dir)
@@ -56,6 +100,8 @@ def run_tick(
         return TickResult(enabled=False)
 
     sender = sender or _MultiChannelSender()
+    if reporter is _USE_DEFAULT_REPORTER:
+        reporter = _build_default_reporter(instance_dir, log)
 
     now = datetime.now(timezone.utc)
     state = SupervisorState.load(instance_dir)
@@ -79,10 +125,13 @@ def run_tick(
     result = TickResult(enabled=True, snapshots=snapshots)
     active_ids = {s.event.id for s in snapshots}
 
-    # 1. Close cards for events that finished since last tick.
+    # 1. Close cards for events that finished since last tick. Same pass
+    #    also fires worker.finished to the-company for any event we'd
+    #    previously announced as running.
     _finalize_completed(
         instance_dir, cfg, state, active_ids,
         now=now, dry_run=dry_run, sender=sender, log=log,
+        reporter=reporter,
     )
 
     # 2. Silent recovery — re-queue events whose adapter PID is gone.
@@ -183,6 +232,23 @@ def run_tick(
     # 3. Send/edit cards for events still running and past threshold.
     tick_narrator_calls = 0
     for snap in snapshots:
+        # Announce worker.started to the-company on first sight, regardless
+        # of card-emit gating (group chat, voice, etc). The dashboard wants
+        # the whole truth of what the gateway is working on. Skipped in
+        # dry_run for parity with finalize and to avoid real-world side
+        # effects from a planning-only tick.
+        ev_state = state.event(snap.event.id)
+        if (
+            not dry_run
+            and reporter is not None
+            and not ev_state.company_reported_started
+        ):
+            tick_narrator_calls += _report_started(
+                instance_dir, cfg, ev_state, snap, now=now,
+                reporter=reporter, log=log,
+                narrator_budget=tick_narrator_calls < cfg.narrator_calls_per_tick_max,
+            )
+
         if snap.event.id in recovered_ids:
             # Event was just re-queued; skip card emit to avoid stale render.
             continue
@@ -414,6 +480,74 @@ def _render_and_send(
     return narrator_called
 
 
+def _report_started(
+    instance_dir: Path,
+    cfg: SupervisorConfig,
+    ev_state: EventState,
+    snap: EventSnapshot,
+    *,
+    now: datetime,
+    reporter: "CompanyReporter",
+    log: LogFn,
+    narrator_budget: bool,
+) -> int:
+    """Fire worker.started for ``snap`` once, caching brain/model/started_at.
+
+    Topic resolution priority:
+    1. Cached AI title on ``ev_state.title`` (set by a prior tick or here).
+    2. Fresh ``generate_title(...)`` call when there's narrator budget left.
+    3. Best-effort fallback from event meta (text / transcription / content).
+
+    Returns 1 if it spent a narrator call, else 0 — so the caller can
+    track the per-tick budget.
+    """
+    narrator_used = 0
+    raw_content = snap.event.content or _title_from_meta(snap.meta, snap.event.content)
+
+    if not ev_state.title and narrator_budget and raw_content:
+        generated = generate_title(
+            raw_content,
+            cfg.narrator_brain,
+            instance_dir,
+            language=snap.language,
+            log=log,
+        )
+        if generated:
+            ev_state.title = generated
+            narrator_used = 1
+
+    topic = ev_state.title or _title_from_meta(snap.meta, snap.event.content) or ""
+
+    started_at = _started_at_from_snapshot(snap, fallback=now)
+    started_iso = started_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    ok = reporter.report_started(
+        event_id=snap.event.id,
+        topic=topic,
+        started_at=started_at,
+        brain=snap.brain or None,
+        model=snap.model,
+    )
+    if ok:
+        ev_state.company_reported_started = True
+        ev_state.company_brain = snap.brain or ""
+        ev_state.company_model = snap.model or ""
+        ev_state.company_started_at_iso = started_iso
+    # On failure we leave company_reported_started=False so the next tick retries.
+    return narrator_used
+
+
+def _started_at_from_snapshot(snap: EventSnapshot, *, fallback: datetime) -> datetime:
+    """Parse an event's started_at into an aware UTC datetime, with fallback."""
+    raw = snap.event.started_at or snap.event.received_at
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return fallback
+
+
 def _finalize_completed(
     instance_dir: Path,
     cfg: SupervisorConfig,
@@ -424,6 +558,7 @@ def _finalize_completed(
     dry_run: bool,
     sender: "CardSender",
     log: LogFn,
+    reporter: "CompanyReporter | None" = None,
 ) -> None:
     """Render a terminal card for events that had a card and have since
     finished (Bug #10 / #11).
@@ -434,6 +569,11 @@ def _finalize_completed(
     - is in a terminal status: ``done`` → ✅ final card, ``failed`` or
       ``escalated`` → neutral ⏹ stopped card (no crash/error text per spec).
     """
+    # Candidates are any tracked EventState no longer in active_ids. Two
+    # things can happen per candidate:
+    #   - it has a channel_message_id → delete the progress card,
+    #   - it was previously announced to the-company → fire worker.finished.
+    # Both are independent: an event may have one, the other, or both.
     candidate_ids: list[int] = []
     for k, ev_state in state.events.items():
         try:
@@ -442,7 +582,7 @@ def _finalize_completed(
             continue
         if eid in active_ids:
             continue
-        if not ev_state.channel_message_id:
+        if not ev_state.channel_message_id and not ev_state.company_reported_started:
             continue
         candidate_ids.append(eid)
 
@@ -461,32 +601,63 @@ def _finalize_completed(
         ev_state = state.events[str(eid)]
         if dry_run:
             continue
-        source = str(status_row.get("source") or "telegram")
-        meta = status_row.get("meta") or {}
-        if not _delivery_address(source, meta):
-            continue
-        # Delete the progress card — user doesn't need a residual ✅ in chat.
-        ok = sender.delete(
-            instance_dir=instance_dir,
-            source=source,
-            meta=meta,
-            message_id=ev_state.channel_message_id,
-            log=log,
-        )
-        _write_log(
-            instance_dir,
-            {
-                "kind": "supervisor_card_finalized",
-                "ts": now.isoformat(),
-                "event_id": eid,
-                "status": status,
-                "message_id": ev_state.channel_message_id,
-                "action": "delete",
-                "ok": ok,
-            },
-        )
-        # Drop the event from state — card deleted, no more updates.
+
+        # --- Card delete (only if we have one) ---
+        if ev_state.channel_message_id:
+            source = str(status_row.get("source") or "telegram")
+            meta = status_row.get("meta") or {}
+            if _delivery_address(source, meta):
+                ok = sender.delete(
+                    instance_dir=instance_dir,
+                    source=source,
+                    meta=meta,
+                    message_id=ev_state.channel_message_id,
+                    log=log,
+                )
+                _write_log(
+                    instance_dir,
+                    {
+                        "kind": "supervisor_card_finalized",
+                        "ts": now.isoformat(),
+                        "event_id": eid,
+                        "status": status,
+                        "message_id": ev_state.channel_message_id,
+                        "action": "delete",
+                        "ok": ok,
+                    },
+                )
+
+        # --- the-company finalize ---
+        if (
+            reporter is not None
+            and ev_state.company_reported_started
+            and not ev_state.company_reported_finished
+        ):
+            started_at = _parse_iso(ev_state.company_started_at_iso) or _parse_iso(
+                str(status_row.get("started_at") or "")
+            ) or now
+            finished_at = _parse_iso(str(status_row.get("finished_at") or "")) or now
+            ok = reporter.report_finished(
+                event_id=eid,
+                started_at=started_at,
+                finished_at=finished_at,
+                brain=ev_state.company_brain or None,
+                model=ev_state.company_model or None,
+            )
+            if ok:
+                ev_state.company_reported_finished = True
+
+        # Drop the event from state — finalized in both channels.
         del state.events[str(eid)]
+
+
+def _parse_iso(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _fetch_statuses(instance_dir: Path, event_ids: list[int]) -> dict[int, dict[str, Any]]:

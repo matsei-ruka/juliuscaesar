@@ -1,0 +1,24 @@
+# the-company integration — supervisor-driven worker reporter.
+#
+# When enabled, the supervisor's lifecycle (snapshot → finalize) deterministically
+# posts worker.started / worker.finished to the-company dashboard. The brain
+# does NOT need to remember to call any CLI — the supervisor handles it.
+#
+# Enrollment (one-time per instance):
+#   1. Get an agent_id + api_key from the-company operator.
+#   2. mkdir -p state/company && chmod 700 state/company
+#   3. printf '%s' "<api_key>" > state/company/api-key && chmod 600 state/company/api-key
+#   4. cp ops/the_company.yaml.example ops/the_company.yaml
+#   5. Edit the new file: set api_url + agent_id, flip enabled to true.
+#   6. Restart the gateway at the next natural opportunity.
+#
+# Failure mode: best-effort. If the-company backend is unreachable the
+# supervisor logs the error and continues — gateway stays up. Events that
+# fail to report retry on the next tick (worker.started) or stay unclosed
+# (worker.finished) until the operator fixes the link.
+
+the_company:
+  enabled: false   # flip to true after enrollment
+  api_url: http://127.0.0.1:8080
+  agent_id: 00000000-0000-0000-0000-000000000000
+  api_key_file: state/company/api-key
