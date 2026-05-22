@@ -28,6 +28,21 @@ showing X".
 - Describe a layout as prose when an actual image was requested
 - Use any other image generation approach
 
+### Motion-graphics videos
+
+**Trigger words:** "create video", "make a clip", "animated explainer", "social short",
+"motion graphics", "video render", "9:16 video", "16:9 clip", "TikTok video",
+"Reel", "YouTube short", "render a video".
+
+**Rule:** ALWAYS invoke the `remotion-video` skill. Do NOT:
+- Narrate a video idea in prose instead of rendering it
+- ASCII-sketch a storyboard when a real render was asked for
+- Generate a static image and call it a video
+- Use any other video generation approach
+
+**If unsure whether a request is a video:** ask one question —
+"Do you want a motion video or a static image?" — then route accordingly.
+
 ### Reports — disambiguation required
 
 **Trigger word:** "report".

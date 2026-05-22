@@ -10,6 +10,7 @@ choosing a web, search, crawl, or browser automation skill.
 | Firecrawl | `skills/firecrawl/SKILL.md` | `FIRECRAWL_API_KEY` | Clean page/site extraction, crawling, structured scrape, JS-heavy pages |
 | Browser Use | `skills/browser-use/SKILL.md` | `BROWSER_USE_API_KEY` | Interactive browser automation when APIs or scraping are insufficient |
 | Deep Research | `skills/deep-research/SKILL.md` | per-host browser profile (`jc research login`) | Multi-source deep dives via Gemini Advanced — long-form, cited reports (5-10 min, async) |
+| Remotion Video | `skills/remotion-video/SKILL.md` | local GPU (no cloud) | React/TSX motion-graphics video rendering — animated explainers, social shorts, product demos |
 
 Credentials live in the instance root `.env`. Never put API keys in skill
 files, prompts, memory, logs, or committed examples.
