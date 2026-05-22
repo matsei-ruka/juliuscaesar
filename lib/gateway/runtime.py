@@ -210,6 +210,29 @@ def _parse_slot_verdict(text: str) -> int | None:
     return None
 
 
+def _lib_dir_newest_mtime(lib_dir: Path) -> tuple[float, str]:
+    """Return (mtime, basename) of the newest .py file under lib_dir.
+
+    Used to detect framework code drift: when files on disk are newer than
+    the running process start, in-memory modules are stale and a respawn is
+    required. Returns (0.0, "") if scan fails or no .py files are present.
+    """
+    newest_mtime = 0.0
+    newest_name = ""
+    try:
+        for py in lib_dir.rglob("*.py"):
+            try:
+                mt = py.stat().st_mtime
+            except (OSError, FileNotFoundError):
+                continue
+            if mt > newest_mtime:
+                newest_mtime = mt
+                newest_name = py.name
+    except (OSError, FileNotFoundError):
+        return 0.0, ""
+    return newest_mtime, newest_name
+
+
 class GatewayRuntime:
     HEARTBEAT_INTERVAL_SECONDS = 5.0
     TRIAGE_REJECTION_MESSAGE = (
@@ -230,6 +253,15 @@ class GatewayRuntime:
         self.stop_requested = stop_requested
         self.worker_id = f"gateway-{os.getpid()}"
         self.session_id = str(uuid.uuid4())
+        # Code-drift detection: capture startup time + framework `lib/` root.
+        # `run_forever` periodically rescans .py mtimes; if any have been
+        # updated past startup, the process exits so the watchdog respawns it
+        # with fresh modules. Without this, a `git pull` that touches e.g.
+        # `sessions.py` silently breaks every dispatch with
+        # `TypeError: unexpected keyword argument` until manual restart.
+        self._startup_time = time.time()
+        self._lib_dir = Path(__file__).resolve().parent.parent
+        self._code_drift_last_check = 0.0
         self._channel_lifecycle = ChannelLifecycle(
             self.instance_dir,
             config=self.config,
@@ -453,11 +485,39 @@ class GatewayRuntime:
             self.start_channels()
             self.log("dispatcher started")
             while not self.stop_requested():
+                self._check_code_drift()
                 self.dispatch_once()
                 time.sleep(self.config.poll_interval_seconds)
             self.log("dispatcher stopping")
         finally:
             self.close()
+
+    def _check_code_drift(self) -> None:
+        """Exit the process when framework code on disk is newer than startup.
+
+        Throttled to once per minute. On drift, logs the offending file and
+        raises SystemExit(42); the watchdog respawns the gateway with fresh
+        in-memory modules. The 60-second tolerance avoids racing file writes
+        during startup. Future-dated files (git checkouts sometimes preserve
+        committer timestamps across timezones) are ignored to prevent restart
+        loops on filesystems with clock skew.
+        """
+        now = time.time()
+        if now - self._code_drift_last_check < 60.0:
+            return
+        self._code_drift_last_check = now
+        newest_mtime, newest_name = _lib_dir_newest_mtime(self._lib_dir)
+        if newest_mtime <= self._startup_time + 60.0:
+            return
+        if newest_mtime > now + 60.0:
+            return  # future-dated file; treat as filesystem skew, not drift
+        drift_seconds = int(newest_mtime - self._startup_time)
+        self.log(
+            f"code drift detected — {newest_name} updated {drift_seconds}s after "
+            f"process start; exiting for watchdog respawn",
+            kind="code_drift_exit",
+        )
+        raise SystemExit(42)
 
     def close(self) -> None:
         """Stop background work and close stateful channel/log resources."""
