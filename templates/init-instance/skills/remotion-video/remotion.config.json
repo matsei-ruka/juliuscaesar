@@ -1,0 +1,21 @@
+{
+  "remotion_project_path": "/Users/lucamattei/remotion-jc",
+  "entry_point": "src/index.ts",
+  "default_fps": 30,
+  "default_width": 1920,
+  "default_height": 1080,
+  "default_codec": "h264",
+  "gpu": "M4 Max 40-core",
+  "gpu_metal_version": "Metal 4",
+  "concurrency": 8,
+  "rendering_library": "remotion",
+  "rendering_backend": "local-gpu",
+  "no_aws_required": true,
+  "dependencies": {
+    "remotion": "^4.0.464",
+    "@remotion/cli": "^4.0.464",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest"
+  }
+}

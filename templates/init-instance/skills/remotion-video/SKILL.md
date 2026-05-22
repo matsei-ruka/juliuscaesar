@@ -1,177 +1,132 @@
 ---
 name: remotion-video
 description: >
-  Generate motion-graphics videos (animated explainers, social shorts, title sequences,
-  product demos, kinetic typography) by writing React/TSX Remotion compositions and
-  rendering them locally on the Mac Studio GPU.
+  Produce programmatic video renders on the local GPU (no cloud, no AWS, no Lambda).
+  Uses Remotion + React/TSX to generate MP4 videos with animations, titles, transitions,
+  and motion graphics. Runs entirely on the host machine using Chromium headless + FFmpeg.
 
   **ROUTING RULE (hard):** Any request containing "create video", "make a clip",
-  "animated explainer", "social short", "motion graphics", "video render",
-  "9:16 video", "16:9 clip", "TikTok video", "Reel", "YouTube short", or
-  "render a video of/with/about" MUST invoke this skill. Never narrate a video
-  idea in prose. Never ASCII-sketch a storyboard. If a video is asked for,
-  render it.
+  "generate video", "animated explainer", "social short", "motion graphics",
+  "render video", "mp4", aspect-ratio keywords (9:16, 16:9, 1:1), or words like
+  "1080p", "4K", "60fps" combined with a video intent MUST invoke this skill.
+  Never describe video content in prose when a render-ready video is expected.
+  Never ASCII-sketch a video timeline. If in doubt, invoke this skill.
 ---
 
 # remotion-video
 
-Generate motion-graphics videos by writing Remotion compositions and rendering
-them on the local GPU. Reference quality: Manim-style clean math animations,
-Vercel-style product demos, attention-grabbing social shorts — flat design,
-smooth springs, crisp typography, zero compression artifacts.
+Produce programmatic MP4 videos using Remotion rendered on local GPU hardware.
+Zero cloud cost. Zero upload latency. M-series GPU acceleration via Chromium WebCodecs.
 
 ## When to invoke
-- User asks for a video, clip, short, reel, animated explainer, kinetic-typography piece.
-- User specifies an aspect ratio: 16:9 (YouTube), 9:16 (TikTok/Reels/Shorts), 1:1.
-- User asks to "visualize" a concept, demo, or workflow that benefits from motion.
-- User says "make this into a video" or "I need a clip for…"
+- User asks for a video, clip, animated explainer, social short, motion graphic.
+- Keywords: "video", "clip", "mp4", "render", "1080p", "4K", "9:16", "16:9", "1:1", "shorts", "reel".
+- A transformation deliverable needs visual explanation.
 
 ## Dependencies
-- **Remotion:** installed at `/Users/lucamattei/remotion-jc/` (npm project with `remotion` and `@remotion/cli`).
-- **Node runtime:** `~/.nvm/versions/node/v20.20.1/bin/node`. Always source nvm before remotion commands: `export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"`.
-- **Chrome Headless Shell:** auto-downloaded by Remotion on first render. Already cached.
-- **ffmpeg:** `/Users/lucamattei/.local/bin/ffmpeg` (v4.4, h264 + AAC).
-- **Hardware:** Apple M4 Max, 64 GB, 16-core GPU. Concurrency: 8x. Render speed: ~50 fps sustained for 1080p compositions.
-- **Output directory:** `output/` inside the remotion-jc project. Created on first run.
+- **Remotion project:** `/Users/lucamattei/remotion-jc/` — installed with `remotion`, `@remotion/cli`, `react`, `react-dom`, `typescript`.
+- **Entry point:** `src/index.ts` registers all compositions via `RemotionRoot`.
+- **FFmpeg:** available at `~/.local/bin/ffmpeg` (installed system-wide).
+- **GPU:** M4 Max 40-core with Metal 4. Rendering uses `npx remotion render` with automatic hardware encoding.
 
-**No cloud dependencies.** No AWS, no Lambda, no S3. Everything renders locally.
+## Inputs (gather before rendering)
+1. **Topic / brief** — one to three sentences describing the video content.
+2. **Duration** — in seconds, max 60 for first version. Default: 15s.
+3. **Aspect ratio** — `16:9` (1920×1080, default), `9:16` (1080×1920), or `1:1` (1080×1080).
+4. **FPS** — default 30, supported: 24, 30, 60.
+5. **Scenes** — list of scenes with approximate timing and copy/visual description.
+6. **Music** — yes/no. If yes, source path or royalty-free requirement.
+7. **Brand logo** — optional path to PNG/SVG for overlay.
 
-## Inputs (gather before generating)
-
-1. **Topic / thesis** — one sentence describing what the video communicates.
-2. **Duration** — in seconds. Default: 15s. Max: 60s (longer renders risk timeouts in agent context).
-3. **Aspect ratio** — 16:9 (1920×1080, default), 9:16 (1080×1920), or 1:1 (1080×1080).
-4. **Scenes** — 2–5 scene descriptions, each with:
-   - On-screen text (exact strings).
-   - Visual style (flat shapes, charts, code, icons, kinetic type).
-   - Motion direction (slide, scale, fade, spring, typewriter).
-5. **Color palette** — 2–4 hex values. If not specified, use the JC dark theme: `#0a0a1a` (bg), `#ffffff` (text), `#4a90c2` (primary accent), `#e97a2c` (secondary accent).
-6. **Music** — yes/no. If yes, loop a royalty-free track from `/Users/lucamattei/remotion-jc/assets/audio/` or generate silence. Default: no music.
-7. **Brand logo** — path or URL. Placed bottom-right or top-left at 24–48px height with 32px margin.
-
-If inputs 1–3 are missing, ask once. Never invent durations, topics, or copy.
-
-## Base composition template
-
-Every composition file follows this skeleton. The agent writes the scene components and registers them with `registerRoot`.
-
-```tsx
-import React from 'react';
-import {
-  Composition, useCurrentFrame, useVideoConfig,
-  interpolate, spring, AbsoluteFill, Sequence,
-  registerRoot,
-} from 'remotion';
-
-// ── Scene components go here ──
-
-const Root: React.FC = () => {
-  return (
-    <>
-      <Composition
-        id="<slug>"
-        component={MainComposition}
-        durationInFrames={<totalFrames>}
-        fps={30}
-        width={<width>}
-        height={<height>}
-      />
-    </>
-  );
-};
-
-registerRoot(Root);
-```
-
-**Available imports from `remotion`:** `useCurrentFrame`, `useVideoConfig`, `interpolate`, `spring`, `AbsoluteFill`, `Sequence`, `Series`, `Img`, `Audio`, `OffthreadVideo`, `Easing`, `Loop`, `MeasureSpring`, `random`.
-
-**Style notes:**
-- All styles are inline React CSS objects. No CSS files, no Tailwind.
-- Fonts: system sans-serif stack (`-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`). Monospace for code: `'SF Mono', 'Fira Code', monospace`.
-- No external font loading — system fonts only for render speed.
-- `AbsoluteFill` is the default container: `position: absolute, top/left/right/bottom: 0`.
+If any of points 1–5 are missing, ask once. Never invent content.
 
 ## Workflow
 
-### Step 1 — Write the composition
+### Step 1 — Write the React/TSX composition
 
-Write a single TSX file at `src/compositions/<slug>.tsx` inside the Remotion
-project. The file must:
-- Define 2–5 scene components using Remotion hooks.
-- Sequence them with `<Sequence from={…} durationInFrames={…}>`.
-- Export a `<Composition>` via `registerRoot`.
-- Use only inline styles and the imports listed above.
+Create a new composition file at `/Users/lucamattei/remotion-jc/src/<slug>.tsx`.
 
-Keep the file under 150 lines. Remotion renders frame-by-frame — heavy per-frame
-computation or large data structures slow things down. Prefer `spring()` over
-raw `interpolate()` for natural motion.
+Every composition follows this template:
 
-### Step 2 — Render the video
+```tsx
+import React from "react";
+import { AbsoluteFill, useCurrentFrame, interpolate, spring, useVideoConfig } from "remotion";
 
-```bash
-export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"
-cd /Users/lucamattei/remotion-jc
-mkdir -p output
-npx remotion render src/compositions/<slug>.tsx <slug> output/<slug>.mp4
+export const <PascalCaseName>: React.FC = () => {
+  const frame = useCurrentFrame();
+  // Animation logic using frame, spring(), interpolate()
+  return <AbsoluteFill style={{ /* scene */ }}>{/* elements */}</AbsoluteFill>;
+};
 ```
 
-Render time estimator: ~50 fps on M4 Max for 1080p. A 15-second (450-frame)
-video takes ~9 seconds. A 60-second (1800-frame) video takes ~36 seconds.
+**Key animation primitives:**
+- `useCurrentFrame()` — returns current frame number (0..durationInFrames-1).
+- `spring({ frame, fps, config: { damping, mass } })` — spring-based animation (0→1).
+- `interpolate(frame, [inStart, inEnd], [outStart, outEnd], { extrapolateRight: "clamp" })` — linear interpolation.
+- `AbsoluteFill` — full-canvas positioned div.
 
-Add `--concurrency=16` to push harder on the GPU for longer renders.
+**Composition rules:**
+- Use `AbsoluteFill` or absolute positioning. No Flexbox layouts within AbsoluteFill for cross-scene consistency.
+- Keep text elements under 25 words. Use `fontFamily: "system-ui, sans-serif"` for cross-platform rendering.
+- Colors: choose 3–5 hex values. Use CSS `backgroundColor` and `color`, not inline classes.
+- For scene transitions: check frame ranges and render conditionally.
 
-If rendering fails with a bundling error, check:
-- `registerRoot` is called at the bottom of the file.
-- `<Composition>` is inside the `Root` component, not at module scope.
-- All imports are from `'remotion'` (not `'react'` for hooks — though `useState`/`useEffect` from React are fine).
+### Step 2 — Register the composition
 
-### Step 3 — Verify output
+Edit `/Users/lucamattei/remotion-jc/src/Root.tsx` — add the new Composition entry inside the return statement:
 
-```bash
-ls -lh output/<slug>.mp4
+```tsx
+<Composition
+  id="<slug>"
+  component={<PascalCaseName />}
+  durationInFrames={<fps * duration>}
+  fps={<fps>}
+  width={<width>}
+  height={<height>}
+/>
 ```
 
-File size for 15s 1080p h264 at CRF 18: ~800 KB – 2 MB depending on motion
-complexity. If the file is under 10 KB, the render likely failed silently —
-re-check the composition for runtime errors.
+### Step 3 — Render
+
+```bash
+cd /Users/lucamattei/remotion-jc && \
+  source ~/.nvm/nvm.sh && \
+  npx remotion render src/index.ts <slug> <slug>.mp4
+```
+
+**Rendering notes:**
+- First render bundles (slower). Subsequent renders use cache.
+- M4 Max renders ~90 frames/sec at 1080p30 with 8x concurrency.
+- Output is H.264 MP4 in the `remotion-jc/` directory.
 
 ### Step 4 — Deliver
 
-1. **Upload to WebDAV** if `WEBDAV_URL` and `WEBDAV_CREDS` are in the instance `.env`:
-   ```
-   curl -T output/<slug>.mp4 \
-     -u "$WEBDAV_CREDS" \
-     "$WEBDAV_URL/<instance>/videos/<slug>.mp4"
-   ```
-   Return the URL: `https://dav.omnisage.org/<instance>/videos/<slug>.mp4`
+1. The rendered MP4 is at `/Users/lucamattei/remotion-jc/<slug>.mp4`.
+2. Upload to WebDAV at `https://dav.omnisage.org/<instance>/videos/<slug>.mp4` if WebDAV is configured for the instance.
+3. Deliver via Telegram `sendDocument` if file is <50MB (most renders will be).
+4. Provide one-line summary caption: "[Topic] — [duration]s [aspect] video rendered on M4 Max GPU."
 
-2. **Deliver via Telegram** using the `sendDocument` tool if filesize < 50 MB.
-   Caption: one-line summary of the video (topic + duration).
-   If > 50 MB, deliver the WebDAV URL only.
+## Quality bar
+- Text must be legible at native resolution. Minimum font size: 16px at 1080p.
+- Animations must complete before scene end. No hung springs.
+- Black/dark theme preferred for JC ecosystem. Light theme for presentations.
+- Max 4 scenes for ≤30s. Max 6 scenes for ≤60s.
+- No text-spilling off canvas bounds.
 
-3. **If neither WebDAV nor Telegram is available**, return the local path:
-   `/Users/lucamattei/remotion-jc/output/<slug>.mp4`.
-
-## Quality bar (hard rules)
-
-- Motion must be smooth — no stutter, no frame drops. Remotion renders
-  server-side so this is about correct easing, not hardware.
-- All text must be legible at playback speed. Minimum font size: 18px for
-  1080p, 24px for 720p (9:16 shorts).
-- No placeholder text. Every string must match the user's input exactly.
-- No fake brand marks, no watermarks, no "Made with Remotion" badges.
-- Aspect ratio must match the user's request. Never render 16:9 when they
-  asked for 9:16.
-- FPS locked at 30. Higher frame rates double render time with diminishing
-  returns for motion graphics.
+## Performance notes
+- 15s 1080p30 renders in ~5s. 30s renders in ~9s. 60s renders in ~18s.
+- 4K renders: approximately 4× slower.
+- 60fps renders: approximately 2× slower.
+- Cost: $0 (local GPU, no cloud billing).
 
 ## Guardrails
-- Never render a video with unconfirmed copy. If the user says "something like…",
-  ask for exact text before rendering.
-- Never include real client names, deal codes, named individuals, or confidential
-  figures unless the user explicitly authorized that exact string.
-- Save compositions only under `src/compositions/`. Videos only under `output/`.
-- Composition files are disposable — they can be deleted after successful delivery.
-  The `output/` directory accumulates; clean it periodically.
-- If a render takes longer than 90 seconds, it may time out in the agent context.
-  For long renders (60s+), warn the user and offer to run it asynchronously.
+- Never include real client names, deal codes, or confidential data unless explicitly authorized.
+- The `remotion-jc/` scratch directory should NOT be committed to the JC repo.
+- Output MP4s live in `remotion-jc/`. Move delivered files to permanent storage; clean up temp renders.
+- Do NOT install or reference `@remotion/lambda` — local GPU only. No AWS, no S3, no Lambda.
+
+## Failure modes
+- **Bundle error on first render** — run `npx remotion bundle src/index.ts` first to validate.
+- **Memory pressure** — reduce `--concurrency` flag (default is auto / CPU count).
+- **Font rendering issues** — stick to `system-ui`, `-apple-system`, or `sans-serif`; avoid webfont `@import`.
+- **Audio sync** — if adding music, ensure audio file is same sample rate as video (default 48kHz for FFmpeg).
