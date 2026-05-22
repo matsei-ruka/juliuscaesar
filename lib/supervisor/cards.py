@@ -190,20 +190,20 @@ def _format_elapsed(seconds: float) -> str:
 
 
 def _minute_bar(seconds: float) -> str:
-    """Colored square per elapsed minute + "(N min)" text.
+    """Colored square per elapsed minute + "(N min elapsed)" text.
 
     Colors cycle every 3 minutes through {blue, green, yellow, orange, red,
-    purple, black} for visual chunking. Output: "🟦🟦🟦🟩🟩🟩 (6 min)".
+    purple, black} for visual chunking. Output: "🟦🟦🟦🟩🟩🟩 (6 min elapsed)".
     Wraps back to blue after black (21 min).
     """
     minutes = max(0, int(seconds)) // 60
     if minutes == 0:
-        return "(0 min)"
+        return "(0 min elapsed)"
     squares = "".join(
         _MINUTE_COLORS[(i // _MINUTES_PER_COLOR) % len(_MINUTE_COLORS)]
         for i in range(minutes)
     )
-    return f"{squares} ({minutes} min)"
+    return f"{squares} ({minutes} min elapsed)"
 
 
 def _truncate(text: str, max_chars: int) -> str:

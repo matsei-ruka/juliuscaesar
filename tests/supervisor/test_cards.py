@@ -49,14 +49,14 @@ def test_card_no_phase_or_activity_lines():
 
 
 def test_card_elapsed_minute_bar_zero():
-    """Below 1 min: just '(0 min)' text, no squares."""
+    """Below 1 min: just '(0 min elapsed)' text, no squares."""
     card = render_card(
         title="x",
         phase=_phase(),
         elapsed_seconds=10.0,
         language="en",
     )
-    assert "(0 min)" in card.text
+    assert "(0 min elapsed)" in card.text
 
 
 def test_card_elapsed_label_italian_same_format():
@@ -67,7 +67,7 @@ def test_card_elapsed_label_italian_same_format():
         elapsed_seconds=10.0,
         language="it",
     )
-    assert "(0 min)" in card.text
+    assert "(0 min elapsed)" in card.text
     assert "Tempo:" not in card.text
 
 
@@ -102,7 +102,7 @@ def test_elapsed_minute_bar_with_squares():
         elapsed_seconds=130.0,
         language="en",
     )
-    assert "🟦🟦 (2 min)" in card.text
+    assert "🟦🟦 (2 min elapsed)" in card.text
 
 
 def test_elapsed_minute_bar_color_cycle():
@@ -113,7 +113,7 @@ def test_elapsed_minute_bar_color_cycle():
         elapsed_seconds=21 * 60.0,
         language="en",
     )
-    expected = "🟦🟦🟦🟩🟩🟩🟨🟨🟨🟧🟧🟧🟥🟥🟥🟪🟪🟪⬛⬛⬛ (21 min)"
+    expected = "🟦🟦🟦🟩🟩🟩🟨🟨🟨🟧🟧🟧🟥🟥🟥🟪🟪🟪⬛⬛⬛ (21 min elapsed)"
     assert expected in card.text
 
 
@@ -125,7 +125,7 @@ def test_elapsed_minute_bar_wraps_after_full_cycle():
         elapsed_seconds=22 * 60.0,
         language="en",
     )
-    assert "⬛🟦 (22 min)" in card.text
+    assert "⬛🟦 (22 min elapsed)" in card.text
 
 
 def test_title_truncated_to_60_chars():
@@ -160,7 +160,7 @@ def test_unknown_language_falls_back_to_english():
         language="de",
     )
     assert card.language == "en"
-    assert "(0 min)" in card.text
+    assert "(0 min elapsed)" in card.text
 
 
 def test_final_card_has_check_emoji():
@@ -173,10 +173,10 @@ def test_final_card_has_check_emoji():
 def test_final_card_italian():
     card = render_final_card(title="audit done", elapsed_seconds=180.0, language="it")
     assert "completato" in card.text
-    assert "🟦🟦🟦 (3 min)" in card.text
+    assert "🟦🟦🟦 (3 min elapsed)" in card.text
 
 
 def test_final_card_english():
     card = render_final_card(title="audit done", elapsed_seconds=180.0, language="en")
     assert "done" in card.text
-    assert "🟦🟦🟦 (3 min)" in card.text
+    assert "🟦🟦🟦 (3 min elapsed)" in card.text
