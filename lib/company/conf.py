@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -131,18 +132,73 @@ def instance_name(instance_dir: Path) -> str:
 
 
 def framework_version() -> str:
-    """Read JC version from the framework's pyproject.toml."""
+    """Framework identifier reported to the-company.
+
+    Composed as ``<pyproject_version>[+<git_sha>][-dirty]`` so two
+    instances on the same release tag but different commits are
+    distinguishable. Examples:
+
+    - ``2026.05.17.09`` — no git repo (clean install from tarball)
+    - ``2026.05.17.09+bd8548f`` — checkout at that SHA, clean tree
+    - ``2026.05.17.09+bd8548f-dirty`` — uncommitted local changes
+
+    Falls back to ``0.0.0`` if the pyproject can't be read at all.
+    Failure to invoke git is silent: the SHA suffix is best-effort,
+    not a hard requirement.
+    """
     framework_root = Path(__file__).resolve().parents[2]
-    pyproject = framework_root / "pyproject.toml"
+    base = _read_pyproject_version(framework_root / "pyproject.toml") or "0.0.0"
+    sha = _git_short_sha(framework_root)
+    if not sha:
+        return base
+    dirty = "-dirty" if _git_is_dirty(framework_root) else ""
+    return f"{base}+{sha}{dirty}"
+
+
+def _read_pyproject_version(pyproject: Path) -> str | None:
     try:
         for line in pyproject.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("version") and "=" in line:
                 value = line.split("=", 1)[1].strip()
-                return value.strip('"').strip("'")
+                return value.strip('"').strip("'") or None
     except (FileNotFoundError, OSError):
         pass
-    return "0.0.0"
+    return None
+
+
+def _git_short_sha(framework_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=framework_root,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _git_is_dirty(framework_root: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=framework_root,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return bool(result.stdout.strip())
 
 
 def write_env_keys(instance_dir: Path, *, set_keys: dict[str, str], unset_keys: tuple[str, ...] = ()) -> None:

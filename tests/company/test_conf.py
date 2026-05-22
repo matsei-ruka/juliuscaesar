@@ -121,6 +121,40 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(company_conf.instance_name(nested), "myagent")
 
 
+class FrameworkVersionTests(unittest.TestCase):
+    """`framework_version()` composes pyproject + git SHA + dirty flag."""
+
+    def test_returns_pyproject_version_in_real_repo(self):
+        # In CI / local dev we're inside a git checkout. The string
+        # should at minimum carry the pyproject version, and very
+        # likely a `+sha` suffix too.
+        out = company_conf.framework_version()
+        # base version is dotted "YYYY.MM.DD.N" or similar; the
+        # invariant we can assert: not empty, not the literal fallback.
+        self.assertTrue(out, "framework_version() returned empty string")
+        self.assertNotEqual(out, "0.0.0")
+
+    def test_read_pyproject_version_parses_quoted_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "pyproject.toml"
+            p.write_text('[project]\nname = "x"\nversion = "1.2.3"\n', encoding="utf-8")
+            self.assertEqual(
+                company_conf._read_pyproject_version(p),
+                "1.2.3",
+            )
+
+    def test_read_pyproject_version_returns_none_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "pyproject.toml"  # not created
+            self.assertIsNone(company_conf._read_pyproject_version(p))
+
+    def test_git_helpers_return_safely_outside_git(self):
+        # tempdir is not a git repo → both helpers must not raise.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(company_conf._git_short_sha(Path(tmp)), "")
+            self.assertFalse(company_conf._git_is_dirty(Path(tmp)))
+
+
 class WriteEnvTests(unittest.TestCase):
     def test_write_env_keys_creates_file_with_safe_perms(self):
         with tempfile.TemporaryDirectory() as tmp:
