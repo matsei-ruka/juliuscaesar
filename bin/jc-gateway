@@ -145,10 +145,25 @@ def remove_stale_pid(instance_dir: Path) -> None:
 RELOAD_REQUESTED = False
 
 
-def install_signal_handlers(*, on_reload=None) -> None:
-    def _handle(_signum: int, _frame: object) -> None:
+def install_signal_handlers(*, instance_dir: Path | None = None, on_reload=None) -> None:
+    def _handle(signum: int, _frame: object) -> None:
         global RUNNING
+        if not RUNNING:
+            # Second signal during drain — operator wants us to stop
+            # waiting. Honour by escalating to immediate exit; systemd
+            # will SIGKILL us after its own timeout if we still wedge.
+            sys.stderr.write("second signal during drain, exiting now\n")
+            sys.stderr.flush()
+            os._exit(1)
         RUNNING = False
+        name = "SIGTERM" if signum == signal.SIGTERM else ("SIGINT" if signum == signal.SIGINT else f"signal {signum}")
+        # Log the drain transition so operators see it in the gateway log.
+        # Falls through silently if instance_dir is unknown (e.g. unit test).
+        if instance_dir is not None:
+            try:
+                log_line(instance_dir, f"received {name} — draining; in-flight dispatch will complete, no new events will be picked up")
+            except Exception:  # noqa: BLE001
+                pass
 
     def _hup(_signum: int, _frame: object) -> None:
         global RELOAD_REQUESTED
@@ -205,7 +220,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         raise SystemExit(f"gateway already running (pid {existing})")
     remove_stale_pid(instance)
     pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
-    install_signal_handlers()
+    install_signal_handlers(instance_dir=instance)
     log_line(instance, f"gateway daemon started pid={os.getpid()}")
     runtime = GatewayRuntime(instance, log_path=log_path(instance), stop_requested=lambda: not RUNNING)
     runtime.start_channels()
@@ -603,14 +618,20 @@ def build_parser() -> argparse.ArgumentParser:
     pstart.add_argument("--interval-seconds", type=float, default=1.0)
     pstart.set_defaults(func=cmd_start)
 
+    # 600s allows the in-flight `dispatch_once` to drain — the loop only
+    # rechecks `RUNNING` between ticks, so SIGTERM mid-dispatch waits
+    # for the adapter to return. With the old 10s default we were
+    # SIGKILLing live adapters routinely, which left worker rows stuck
+    # `running` on the-company dashboard (no `worker.finished` ever
+    # emitted) and threw away whatever the model was producing.
     pstop = sub.add_parser("stop", help="Stop the gateway daemon")
-    pstop.add_argument("--timeout-seconds", type=float, default=10.0)
+    pstop.add_argument("--timeout-seconds", type=float, default=600.0)
     pstop.add_argument("--kill", action="store_true", help="SIGKILL if SIGTERM timeout expires")
     pstop.set_defaults(func=cmd_stop)
 
     prestart = sub.add_parser("restart", help="Restart the gateway daemon")
     prestart.add_argument("--interval-seconds", type=float, default=5.0)
-    prestart.add_argument("--timeout-seconds", type=float, default=10.0)
+    prestart.add_argument("--timeout-seconds", type=float, default=600.0)
     prestart.add_argument("--kill", action="store_true", help="SIGKILL if SIGTERM timeout expires")
     prestart.set_defaults(func=cmd_restart)
 
