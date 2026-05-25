@@ -142,6 +142,69 @@ def remove_stale_pid(instance_dir: Path) -> None:
         pid_path(instance_dir).unlink(missing_ok=True)
 
 
+
+def find_gateway_pids_for_instance(instance_dir: Path) -> list[int]:
+    """Scan /proc for every live jc-gateway run process bound to this instance.
+
+    The pidfile only tracks one PID; orphans from prior restart cycles or
+    competing watchdogs can keep running undetected. This walks /proc to
+    surface every match so the caller can pick a canonical and kill the rest.
+    """
+    pids: list[int] = []
+    target = str(instance_dir.resolve())
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    self_pid = os.getpid()
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == self_pid:
+            continue
+        cmdline = proc_cmdline(pid)
+        if not cmdline:
+            continue
+        if "jc-gateway" not in cmdline:
+            continue
+        if " run" not in f" {cmdline} ":
+            continue
+        if target not in cmdline:
+            continue
+        pids.append(pid)
+    return pids
+
+
+def reap_orphan_gateways(instance_dir: Path, keep_pid: int | None) -> list[int]:
+    """SIGTERM (then SIGKILL) every jc-gateway for this instance except keep_pid."""
+    reaped: list[int] = []
+    orphans = [p for p in find_gateway_pids_for_instance(instance_dir) if p != keep_pid]
+    for pid in orphans:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            log_line(instance_dir, f"orphan gateway SIGTERM pid={pid}")
+        except OSError as exc:
+            log_line(instance_dir, f"orphan gateway SIGTERM failed pid={pid} err={exc}")
+            continue
+        reaped.append(pid)
+    if not reaped:
+        return reaped
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not any(pid_alive(p) for p in reaped):
+            break
+        time.sleep(0.2)
+    for pid in reaped:
+        if pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log_line(instance_dir, f"orphan gateway SIGKILL pid={pid}")
+            except OSError:
+                pass
+    return reaped
+
+
 RELOAD_REQUESTED = False
 
 
@@ -248,8 +311,15 @@ def cmd_start(args: argparse.Namespace) -> int:
     conn = queue.connect(instance)
     conn.close()
     existing = read_pid(instance)
-    if pid_is_gateway_for_instance(existing, instance):
-        print(f"gateway already running (pid {existing})")
+    canonical = existing if pid_is_gateway_for_instance(existing, instance) else None
+    # Always sweep /proc for orphan jc-gateway processes bound to this instance
+    # (prior restart cycles, foreign pidfiles, or detached watchdog spawns can
+    # leave duplicates that compete for the same Telegram bot → 409 Conflict).
+    reaped = reap_orphan_gateways(instance, keep_pid=canonical)
+    for pid in reaped:
+        print(f"killed orphan gateway (pid {pid})")
+    if canonical is not None:
+        print(f"gateway already running (pid {canonical})")
         return 0
     if pid_alive(existing):
         print(f"removing foreign gateway pidfile (pid {existing})")

@@ -173,13 +173,40 @@ PYEOF
         log_file="$log_dir/supervisor-watch.log"
         mkdir -p "$pid_dir" "$log_dir"
 
+        existing=""
         if [[ -s "$pid_file" ]]; then
             existing="$(cat "$pid_file" 2>/dev/null || true)"
-            if [[ -n "$existing" ]] && kill -0 "$existing" 2>/dev/null; then
-                echo "jc-supervisor already running (pid $existing)"
-                exit 0
+            if [[ -n "$existing" ]] && ! kill -0 "$existing" 2>/dev/null; then
+                # stale pidfile — clear so the orphan sweep below doesn't keep it
+                existing=""
             fi
-            # stale pidfile — fall through and restart
+        fi
+
+        # Sweep orphan watcher loops bound to this instance. Watcher cmdline is
+        # "python3 - <instance_dir> <interval>" (script-from-stdin); detached
+        # spawns from prior restarts can outlive the pidfile and pile up.
+        # Match the exact instance path to avoid clipping siblings.
+        if command -v pgrep >/dev/null 2>&1; then
+            while read -r orphan_pid; do
+                [[ -z "$orphan_pid" ]] && continue
+                [[ "$orphan_pid" == "$existing" ]] && continue
+                [[ "$orphan_pid" == "$$" ]] && continue
+                kill -TERM "$orphan_pid" 2>/dev/null && \
+                    echo "killed orphan supervisor watcher (pid $orphan_pid)" || true
+            done < <(pgrep -f "python3 - $INSTANCE_DIR " 2>/dev/null)
+            # Give SIGTERM a moment, then SIGKILL stragglers
+            sleep 1
+            while read -r orphan_pid; do
+                [[ -z "$orphan_pid" ]] && continue
+                [[ "$orphan_pid" == "$existing" ]] && continue
+                [[ "$orphan_pid" == "$$" ]] && continue
+                kill -0 "$orphan_pid" 2>/dev/null && kill -KILL "$orphan_pid" 2>/dev/null || true
+            done < <(pgrep -f "python3 - $INSTANCE_DIR " 2>/dev/null)
+        fi
+
+        if [[ -n "$existing" ]] && kill -0 "$existing" 2>/dev/null; then
+            echo "jc-supervisor already running (pid $existing)"
+            exit 0
         fi
 
         self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
