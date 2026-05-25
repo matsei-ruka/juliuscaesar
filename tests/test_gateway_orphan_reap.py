@@ -232,11 +232,18 @@ def test_cmd_start_keeps_canonical_and_reaps_only_extras(monkeypatch, tmp_path):
     monkeypatch.setattr(gw.queue, "connect", lambda _instance: FakeConn())
     monkeypatch.setattr(gw.os, "listdir", lambda path: [str(p) for p in table] if path == "/proc" else [])
     monkeypatch.setattr(gw, "proc_cmdline", lambda pid: table.get(pid, ""))
-    monkeypatch.setattr(gw, "pid_alive", lambda pid: pid in table)
+    alive_pids = set(table.keys())
+    monkeypatch.setattr(gw, "pid_alive", lambda pid: pid in alive_pids)
     monkeypatch.setattr(gw, "proc_cwd", lambda _pid: instance.resolve())
 
     killed: list[tuple[int, int]] = []
-    monkeypatch.setattr(gw.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    def fake_kill(pid, sig):
+        killed.append((pid, sig))
+        if sig == signal.SIGTERM:
+            alive_pids.discard(pid)
+
+    monkeypatch.setattr(gw.os, "kill", fake_kill)
     monkeypatch.setattr(gw.time, "sleep", lambda _s: None)
     monkeypatch.setattr(gw.time, "monotonic", lambda: 0.0)
 
