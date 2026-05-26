@@ -26,6 +26,7 @@ from .base import Brain, newest_jsonl_stem, parse_iso
 class ClaudeBrain(Brain):
     name = "claude"
     needs_l1_preamble = False
+    goal_delivery = "system_prompt"  # JC_GOAL → claude.sh --append-system-prompt
 
     def capture_session_id(self, started_at: str) -> str | None:
         t0 = parse_iso(started_at)

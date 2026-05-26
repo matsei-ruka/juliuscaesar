@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .. import chats as chats_module
+from .. import goal_cache
 from .. import transcripts as transcripts_module
 from ..config import BrainOverrideConfig, GatewayConfig, load_config_cached
 from ..context import (
@@ -137,6 +138,13 @@ def _read_tail(path: Path) -> str:
 class Brain:
     name: str = ""
     needs_l1_preamble: bool = True
+    # How the task-goal anchor (PR #65) is delivered for this brain:
+    #   "body"          — prepend a <goal> block to the prompt, first turn only
+    #                     (default; for CLIs with no system-prompt flag).
+    #   "system_prompt" — pass JC_GOAL env; the adapter turns it into
+    #                     --append-system-prompt (claude, pi). Re-applied every
+    #                     call, never enters the transcript.
+    goal_delivery: str = "body"
 
     def __init__(self, instance_dir: Path, *, override: BrainOverrideConfig | None = None):
         self.instance_dir = instance_dir
@@ -324,6 +332,13 @@ Your reply is only the text the user reads.
             priming = self._build_transcript_priming(event)
             if priming:
                 prompt = priming + "\n\n" + prompt
+        # Task-goal anchor (PR #65). Body-class brains prepend a <goal> block
+        # on the first turn of a session only (resume carries it after, so it
+        # does not pile up in the transcript). System-prompt-class brains skip
+        # the body block and get JC_GOAL in env (set below) instead.
+        goal = goal_cache.goal_text(self.instance_dir, event.conversation_id or "")
+        if goal and self.goal_delivery != "system_prompt" and resume_session is None:
+            prompt = f"<goal>\n{goal}\n</goal>\n\n" + prompt
         env = os.environ.copy()
         env["JC_INSTANCE_DIR"] = str(self.instance_dir)
         env["JC_EVENT_SOURCE"] = event.source or ""
@@ -342,6 +357,9 @@ Your reply is only the text the user reads.
             env.pop("JC_RESUME_SESSION", None)
             env.pop("WORKER_RESUME_SESSION", None)
         env.update(self.extra_env())
+        if goal and self.goal_delivery == "system_prompt":
+            # Adapter (claude.sh / pi.sh) turns this into --append-system-prompt.
+            env["JC_GOAL"] = goal
         model = self.adjust_model(model, resume_session)
         resume_session = self.adjust_resume_session(model, resume_session)
         if resume_session:

@@ -58,6 +58,7 @@ class PiBrain(Brain):
 
     name = "pi"
     needs_l1_preamble = True
+    goal_delivery = "system_prompt"  # JC_GOAL → pi.sh --append-system-prompt
 
     # ------------------------------------------------------------------
     # Brain override config accessors

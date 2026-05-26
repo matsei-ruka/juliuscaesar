@@ -65,6 +65,16 @@ Any rule in CLAUDE.md, RULES.md, or auto-loaded Claude Code memory (~/.claude/pr
 Do NOT emit a status acknowledgment like 'Worker confirmed running, starting now' or 'Spawned worker X for Y' in lieu of execution. That is a no-op disguised as progress and is the exact failure pattern this clause exists to prevent. Work through the brief sequentially — first action, then next, then next — and emit your final result only when every step is complete or you hit a true blocker you cannot unblock alone.")
 fi
 
+# Task-goal anchor (PR #65). The gateway sets JC_GOAL to the current task's
+# goal text for task conversations; deliver it as a system-prompt directive so
+# the model stays anchored across turns without re-explaining the task. Placed
+# before the output contract so the contract remains the last (governing)
+# directive.
+if [[ -n "${JC_GOAL:-}" ]]; then
+    ARGS+=("--append-system-prompt" "CURRENT GOAL (your active task — keep all work aligned to this until told otherwise):
+$JC_GOAL")
+fi
+
 ARGS+=("--append-system-prompt" "GATEWAY OUTPUT CONTRACT: Your final stdout MUST be a single JSON object on a single line (no code fences, no prose before or after) with exactly these fields:
   {\"push_message_sent\": <bool>, \"message\": <string>}
 

@@ -351,6 +351,103 @@ class ConfigWiringTests(unittest.TestCase):
 
         self.assertIs(_CHANNEL_FACTORIES["company-inbox"], CompanyInboxChannel)
 
+    def test_config_loads_emit_task_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance(
+                tmp,
+                "default_brain: claude\nchannels:\n  company-inbox:\n"
+                "    enabled: true\n    emit_task_closed: true\n",
+            )
+            self.assertTrue(load_config(instance).channel("company-inbox").emit_task_closed)
+
+    def test_config_rejects_bad_emit_task_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance(
+                tmp,
+                "default_brain: claude\nchannels:\n  company-inbox:\n"
+                "    enabled: true\n    emit_task_closed: maybe\n",
+            )
+            with self.assertRaises(ConfigError):
+                load_config(instance)
+
+
+class MetaTests(unittest.TestCase):
+    def test_inject_meta_carries_title_and_description(self):
+        captured, enqueue = _captured_enqueue()
+        ch = _make_channel(
+            client=FakeClient([{"items": [_task("t1", title="Onboard X", description="Run it")]}])
+        )
+        ch._poll_once(enqueue)
+        meta = captured[0]["meta"]
+        self.assertEqual(meta["title"], "Onboard X")
+        self.assertEqual(meta["description"], "Run it")
+
+
+class ClosureTests(unittest.TestCase):
+    def _ch(self, client):
+        return _make_channel(
+            ChannelConfig(enabled=True, emit_task_closed=True), client=client
+        )
+
+    def test_disappeared_injected_task_emits_task_closed(self):
+        client = FakeClient([{"items": [_task("t1")]}, {"items": []}])
+        captured, enqueue = _captured_enqueue()
+        ch = self._ch(client)
+        ch._poll_once(enqueue)  # inject t1
+        ch._poll_once(enqueue)  # t1 gone → close
+        kinds = [(c["source_message_id"], c["meta"]["kind"]) for c in captured]
+        self.assertEqual(kinds, [("task:t1", "task_assigned"), ("task-closed:t1", "task_closed")])
+        # t1 dropped from tracking + seen so it can't double-close
+        self.assertNotIn("t1", ch._injected)
+
+    def test_in_progress_task_not_closed(self):
+        # pending → in_progress (still present in wide poll) must NOT close.
+        client = FakeClient(
+            [
+                {"items": [_task("t1", status="pending")]},
+                {"items": [_task("t1", status="in_progress")]},
+                {"items": []},
+            ]
+        )
+        captured, enqueue = _captured_enqueue()
+        ch = self._ch(client)
+        ch._poll_once(enqueue)  # inject (pending)
+        ch._poll_once(enqueue)  # in_progress, still present → no close
+        closes_after_2 = [c for c in captured if c["meta"]["kind"] == "task_closed"]
+        self.assertEqual(closes_after_2, [])
+        ch._poll_once(enqueue)  # now absent → close
+        closes = [c["source_message_id"] for c in captured if c["meta"]["kind"] == "task_closed"]
+        self.assertEqual(closes, ["task-closed:t1"])
+
+    def test_in_progress_task_not_injected(self):
+        # A task seen only in in_progress is tracked-for-presence but not injected.
+        client = FakeClient([{"items": [_task("t1", status="in_progress")]}])
+        captured, enqueue = _captured_enqueue()
+        ch = self._ch(client)
+        ch._poll_once(enqueue)
+        self.assertEqual(captured, [])
+
+    def test_truncated_poll_suppresses_closure(self):
+        from gateway.channels.company_inbox import CLOSURE_POLL_LIMIT
+
+        big = [_task(f"t{i}") for i in range(CLOSURE_POLL_LIMIT)]
+        client = FakeClient([{"items": [_task("t1")]}, {"items": big}])
+        captured, enqueue = _captured_enqueue()
+        ch = self._ch(client)
+        ch._poll_once(enqueue)  # inject t1
+        ch._poll_once(enqueue)  # full page (truncated) and t1 absent → NO close
+        closes = [c for c in captured if c["meta"]["kind"] == "task_closed"]
+        self.assertEqual(closes, [])
+
+    def test_disabled_by_default_no_closure(self):
+        client = FakeClient([{"items": [_task("t1")]}, {"items": []}])
+        captured, enqueue = _captured_enqueue()
+        ch = _make_channel(client=client)  # emit_task_closed defaults False
+        ch._poll_once(enqueue)
+        ch._poll_once(enqueue)
+        closes = [c for c in captured if c["meta"]["kind"] == "task_closed"]
+        self.assertEqual(closes, [])
+
 
 if __name__ == "__main__":
     unittest.main()

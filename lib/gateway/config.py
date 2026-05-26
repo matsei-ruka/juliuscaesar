@@ -62,6 +62,10 @@ class ChannelConfig:
     # company-inbox only: which task statuses to pull, and the per-tick cap.
     inbox_status_filter: tuple[str, ...] = ()
     max_new_per_tick: int | None = None
+    # company-inbox only: emit company.task_closed when an injected task leaves
+    # the active set (opt-in; needs the backend to honour in_progress/blocked in
+    # the inbox query). Off → goal clear relies on the goal_cache TTL floor.
+    emit_task_closed: bool = False
 
 
 @dataclass(frozen=True)
@@ -831,6 +835,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 # company-inbox channel.
                 "inbox_status_filter",
                 "max_new_per_tick",
+                "emit_task_closed",
             }
             for raw_key, raw_value in channels_raw.items():
                 normalized = _normalize_channel_key(str(raw_key))
@@ -848,6 +853,10 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                         errors.append(f"channels.{raw_key}.{key}: unknown field")
                 if raw_value.get("enabled") is not None and not isinstance(raw_value["enabled"], bool):
                     errors.append(f"channels.{raw_key}.enabled: must be boolean")
+                if raw_value.get("emit_task_closed") is not None and not isinstance(
+                    raw_value["emit_task_closed"], bool
+                ):
+                    errors.append(f"channels.{raw_key}.emit_task_closed: must be boolean")
                 if raw_value.get("brain") is not None:
                     _validate_brain_spec(errors, f"channels.{raw_key}.brain", raw_value["brain"])
                     if (
@@ -1263,6 +1272,7 @@ def _load_channel(name: str, raw: dict[str, Any], defaults: ChannelConfig) -> Ch
         tts_provider=_opt_str("tts_provider", defaults.tts_provider),
         inbox_status_filter=_tuple_str(raw.get("inbox_status_filter", defaults.inbox_status_filter)),
         max_new_per_tick=_opt_int("max_new_per_tick", defaults.max_new_per_tick),
+        emit_task_closed=bool(raw.get("emit_task_closed", defaults.emit_task_closed)),
     )
 
 

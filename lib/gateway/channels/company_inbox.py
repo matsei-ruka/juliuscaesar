@@ -50,6 +50,12 @@ DEFAULT_STATUS_FILTER = ("pending", "accepted")
 BACKOFF_CAP_SECONDS = 300
 DEGRADED_MULTIPLIER = 4
 WARN_AFTER_CONSECUTIVE_FAILURES = 3
+# When emit_task_closed is on, poll these non-terminal statuses *in addition*
+# to the inject filter, so a previously-injected task disappears from the
+# polled set only when it goes terminal — not merely on a pending→in_progress
+# move. Requires the-company to honour these status values in the inbox query.
+CLOSURE_EXTRA_STATUSES = ("in_progress", "blocked")
+CLOSURE_POLL_LIMIT = 50
 
 
 def _now_iso() -> str:
@@ -72,10 +78,20 @@ class CompanyInboxChannel:
         self.status_filter = tuple(
             getattr(cfg, "inbox_status_filter", ()) or DEFAULT_STATUS_FILTER
         )
+        # Opt-in precise clear signal (§5.3 A). Default off → goal clear relies
+        # on the goal_cache TTL floor (§5.3 B), which needs no backend support.
+        self.emit_task_closed = bool(getattr(cfg, "emit_task_closed", False))
+        # Wider poll set used only for closure detection (superset of inject set).
+        self.active_filter = tuple(
+            dict.fromkeys((*self.status_filter, *CLOSURE_EXTRA_STATUSES))
+        )
 
         # Boot-scoped dedup. Wiped on restart; the queue.db unique index keeps
         # a re-inject a no-op (see module docstring).
         self._seen: set[str] = set()
+        # task_id -> conversation_id for injected (assigned) tasks, used to
+        # detect closure when emit_task_closed is on.
+        self._injected: dict[str, str] = {}
         self._company_cfg: Any = None
         self._client: Any = None
 
@@ -150,27 +166,25 @@ class CompanyInboxChannel:
 
     def _poll_once(self, enqueue: EnqueueFn) -> int:
         agent_id = self._agent_id()
-        result = self._client.get_inbox(
-            agent_id=agent_id,
-            statuses=self.status_filter,
-            limit=self.max_new_per_tick * 2,
-        )
+        # When closure detection is on we poll the wider non-terminal set (so a
+        # task disappears only on going terminal) with a larger limit; otherwise
+        # just the inject filter.
+        statuses = self.active_filter if self.emit_task_closed else self.status_filter
+        limit = CLOSURE_POLL_LIMIT if self.emit_task_closed else self.max_new_per_tick * 2
+        result = self._client.get_inbox(agent_id=agent_id, statuses=statuses, limit=limit)
         items = _extract_items(result)
         # Defensive created_at ASC: the server is asked to order, but a flooded
         # inbox is stretched over ticks (§6) so oldest-first must hold locally.
         items.sort(key=lambda t: str(t.get("created_at") or ""))
 
+        present_ids: set[str] = set()
         injected = 0
         ids: list[str] = []
         for task in items:
-            if injected >= self.max_new_per_tick:
-                break  # Excess deferred to the next tick; not added to _seen.
             task_id = task.get("id") if task.get("id") is not None else task.get("task_id")
             if task_id is None:
                 continue
             task_id = str(task_id)
-            if task_id in self._seen:
-                continue
             owner = task.get("owner_agent_id")
             if owner is not None and str(owner) != str(agent_id):
                 # §8.5 — must never happen (server filters by owner). If a
@@ -180,6 +194,19 @@ class CompanyInboxChannel:
                     f"owner={owner} self={agent_id}; skipping",
                     kind="company_inbox_ownership_mismatch",
                 )
+                continue
+            present_ids.add(task_id)
+            status = str(task.get("status") or "")
+            # Inject only tasks in the inject filter (pending/accepted). Tasks in
+            # the closure-only statuses (in_progress/blocked) are tracked for
+            # presence but not re-injected. A missing status is treated as
+            # injectable (defensive against a backend that omits it).
+            injectable = (not self.status_filter) or status == "" or status in self.status_filter
+            if not injectable:
+                continue
+            if injected >= self.max_new_per_tick:
+                continue  # cap injections; keep scanning so present_ids is complete
+            if task_id in self._seen:
                 continue
             self._inject(enqueue, task, task_id)
             self._seen.add(task_id)
@@ -194,7 +221,44 @@ class CompanyInboxChannel:
                 f"cache_size={len(self._seen)}",
                 kind="company_inbox_tick",
             )
+
+        if self.emit_task_closed:
+            self._detect_closures(enqueue, present_ids, truncated=len(items) >= limit)
+
         return injected
+
+    def _detect_closures(
+        self, enqueue: EnqueueFn, present_ids: set[str], *, truncated: bool
+    ) -> None:
+        """Emit company.task_closed for injected tasks that left the active set.
+
+        Skipped when the poll was truncated: absence could be truncation rather
+        than terminal, and a false close would prematurely clear a goal.
+        """
+        if truncated:
+            return
+        for task_id in [tid for tid in self._injected if tid not in present_ids]:
+            conversation_id = self._injected.pop(task_id, None)
+            self._seen.discard(task_id)
+            if not conversation_id:
+                continue
+            root_id = (
+                conversation_id.split("task-root:", 1)[-1]
+                if conversation_id.startswith("task-root:")
+                else conversation_id
+            )
+            enqueue(
+                source=self.name,
+                source_message_id=f"task-closed:{task_id}",
+                user_id=None,
+                conversation_id=conversation_id,
+                content=f"Task {task_id} closed.",
+                meta={"task_id": task_id, "root_id": root_id, "kind": "task_closed"},
+            )
+            self.log(
+                f"company-inbox task closed task={task_id} conv={conversation_id}",
+                kind="company_inbox_task_closed",
+            )
 
     def _inject(self, enqueue: EnqueueFn, task: dict[str, Any], task_id: str) -> None:
         root_id = task.get("root_id") or task_id
@@ -221,17 +285,23 @@ class CompanyInboxChannel:
             "max_age_secs": task.get("max_age_secs"),
             "payload": task.get("payload"),
             "company_status": task.get("status"),
+            # title/description carried so the goal anchor (PR #65) can format
+            # the goal text from meta without re-parsing content.
+            "title": title,
+            "description": description,
             "kind": "task_assigned",
         }
 
+        conversation_id = f"task-root:{root_id}"
         enqueue(
             source=self.name,
             source_message_id=f"task:{task_id}",
             user_id=user_id,
-            conversation_id=f"task-root:{root_id}",
+            conversation_id=conversation_id,
             content=content,
             meta=meta,
         )
+        self._injected[task_id] = conversation_id
 
     # ── Error handling ───────────────────────────────────────────────────
 
