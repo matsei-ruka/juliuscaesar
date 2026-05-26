@@ -1,6 +1,6 @@
 # Company Inbox Channel — Operating Spec
 
-Status: Design draft, spec-only PR
+Status: Design draft (rev 2 — grounded against codebase), spec-only PR
 Date: 2026-05-26
 Author: Noah
 Repo: `juliuscaesar`
@@ -40,9 +40,11 @@ This is the framework-side fix.
 
 - A new gateway channel named `company-inbox`, configured in
   `ops/gateway.yaml`, parallel to `telegram`, `email`, `jc-events`, `cron`.
-- Periodic HTTP poll (default every 10 s) against
-  `GET /api/agents/{self}/inbox?status=pending`, scoped to the agent's own
-  id resolved via `lib/company/conf.py:instance_id`.
+- Periodic HTTP poll (default every 10 s) against the agent's own inbox
+  endpoint, status filter taken from config (§3). Agent identity and
+  credentials are the *same ones the supervisor reporter already uses* —
+  loaded via `lib/company/conf.py` into a `CompanyConfig`, reused through
+  `CompanyClient` (`lib/company/client.py`). See §3/§7 and Q4.
 - A boot-scoped in-memory cache keyed by `task_id` to dedup the same task
   across consecutive polls.
 - Synthetic event injection into the local `queue.db`, event type
@@ -66,8 +68,10 @@ This is the framework-side fix.
   raise approval). The brain already has the HTTP skill; we do not codify
   the response surface here.
 - **Cross-task affinity** — grouping multiple sub-tasks of the same root
-  into one "session". The parallel-slots classifier handles affinity at
-  dispatch time; this channel just enqueues.
+  into one "session". The gateway's existing parallel-slot relatedness
+  classifier (`lib/gateway/runtime.py`) handles affinity at dispatch time,
+  keyed on `conversation_id`. This channel only has to set `conversation_id`
+  correctly on inject (§5) and enqueue; it implements no routing itself.
 
 ## 3. Configuration
 
@@ -75,7 +79,7 @@ This is the framework-side fix.
 
 ```yaml
 channels:
-  company_inbox:
+  company-inbox:             # hyphen key, matching `jc-events` in registry.py
     enabled: false           # opt-in per-instance; default off
     poll_interval_seconds: 10
     max_new_per_tick: 5      # cap on tasks accepted in a single poll
@@ -84,49 +88,58 @@ channels:
       - accepted             # so the agent can resume after restart
 ```
 
-`ops/the_company.yaml` (already exists for the supervisor reporter) is
-reused for credentials. The channel reads:
-
-- `api_url`
-- `agent_id`
-- `api_key_file`
-
-Same file, same load semantics. If `the_company.yaml` is missing or
-disabled, the channel logs a single startup warning and stays inert.
+Credentials are **not** a separate file. The company endpoint and api_key
+already live in the instance `.env` (`COMPANY_ENDPOINT`, `COMPANY_API_KEY`)
+and are loaded by `lib/company/conf.py` into a `CompanyConfig` — the exact
+object the supervisor reporter (`lib/company/reporter.py`) uses. The channel
+reuses that config and the shared `CompanyClient` (`lib/company/client.py`).
+Agent identity is whatever `jc company register` enrolled — the same identity
+the reporter publishes under (exact field/path shape: see Q4). If the company
+block is disabled or `.env` lacks `COMPANY_API_KEY`, the channel logs a single
+startup warning and stays inert.
 
 ## 4. Lifecycle
 
 ```
 gateway boot
   → company-inbox channel start (if enabled)
-  → load (api_url, agent_id, api_key) from ops/the_company.yaml
+  → load CompanyConfig (endpoint, agent identity, api_key) via lib/company/conf.py
   → enter poll loop
        every poll_interval_seconds:
-         GET {api_url}/api/agents/{agent_id}/inbox?status=pending,accepted&limit={max_new_per_tick*2}
-         for each task in response.items:
+         GET {endpoint}/api/agents/{self}/inbox
+             ?status={inbox_status_filter csv}
+             &order=created_at         # oldest first; see §6
+             &limit={max_new_per_tick * 2}
+         for each task in response.items (created_at ASC):
            if task.id in seen_cache: continue
            inject event into queue.db (see §5)
            seen_cache.add(task.id)
+           stop after max_new_per_tick injects this tick
          done
   → on shutdown: drain in-flight HTTP, exit cleanly
 ```
 
-The `seen_cache` is **boot-scoped** — wiped on gateway restart. Re-seeing
-a task on the first post-restart poll is benign: the queue.db has a
-UNIQUE constraint on `(source, source_event_id)` and the second
-injection is a no-op upsert.
+The `seen_cache` is **boot-scoped** — wiped on gateway restart. Re-seeing a
+task on the first post-restart poll is benign: `queue.enqueue()` uses
+`INSERT OR IGNORE` against the partial unique index
+`idx_events_dedup (source, source_message_id) WHERE source_message_id IS NOT NULL`
+(`lib/gateway/queue.py`). A duplicate returns `(event, inserted=False)` and
+writes nothing — a true no-op, not an upsert. This holds **as long as the row
+survives**: there is no queue.db retention/culling today (§10/Q5), so in the
+current codebase rows never vanish and the dedup guarantee is durable.
 
 ## 5. Event injection shape
 
-Each new task becomes one row in `queue.db.events`:
+Each new task becomes one row in `queue.db.events` via `queue.enqueue()`:
 
 ```
-source            'company-inbox'
-source_event_id   'task:<task.id>'
-status            'pending'           (local event status; not task status)
-started_at        null
-content           "<task.title>\n\n<task.description>"
-meta              JSON:
+source             'company-inbox'
+source_message_id  'task:<task.id>'              # dedup key (idx_events_dedup)
+conversation_id    'task-root:<task.root_id>'    # affinity key — see below
+status             'queued'                       # schema default; LOCAL event
+                                                  #   status, not company status
+content            "<task.title>\n\n<task.description>"
+meta               JSON:
   {
     "task_id":      <task.id>,
     "root_id":      <task.root_id>,
@@ -142,9 +155,21 @@ meta              JSON:
   }
 ```
 
-The brain receives this through the normal dispatch path. Affinity
-classifier sees a fresh `(source, root_id)` pair → routes to a free slot
-(or queues behind related work).
+Column names match the real schema (`lib/gateway/queue.py`):
+`source_message_id` (not `source_event_id`), and `status` defaults to
+`'queued'`.
+
+**Affinity / slot routing.** The gateway already has parallel-slot dispatch
+(`lib/gateway/runtime.py`): `claim_batch_same_conversation` coalesces queued
+events sharing a `conversation_id`, and a relatedness classifier assigns
+slots. Crucially, an event with a **NULL `conversation_id` runs alone on slot
+0 with no affinity** (runtime.py: "No conversation_id → no slot affinity to
+compute"). So to make sub-tasks of one task tree route/coalesce together, the
+channel sets `conversation_id = "task-root:<root_id>"`. Sub-tasks of distinct
+roots get distinct conversations and are eligible for separate slots. That is
+the *entire* integration with slot routing — set the key, enqueue; no routing
+logic in this channel. (There is no `root_id` column in queue.db; `root_id`
+lives in `meta` and is encoded into `conversation_id`.)
 
 The `kind` field is the contract the persona-level prompt depends on.
 
@@ -163,9 +188,10 @@ The `kind` field is the contract the persona-level prompt depends on.
 
 ## 7. Authentication
 
-Reuses the api_key stored in `<instance>/state/company/api-key`. Same
-file the supervisor reporter uses. The channel reads the bytes at start
-and on `SIGHUP` (config reload). Bearer token shape:
+Credentials come from `.env` (`COMPANY_API_KEY`), loaded into `CompanyConfig`
+by `lib/company/conf.py` — the same path the supervisor reporter and
+`CompanyClient` use (`lib/company/client.py` sets `Authorization: Bearer
+<api_key>`). The channel does **not** read a bespoke key file.
 
 ```
 Authorization: Bearer <api_key>
@@ -173,11 +199,20 @@ Authorization: Bearer <api_key>
 
 If the backend returns `401`, the channel:
 
-1. Logs `company-inbox auth failure — clearing cache, re-reading key`.
-2. Re-reads the api_key file (the operator may have rotated it via
-   `POST /api/agents/{id}/rotate-key`).
-3. If the re-read key is identical to the prior value, enters degraded
-   state: poll interval × 4, keep retrying. No crash, no event spam.
+1. Logs `company-inbox auth failure — reloading CompanyConfig from .env`.
+2. Reloads `CompanyConfig` (operator may have re-enrolled via
+   `jc company register`, which rewrites `COMPANY_API_KEY` in `.env`; there
+   is no dedicated rotate-key endpoint today — see Q5).
+3. If the reloaded key is unchanged, enters degraded state: poll interval ×
+   4, keep retrying. No crash, no event spam.
+
+**Loud-on-auth-failure (mandatory).** A silent degraded mode re-creates the
+exact failure §1 exists to kill: the agent quietly does no work and nothing
+surfaces it. So a *persistent* 401 (degraded beyond one interval) MUST
+escalate visibly — at minimum a `WARN` the health endpoint / supervisor
+surfaces, plus a one-shot notice through the existing reporter channel, so
+the operator sees "agent X: inbox auth failing" rather than only inferring it
+from tasks rotting at `pending`. Degraded ≠ silent.
 
 ## 8. Failure modes named
 
@@ -186,8 +221,10 @@ If the backend returns `401`, the channel:
    then is silent until success.
 2. **api_key revoked** (401 persistent). Channel enters degraded mode
    (§7) and continues retrying so a re-rotation resumes without restart.
-3. **Duplicate task injection across restart**. Boot-cache wipe + UNIQUE
-   constraint on `(source, source_event_id)` make this a no-op.
+3. **Duplicate task injection across restart**. Boot-cache wipe + the partial
+   unique index `idx_events_dedup (source, source_message_id)` +
+   `INSERT OR IGNORE` make the re-inject a no-op (§4). Durable only while the
+   row exists — no retention exists today, so this currently holds (Q5).
 4. **Task already terminal by the time we poll**. The inbox endpoint
    filters server-side; if a race makes us pull a task that's flipped to
    `done` between the SELECT and our INSERT, the brain will still get the
@@ -196,10 +233,12 @@ If the backend returns `401`, the channel:
 5. **Tasks owned by a different agent appear**. Should not happen — the
    query is `WHERE owner_agent_id = self`. If it does (backend bug), the
    channel asserts and logs; does not inject.
-6. **Polling overlaps with `jc-company register` rotating the api_key
-   file mid-read**. The file write is atomic (`O_WRONLY|O_CREAT|O_TRUNC`
-   via `os.open` followed by `replace`) — read sees either old or new,
-   never a torn middle.
+6. **`jc company register` rewrites `.env` mid-poll**. The channel reloads
+   `CompanyConfig` between ticks, not mid-request, so a request always uses
+   one coherent key. A request in flight when `.env` changes either completes
+   on the old key (next tick reloads) or 401s and triggers the reload path
+   (§7). No torn read, and no bespoke key-file atomicity argument is needed:
+   the key is config-loaded, not byte-read from a path.
 7. **Channel disabled at runtime via gateway.yaml edit + SIGHUP**. The
    channel acknowledges the disable, drains the seen_cache (so a future
    re-enable starts fresh), exits its poll loop. Other channels unaffected.
@@ -210,15 +249,16 @@ If the backend returns `401`, the channel:
 
 ## 9. Observability
 
-- `gateway.log` emits one line per poll cycle at INFO level only when
-  new tasks were injected. Format:
+- `gateway.log` emits one line per poll cycle at INFO level only when new
+  tasks were injected. Format:
   `company-inbox tick injected=2 task_ids=[abc, def] cache_size=14`
-- A `company.inbox.tick` metric is incremented in the gateway runtime
-  counters (where parallel-slot dispatch counters already live).
-- The dashboard already shows tasks; nothing new visualised here. This
-  channel is invisible from the operator UI by design — its existence is
-  only visible by *something* working (tasks getting processed instead
-  of rotting at `pending`).
+- A `company.inbox.tick` counter is incremented alongside existing gateway
+  runtime counters.
+- Degradation is **not** invisible: per §7 a persistent 401 or prolonged
+  unreachable backend escalates to a health-visible WARN plus a reporter
+  notice. Normal operation is otherwise quiet — its success shows as tasks
+  getting processed instead of rotting at `pending`. The dashboard already
+  shows the tasks themselves; nothing new is visualised for the happy path.
 
 ## 10. Test plan (for the implementation PR, not for this spec)
 
@@ -228,9 +268,12 @@ If the backend returns `401`, the channel:
 - Failure injection: kill the-company mid-poll, verify graceful backoff;
   rotate the api_key via the-company API, verify the channel picks up
   the new key on the next read.
-- Resource: 100 polls × 5 tasks each, confirm `queue.db` does not grow
-  unboundedly (terminal tasks should be culled by retention policy
-  outside this channel's scope).
+- Resource: 100 polls × 5 tasks each. NOTE: there is **no** queue.db
+  retention/culling today (`lib/gateway/queue.py` only re-queues expired
+  leases via `requeue_expired`, never deletes), so injected rows accumulate.
+  Good for dedup durability (§4) but means unbounded growth is a real,
+  currently unowned concern — see Q5. The test should *measure* growth to
+  feed the retention decision, not assume a policy that does not exist.
 
 ## 11. Open questions
 
@@ -249,6 +292,22 @@ These are flagged for review, not pre-decided:
   `task_assigned` if they reference a task_id, for uniformity? Or stay
   in their native event types? Default: stay native. Task graph events
   only come through `company-inbox`.
+- **Q4**: Agent identity for the inbox path. §1 speaks of an owner *slug*
+  (`sergio_dev_ops`) while `lib/company/conf.py:instance_id` is a sha256 of
+  the instance path. The inbox query must key on whatever `owner_agent_id`
+  the-company assigns at `jc company register`. Confirm the exact field and
+  path shape (`/api/agents/{slug}/inbox` vs token-derived `/api/agents/me/inbox`)
+  against the-company before implementation. The channel must reuse the
+  reporter's established identity, not invent one.
+- **Q5**: Two adjacent gaps surfaced while grounding this spec against the
+  code. (a) **No api_key rotation** endpoint/command exists — only
+  `jc company register` re-enrollment. Sufficient, or do we want a dedicated
+  rotate path? (b) **No queue.db retention** — injected task events accumulate
+  forever (`queue.py` never deletes). Who owns culling, and on what key (age?
+  terminal company-status confirmed via a follow-up GET)? Culling interacts
+  with dedup (§4): deleting the row for a still-`accepted` task lets it
+  re-inject after a reboot, so retention and the `accepted` resync filter (Q1)
+  must be designed together.
 
 ## 12. Sequence after this spec lands
 
