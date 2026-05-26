@@ -1,398 +1,389 @@
-# Goal Integration — Brain-Agnostic /goal Anchor
+# Goal Integration — Cache-Driven Task Anchor
 
-Status: Design draft, spec-only PR
+Status: Design draft (rev 2 — grounded against codebase), spec-only PR
 Date: 2026-05-26
 Author: Noah
 Repo: `juliuscaesar`
 Related:
-- `docs/specs/company-inbox-channel.md` (PR #64 — companion #1 of the trilogy)
+- `docs/specs/company-inbox-channel.md` (PR #64 — companion #1 of the trilogy, **merged**)
 - `the-company` v2.2 task graph (`docs/specs/the-company-v2.2-task-graph.md` in matsei-ruka/the-company)
 
 ---
 
 ## 0. What this spec is, and is not
 
-This spec defines a **brain-agnostic abstraction** for the `/goal`
-feature recently shipped on `claude-code` and `codex`, and lays out how
-to provide equivalent semantics on the other brain backends the
-framework supports (`pi`, `opencode`, `aider`, `gemini`, `openrouter`).
+This spec defines a **brain-agnostic task anchor**: when the agent is
+executing a task, every brain dispatch on that task's conversation is
+prefixed with a stable goal block so the model does not drift or need
+the task re-explained each turn.
 
-It is **not** a redesign of the brain adapter layer. It adds two
-methods (`set_goal`, `clear_goal`) to the base `Brain` class and
-wires them into the task lifecycle.
+It is **cache-driven prompt injection**, not a native-slash-command
+integration. Rev 1 of this spec assumed `claude-code`/`codex` expose a
+persistent `/goal` slash command reachable through our adapters, and
+that a per-slot `Brain` object holds the goal between turns. **Both are
+false in this codebase** (see §0.1). Rev 2 is rebuilt on what actually
+exists: a goal cache file, read by `Brain.prompt_for_event` on every
+dispatch.
+
+### 0.1 Architecture constraints this spec must respect
+
+These are verified against the current tree — the design follows from
+them, it does not wish them away:
+
+1. **Brains are constructed fresh per dispatch.**
+   `lib/gateway/brains/dispatch.py:invoke_brain` does
+   `instance = cls(instance_dir, override=…)` then `instance.invoke(...)`
+   for *every* event. There is no persistent per-slot `Brain` object, so
+   instance state (`self._pending_slash`, etc.) cannot survive to the
+   next turn. Any goal that "persists across turns" must live **outside**
+   the brain instance — on disk.
+
+2. **Slash commands do not execute through our adapters.**
+   `lib/heartbeat/adapters/claude.sh` runs `claude -p` (headless print
+   mode, "fresh non-interactive session", resumed via `--resume <uuid>`).
+   A `/goal …` line sent as prompt text is delivered to the model as
+   literal text, not executed as an interactive slash command. So there
+   is no "native `/goal`" anchor available here for any brain; the
+   working mechanism is — and only is — prompt text we render each turn.
+
+3. **`claude.py` skips the preamble.** It sets
+   `needs_l1_preamble = False` (auto-loads `CLAUDE.md`) and overrides
+   `_user_message_body`. So a goal block added to `render_preamble`
+   (`lib/gateway/context.py:350`) would never reach claude. claude's
+   only injection point is `_user_message_body`.
+
+4. **The durable key is `conversation_id`, not a slot number.** Slot ids
+   are assigned per-dispatch by the affinity classifier; they are not
+   stable identity. PR #64 sets `conversation_id = "task-root:<root_id>"`
+   on every injected task event. That string is the natural, stable key
+   for goal state.
+
+5. **There is no `company.task_closed` producer today.** The merged #64
+   channel emits only `company.task_assigned`, polls `status=pending,
+   accepted`, and does not track terminal flips. The clear-goal trigger
+   this spec needs does not yet exist (see §5.3 — the gating dependency).
 
 ## 1. Motivation
 
-`/goal` anchors the model on a high-level objective that survives
-across many turns within one session, reducing drift and re-prompt
-overhead. With the v2.2 task graph live, the natural mapping is:
+A task anchor keeps the model on the objective across the multiple
+dispatches a multi-step task takes, instead of re-explaining "you are
+working on task X" in every prompt (token cost + drift). With the v2.2
+task graph live, the mapping is:
 
-> the agent's current goal = the task they are actively executing
+> the agent's current goal for a conversation = the task that conversation is executing
 
-Without `/goal`, the brain has to be told "you are working on task X"
-in every prompt. Each dispatch repeats the framing, burning tokens and
-risking the model losing focus on multi-step tasks. With `/goal`, the
-framing is set once when the task is accepted and survives until the
-task moves to a terminal state.
-
-Failure mode of record without this spec: an agent that took 6
-dispatches to finish a multi-step task pays the cost of re-explaining
-the task in each call, and the longer the conversation grows the more
-likely the model is to wander into the chat context's general topic
-instead of the task-specific one.
+Failure mode of record without this: an agent that takes 6 dispatches to
+finish a task re-frames it 6 times, and as the conversation grows the
+model drifts toward the general chat topic instead of the task.
 
 ## 2. Scope
 
 ### 2.1 In scope
 
-- Two new methods on `lib/gateway/brains/base.py:Brain`:
-  `set_goal(text)`, `clear_goal()`. Both return `bool` (success).
-- Per-brain implementation, native-first with documented fallback:
-  - `claude.py` — `/goal` slash-command
-  - `codex.py`, `codex_api.py` — `/goal` slash-command
-  - `pi.py` — `/goal` slash-command if exposed by the pi CLI at the
-    version we pin; otherwise system-prompt prepend fallback
-  - `opencode.py` — system-prompt prepend (no native /goal yet)
-  - `aider.py` — `/objective` map (aider's nearest concept); fallback
-    to prepend
-  - `gemini.py`, `openrouter.py` — API brains, no slash commands;
-    system-prompt prepend
-- A single dispatcher hook in `lib/gateway/runtime.py` that calls
-  `set_goal` when a `company.task_assigned` event begins dispatch and
-  `clear_goal` when the underlying task transitions to a terminal
-  status (observed via the next inbox poll or via PATCH).
-- A goal-cache file at `<instance>/state/gateway/goal.json` so a
-  gateway restart can rehydrate the goal of in-flight tasks without
-  re-reading the brain's CLI session.
+- A new module `lib/gateway/goal_cache.py`: `set`, `clear`, `get`,
+  `all_goals`, backed by `<instance>/state/gateway/goal.json`, keyed by
+  `conversation_id`. Single-writer, atomic, multi-reader safe (§3).
+- A `format_goal(meta) -> str` helper (in `goal_cache.py` or a small
+  util) that builds the goal text from a task-assigned event's `meta`.
+  Default `"<title>\n\n<description>"` capped at 500 chars.
+- Goal injection at **two** points (every brain reaches exactly one):
+  - `base.Brain.prompt_for_event` renders a `<goal>…</goal>` block —
+    covers every brain that uses the base prompt path: `codex`,
+    `codex_api`, `pi`, `opencode`, `gemini`, `openrouter`, `aider`
+    (all have `needs_l1_preamble=True`/default and no prompt override, so
+    the base method builds their prompt — including `codex_api`, whose
+    HTTP request body is the base-rendered prompt text).
+  - `claude.py._user_message_body` renders the same block — claude alone
+    sets `needs_l1_preamble=False` and skips the base preamble (§0.1.3).
+  Both read the same cache by `event.conversation_id`. One block, one
+  helper, two call sites.
+- Dispatcher hooks in `lib/gateway/runtime.py`:
+  - on a `company.task_assigned` event entering dispatch →
+    `goal_cache.set(conversation_id, task_id, format_goal(meta))`.
+  - on a `company.task_closed` event → `goal_cache.clear(conversation_id,
+    task_id)`.
+- Restart safety: the cache is a file, so a gateway restart rehydrates
+  goals with no brain-session dependency (no re-issue call needed —
+  the next dispatch simply reads the cache).
 
 ### 2.2 Out of scope (deferred)
 
-- **Multi-goal hierarchies** — a parent task with active children
-  whose goals are different. Spec keeps one goal per slot at a time;
-  child spawn replaces the current slot's goal until the child closes.
-- **Cross-slot goal coordination** — `slot 0` chat vs `slot 1` task
-  goals are independent and never sync. Each slot owns its own goal
-  state.
-- **Goal expiry / time-decay** — the goal stays set until the task
-  closes or the gateway sees a contradicting signal.
-- **Custom goal templating** — operators wanting their own goal-text
-  recipe (e.g. "always include X in the goal") should override
-  `Brain.format_goal(task)` in their own subclass. Default
-  implementation is `"<title>\n\n<description>"` capped at 500 chars.
-- **Native UX in pi.dev / opencode** — adding `/goal` upstream is not
-  this PR's concern. We compensate at the framework layer.
+- **Native slash-command integration.** Not viable through the current
+  headless adapters (§0.1.2). If a brain CLI later exposes a persistent
+  anchor that survives `-p`/headless `--resume`, optimizing that brain to
+  use it (and skip the per-turn token cost) is a follow-up — gated on
+  *verifying* the behavior against the pinned CLI, not assuming it.
+- **Multi-goal hierarchies** — a parent task with active children on
+  separate goals. One goal per conversation; a child spawned onto its own
+  `task-root` conversation gets its own goal independently.
+- **Goal expiry / time-decay** — the goal stays until `task_closed`
+  (or the age-fallback of §5.3) clears it.
+- **Custom goal templating** — operators wanting bespoke goal text
+  override `format_goal` (it is a plain function/util, not buried in a
+  brain subclass — §6).
+- **Persona surfacing** — how the persona prompt references the goal is
+  PR #3. This spec only guarantees the goal is in the prompt and in the
+  event `meta` (§5.4 / Q3).
 
-## 3. Brain interface change
+## 3. Goal cache
 
-```python
-# lib/gateway/brains/base.py
+Path: `<instance>/state/gateway/goal.json`. Keyed by `conversation_id`:
 
-class Brain:
-    ...
-
-    def supports_native_goal(self) -> bool:
-        """Does this brain expose a /goal-equivalent slash command?
-
-        Subclasses override. Default False (system-prompt fallback).
-        """
-        return False
-
-    def set_goal(self, *, text: str, task_id: str) -> bool:
-        """Anchor the brain on `text` for subsequent dispatches.
-
-        Implementation strategy depends on the brain. Returns True on
-        success, False on any failure — caller falls back to
-        in-prompt anchoring (one-shot, not persistent).
-
-        Idempotent: calling with the same `task_id` twice is a no-op.
-        Calling with a different `task_id` while a goal is already
-        active replaces it (logging the swap).
-        """
-        ...  # default: write to goal-cache + render in next prompt
-
-    def clear_goal(self, *, task_id: str | None = None) -> bool:
-        """Drop the current goal. If `task_id` is provided, clear only
-        if the active goal matches (defensive against stale lifecycle
-        events arriving out of order)."""
-        ...
-```
-
-### 3.1 Goal-cache file
-
-Path: `<instance>/state/gateway/goal.json`
-Shape:
 ```json
 {
-  "slot_0": null,
-  "slot_1": {
+  "task-root:64244b95-…": {
     "task_id": "64244b95-…",
     "text": "Onboard Francesco Datini\n\nRun the prepared script …",
-    "set_at": "2026-05-26T07:00:00Z",
-    "native": true
+    "set_at": "2026-05-26T07:00:00Z"
   }
 }
 ```
 
-Updated atomically (tempfile + `os.replace`) on every set/clear.
-Survives gateway restarts. On startup, the runtime reads it and
-issues a fresh `set_goal` call to the brain CLI for each non-null
-slot — re-anchoring through whatever channel the brain provides.
+Note the key is `conversation_id` (`task-root:<root_id>`), not a slot id.
+Chat conversations (`telegram:…`) never appear here, so `get` returns
+`None` and no goal block is rendered for them.
 
-## 4. Per-brain implementations
+**Concurrency — single-writer, atomic, multi-reader.** All `set`/`clear`
+calls happen on the **dispatch-loop thread** (the dispatcher fires them
+before handing an event to a slot worker — §5.1), so there is exactly one
+writer; no lock or read-modify-write race. Writes use tempfile +
+`os.replace` (whole-file), which is atomic. Brain reads (`get`, in
+`prompt_for_event`) happen on worker threads but only read, and always
+see a coherent old-or-new file — never a torn middle. This is the same
+single-writer/atomic-replace discipline the rest of `state/gateway/` uses;
+the rev-1 "per-slot POSIX advisory locks" are unnecessary and were
+incompatible with `os.replace` (the lock rides the old inode).
 
-### 4.1 `claude.py` (Claude Code)
+`get` tolerates a missing/corrupt file by returning `None` (a goal is an
+optimization, never required for correctness).
 
-Native. The CLI accepts `/goal <text>` as the first line of a session
-turn. Implementation:
+## 4. Brain injection
 
-```python
-def supports_native_goal(self): return True
-
-def set_goal(self, *, text, task_id):
-    # prepend "/goal <text>" to the next adapter call's stdin
-    self._pending_slash = f"/goal {text}\n"
-    self._write_goal_cache(task_id, text, native=True)
-    return True
-
-def clear_goal(self, *, task_id=None):
-    self._pending_slash = "/goal-clear\n"
-    self._clear_goal_cache()
-    return True
-```
-
-The `_pending_slash` buffer is consumed by `prompt_for_event` and
-prepended to whatever the user-message build produces.
-
-### 4.2 `codex.py` and `codex_api.py` (OpenAI Codex)
-
-Native. Same `/goal` slash-command shape as claude-code. Same
-implementation as 4.1 with `prompt_for_event` honouring
-`_pending_slash`.
-
-For `codex_api.py` (HTTP, not subprocess CLI): the slash command is
-encoded as the first message in the conversation thread with
-`role: "system"` and `content: "GOAL: <text>"`. Re-sent on each
-request as part of the persistent system block.
-
-### 4.3 `pi.py` (DeepSeek pi-coding-agent)
-
-Native if available, fallback if not. Pi 0.74.0 (current pinned
-version per inventory snapshots from May 22) does not expose `/goal`
-as a slash command. Fallback path:
+One mechanism — render the cached goal as a `<goal>` block — wired at the
+point each brain actually renders prompt text:
 
 ```python
-def supports_native_goal(self): return False  # until upstream lands
-
-def set_goal(self, *, text, task_id):
-    # Stash in goal-cache; prompt_for_event will read and prepend.
-    self._write_goal_cache(task_id, text, native=False)
-    return True
+# lib/gateway/goal_cache.py
+def render_block(instance_dir, conversation_id) -> str:
+    g = get(instance_dir, conversation_id)
+    if not g:
+        return ""
+    return f"<goal>\n{g['text']}\n</goal>\n\n"
 ```
 
-`prompt_for_event` then renders a `<goal>...</goal>` block at the top
-of the system context (in the existing `render_preamble` chain), so
-every adapter call carries the goal alongside the standard preamble.
-This is equivalent in effect to `/goal` but pays the token cost on
-every turn — that's the price of no native support.
+- **Base path** — `base.Brain.prompt_for_event` prepends
+  `render_block(...)` ahead of the preamble/event body. This covers every
+  brain that does not override the prompt path: `codex`, `pi`,
+  `opencode`, `gemini`, `openrouter`, `aider`, **and `codex_api`** (the
+  HTTP brain uses the base-rendered prompt as its request content; the
+  brain is rebuilt per dispatch — §0.1.1 — so the block is naturally
+  re-sent every request, no persistent-thread assumption).
+- **`claude.py`** — prepends `render_block(...)` inside its
+  `_user_message_body` override, the only point claude renders, since it
+  skips the preamble (§0.1.3). The block sits above the per-turn clock
+  line, below `CLAUDE.md` (which claude auto-loads).
 
-When upstream pi-dev ships `/goal`, flip `supports_native_goal` to
-`True` and route through `_pending_slash` as in 4.1.
-
-### 4.4 `opencode.py`
-
-Same as 4.3 — no native /goal. System-prompt-prepend fallback. The
-existing preamble renderer already supports custom blocks; we add a
-`<goal>` block keyed off the goal-cache.
-
-### 4.5 `aider.py`
-
-Aider's `/objective` slash sets a persistent task statement; it's the
-closest neighbour to `/goal`. Map directly:
-
-```python
-def supports_native_goal(self): return True
-
-def set_goal(self, *, text, task_id):
-    self._pending_slash = f"/objective {text}\n"
-    ...
-```
-
-`/objective-clear` for the clear path. Verify version compatibility
-at adapter init time; if the version doesn't expose `/objective`,
-fall back to system-prompt-prepend.
-
-### 4.6 `gemini.py`, `openrouter.py`
-
-Pure HTTP brains, no native CLI. System-prompt-prepend fallback,
-implemented identically to `pi.py`. Goal is part of the `system` role
-message on every request.
+There is no `supports_native_goal` flag, no `set_goal`/`clear_goal` on
+`Brain`, and no `_pending_slash`. The brain is a pure reader of the
+cache; lifecycle writes live in the runtime (§5). This is what §0.1.1
+forces: state the brain can't hold must not live on the brain.
 
 ## 5. Task lifecycle integration
 
-The framework, not the brain, decides when to set/clear:
+The runtime, not the brain, owns set/clear:
 
 ```
-event arrives via company-inbox channel (event_type=company.task_assigned)
-  → dispatcher classifies to slot N
-  → dispatcher calls slot N's brain.set_goal(text=format_goal(task), task_id=task.id)
-  → adapter call (first turn — /goal is in the prompt)
-  → result returned, persona may now take action
+event company.task_assigned arrives (via company-inbox, PR #64)
+   conversation_id = task-root:<root_id>, meta.kind = task_assigned
+  → dispatch loop, before handing to a slot worker:
+       goal_cache.set(conversation_id, meta.task_id, format_goal(meta))
+  → brain dispatch reads the cache → <goal> block in the prompt
 
-subsequent dispatch on same task_id (multi-turn task)
-  → set_goal is idempotent — no-op or re-render
-  → adapter call (next turn — goal is still applied)
+subsequent dispatch on the same conversation (multi-turn task)
+  → no set call needed; the cache still holds the goal
+  → brain reads it again → <goal> block still present
 
-task transitions to terminal (done | failed | rejected | cancelled | expired)
-  → company-inbox channel observes the change on its next poll
-     (the backend's task_events table provides the audit trail)
-  → channel emits a synthetic event_type=company.task_closed
-  → runtime calls brain.clear_goal(task_id=task.id)
-  → goal-cache updated, brain knows it's free
+task reaches terminal (done | failed | rejected | cancelled | expired)
+  → SEE §5.3 — there is no producer of this signal yet
+  → when available: company.task_closed event
+  → dispatch loop: goal_cache.clear(conversation_id, task_id)
 ```
 
-### 5.1 Where the lifecycle hooks live
+### 5.1 Where the hooks live
 
-- `lib/gateway/runtime.py` — dispatcher receives the event, looks
-  up the slot's brain, calls `set_goal` before invoking adapter.
-- `lib/gateway/channels/company_inbox.py` (spec'd in PR #1) — emits
-  `company.task_closed` synthetic events when polling notices a
-  status flip to terminal. The dispatcher routes these to the
-  matching slot and calls `clear_goal`.
+- `lib/gateway/runtime.py` — in the dispatch path, before a
+  `company.task_assigned` event is handed to a worker, call
+  `goal_cache.set(...)`. Doing it on the dispatch-loop thread is what
+  makes the cache single-writer (§3).
+- `goal_cache.clear(...)` fires from the same dispatch path when a
+  `company.task_closed` event is processed.
 
-### 5.2 Multi-slot semantics
+No brain-method call, no per-slot brain lookup (there is no persistent
+per-slot brain — §0.1.1).
 
-Each slot has its own goal state. `slot 0` may be in the middle of a
-Telegram chat with no goal set; `slot 1` may be working on a task
-with goal active. The goal-cache file (§3.1) is keyed by slot id.
+### 5.2 Conversation semantics
 
-If the affinity classifier dispatches a related-event to a slot that
-already has a different active goal (e.g. user asks a chat question
-to the task-slot mid-task), the dispatcher logs the conflict and
-**does not** swap the goal — chat events arriving in a task slot are
-processed without the goal being touched. The persona may notice the
-mismatch and reply accordingly.
+Goal state is per `conversation_id`. A `telegram:*` chat conversation has
+no goal; a `task-root:<root_id>` conversation has the task's goal. If the
+affinity classifier routes a *chat* event onto a slot currently running a
+task, that chat event carries a different `conversation_id` and so reads a
+different (likely empty) goal entry — there is no cross-talk and nothing to
+"swap." Rev 1's "slot 0 chat vs slot 1 task" framing assumed a fixed slot
+layout that does not exist; keying on `conversation_id` removes the
+problem entirely.
 
-## 6. Format of the goal text
+### 5.3 Gating dependency: the clear trigger does not exist yet
 
-Default `Brain.format_goal(task)`:
+`clear_goal` needs to know a task went terminal. **No such signal exists
+today** (§0.1.5): the #64 channel emits only `company.task_assigned`,
+polls `pending,accepted`, and a task going terminal simply *disappears*
+from that filter — the channel never notices. So this spec **cannot ship
+its clear path** until one of these lands (pick one, in review):
+
+- **(A) Extend the company-inbox channel** to detect a previously-seen
+  task that has left the `pending,accepted` set (or to additionally poll
+  terminal statuses) and emit a synthetic `company.task_closed` event.
+  This is a re-scope of #64's implementation — call it out as its own
+  small PR.
+- **(B) Age-fallback clear** in `goal_cache`: a goal older than a
+  configured TTL (default e.g. 1 h) is dropped on the next `get`. Coarse,
+  but bounds the leak with zero backend dependency. Can ship alongside (A)
+  as a backstop.
+
+Until (A) exists, a set goal would otherwise leak forever. The
+implementation PR must land (A) or (B) **before** the set path, or ship
+with (B) as the floor.
+
+### 5.4 Belt + braces
+
+The goal is also already in the event `meta` (`kind=task_assigned`, with
+`task_id`/`title`/`payload` — emitted by #64). So even on a turn where
+the cache read returns empty (corruption, race on first set), the model
+still sees the task in the routing metadata. The `<goal>` block is the
+persistent anchor; `meta` is the per-event fallback.
+
+## 6. Goal text format
+
+`format_goal(meta) -> str` — a plain helper over a task-assigned event's
+`meta`:
 
 ```
-<task.title>
+<title>
 
-<task.description>
+<description>
 ```
 
-Capped at 500 characters. If task.description is longer, it is
-truncated at 500 and the full body remains available in the event
-`payload`. Operators wanting different formatting subclass
-`format_goal` in their own `lib/gateway/brains/<brand>.py`.
+Capped at 500 chars (truncate `description`; full body remains in
+`meta.payload`). It is a function, not a `Brain` method — the task fields
+live in `event.meta`, not on the brain, and the runtime (which has the
+event) is what calls it. Operators wanting custom formatting wrap/replace
+this one function rather than subclassing every brain.
+
+Sanitisation: strip control chars, cap at 20 lines (task descriptions are
+operator prose; this just guards against a pathological payload bloating
+every prompt).
 
 ## 7. Failure modes named
 
-1. **Brain CLI rejects /goal** (unknown command, version mismatch).
-   `set_goal` returns False; the runtime logs the failure and falls
-   back to one-shot in-prompt anchoring for this dispatch (passes
-   the goal text as a system message rather than a persistent
-   anchor). Next dispatch attempts native again — no permanent
-   degradation.
+1. **Cache write fails** (disk full, permission). `set` returns False;
+   the dispatch proceeds — the goal is an optimization, and `meta` still
+   carries the task (§5.4). Logged once as a warning.
 
-2. **Goal-cache write fails** (disk full, permission). `set_goal`
-   returns False; runtime continues with one-shot anchoring. Logged
-   as a hardware-class warning.
+2. **Cache read fails / corrupt JSON.** `get` returns `None`; no `<goal>`
+   block this turn; `meta` fallback covers it. Self-heals on the next
+   successful `set`.
 
-3. **Stale clear arrives after a new task started**. The new task's
-   `set_goal` will have already overwritten the cache; the stale
-   `clear_goal(task_id=X)` checks the cached task_id matches `X`
-   and refuses if not. The active goal is preserved.
+3. **Stale clear after a new task started on the same conversation.**
+   `clear(conversation_id, task_id)` clears only if the stored `task_id`
+   matches; a mismatched stale clear is a no-op, preserving the active
+   goal. (Same-conversation task replacement is rare — a new task tree
+   gets a new `task-root` conversation — but the guard is cheap.)
 
-4. **Gateway restart with in-flight goal**. On startup, runtime
-   reads the goal-cache and re-issues `set_goal` to each brain. If
-   the brain CLI lost session state (e.g. claude-code's
-   process_sessions.json gc'd), the re-issue is best-effort; the
-   first post-restart dispatch may run without the native goal but
-   includes the goal-text in the prompt as a one-shot.
+4. **Gateway restart with a goal set.** No action needed: the cache is a
+   file; the next dispatch reads it and renders the block. There is no
+   brain session to re-issue into (§0.1.1/0.1.2), so rev-1's "re-issue
+   set_goal on startup" step is deleted.
 
-5. **Concurrent dispatch on multi-slot**. The goal-cache file is
-   updated atomically per-slot; one slot's set_goal does not corrupt
-   another slot's entry. Per-slot file locks (POSIX advisory) gate
-   writes.
+5. **Concurrent dispatch across slots.** Writes are single-writer (dispatch
+   loop, §3); worker threads only read; `os.replace` is atomic. No
+   corruption, no lock needed.
 
-6. **Goal text contains newlines or special tokens that confuse the
-   brain's input parser**. Sanitiser strips control chars and caps
-   line count at 20. Rare in practice (task descriptions are
-   operator-written prose).
+6. **Goal text with newlines/odd tokens.** §6 sanitiser strips control
+   chars and caps line count; the block is plain text in the prompt, not
+   parsed as commands, so there is no injection surface beyond ordinary
+   prompt content.
 
-7. **Brain backend swap mid-task** (operator changes
-   `default_brain` from `claude` to `pi` while a task is in flight).
-   Goal-cache is brain-agnostic; new brain reads its task_id +
-   text, calls its own `set_goal`. If new brain has no native goal,
-   it falls back to prepend. Continuity preserved.
+7. **Brain backend swap mid-task** (operator changes `default_brain`).
+   The cache is brain-agnostic; the new brain's `prompt_for_event` reads
+   the same entry and renders the block at its own injection point.
+   Continuity preserved with no per-brain state.
 
-8. **The-company task expires while goal still set**. The deadline
-   janitor flips the task to `expired`; company-inbox channel
-   observes on its next poll and emits `company.task_closed`. The
-   runtime calls `clear_goal`. Worst case: 10 s of stale goal
-   between expiry and clear. Acceptable.
+8. **Task goes terminal.** Depends on §5.3. With (A): `company.task_closed`
+   → `clear`, worst case one poll interval (~10 s) of stale goal. Without
+   (A), with (B): cleared within the TTL. Without either: **the goal
+   leaks** — which is exactly why §5.3 gates the set path.
 
 ## 8. Observability
 
-- One log line per `set_goal` call: `goal set slot=N task=<id>
-  brain=<name> native=<bool> text_chars=<int>`.
-- One log line per `clear_goal`: `goal cleared slot=N
-  prev_task=<id> brain=<name>`.
-- `goal.json` is inspectable by humans, useful for `jc-doctor` to
-  surface "agent X currently goaled on task Y".
-- No new metric counter — the existing `dispatch_ok` already covers
-  dispatch volume.
+- One log line per `set`: `goal set conv=<id> task=<id> text_chars=<n>`.
+- One log line per `clear`: `goal cleared conv=<id> prev_task=<id>`.
+- `goal.json` is human-inspectable; `jc-doctor` can surface "conversation
+  X goaled on task Y".
+- No new metric counter.
 
-## 9. Test plan (for the implementation PR, not for this spec)
+## 9. Test plan
 
-- Unit: each brain's `set_goal` / `clear_goal` in isolation against
-  a fake CLI / fake API.
-- Unit: goal-cache atomic write under simulated power-cut (fsync +
-  rename invariants).
-- Integration: ship a `company.task_assigned` through the dispatcher,
-  verify the next adapter call includes the goal (native or
-  prepended); flip status to done, verify clear fires.
-- Integration: gateway restart mid-task, verify goal rehydrated.
-- Multi-slot: two simultaneous tasks across slot 0 and slot 1, verify
-  no cross-talk.
-- Fallback path: force `supports_native_goal` to False on claude,
-  verify system-prompt-prepend works equivalently.
+- Unit (`goal_cache`): set/get/clear round-trip; clear with mismatched
+  task_id is a no-op; missing/corrupt file → `get` returns None; atomic
+  replace leaves no torn file.
+- Unit (injection): `base.Brain.prompt_for_event` includes the `<goal>`
+  block when the cache has an entry for `event.conversation_id`, and omits
+  it otherwise (covers `codex_api` and the other base-path brains);
+  `claude.py._user_message_body` includes it (claude path).
+- Integration: a `company.task_assigned` (conversation `task-root:R`) →
+  the next dispatch's rendered prompt contains the goal; a
+  `company.task_closed` → next dispatch has none. (Requires §5.3 (A) or a
+  test stub emitting `task_closed`.)
+- Restart: write `goal.json`, restart, assert the next dispatch still
+  renders the goal (file-driven, no re-issue).
+- Conversation isolation: a chat event (`telegram:*`) interleaved with a
+  task conversation renders no goal on the chat turn.
+- TTL fallback (if §5.3 (B)): a goal past TTL is dropped on `get`.
 
 ## 10. Open questions
 
-- **Q1**: When the brain CLI is `claude-code` and the gateway
-  restarts, is `/goal` state preserved in the CLI's own session
-  store, or do we need to always re-issue? My read of the
-  claude-code docs says it's preserved per session id, and we
-  already persist session ids across restarts. To be confirmed in
-  the impl PR.
-- **Q2**: Should `aider.py` `/objective` be used at all, or fall
-  back to system-prompt-prepend even when aider supports it? The
-  semantics differ slightly (objective is more imperative than
-  goal). Operator opinion welcome.
-- **Q3**: For codex_api.py (HTTP brain), should the goal go in the
-  `system` block or as a separate `developer` role message (newer
-  OpenAI API)? Both work; `system` is more universal.
-- **Q4**: Persona prompts in PR #3 will reference "the goal" — do we
-  expose it to the persona as a structured field in the event
-  metadata, or rely entirely on the brain CLI to surface it? Default
-  in §5: the goal is in the metadata `kind=task_assigned` event
-  payload AND in the brain's /goal slot. Belt + braces.
+- **Q1** (resolved by grounding): Does claude-code preserve `/goal` across
+  restarts via its session store? Moot — slash commands are not executed
+  in `-p`/headless mode (§0.1.2), so there is no native goal state to
+  preserve. The cache file is the source of truth.
+- **Q2**: §5.3 — which clear trigger ships first: (A) extend
+  company-inbox to emit `company.task_closed`, (B) TTL age-fallback, or
+  both? Recommendation: ship (B) as the floor in this work, (A) as the
+  precise trigger (small #64 follow-up). Operator/maintainer call.
+- **Q3**: Goal text cap — 500 chars enough for the multi-step tasks we
+  expect, or make it configurable? Default 500; revisit if real tasks
+  truncate badly.
+- **Q4**: Persona exposure (PR #3) — rely on the `<goal>` block in the
+  prompt, the `meta.kind=task_assigned` payload, or both? Default: both
+  (§5.4). Confirmed-belt-and-braces; PR #3 decides what the persona text
+  actually references.
 
 ## 11. Sequence after this spec lands
 
-This PR is **specs-only**. Once reviewed and decisions on Q1–Q4 are
-made:
+This PR is **spec-only**. Implementation order, once §5.3 (Q2) is decided:
 
-1. Implementation PR — extend `lib/gateway/brains/base.py`, ship per-brain
-   overrides, wire dispatcher hooks, add goal-cache module, tests.
-2. Follow-up spec — persona prompt for `task_assigned` event
-   handling (companion PR #3 of this trilogy).
+1. **Clear-trigger prerequisite** — §5.3 (A) and/or (B). Without a clear
+   path, the set path leaks goals; this must land first or together.
+2. Implementation PR — `lib/gateway/goal_cache.py`, `format_goal`,
+   injection in `base.Brain.prompt_for_event` + `claude._user_message_body`
+   + `codex_api` system block, dispatcher set/clear hooks in
+   `lib/gateway/runtime.py`, tests.
+3. Follow-up spec — persona prompt for `task_assigned` handling
+   (companion PR #3 of this trilogy).
 
-The implementation depends on PR #1 (company-inbox channel) being
-merged — without that channel emitting `company.task_assigned` and
-`company.task_closed`, this trigger surface does not exist.
+Depends on PR #64 (merged): the channel emits `company.task_assigned` with
+`conversation_id=task-root:<root_id>` and `meta.kind=task_assigned`, which
+are the set trigger and the goal source. The clear trigger
+(`company.task_closed`) is **not** provided by #64 as merged — see §5.3.
 
-No backend changes in the-company are required for any of this.
+No backend changes in the-company are required.
