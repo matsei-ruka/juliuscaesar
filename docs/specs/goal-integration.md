@@ -1,6 +1,6 @@
 # Goal Integration — Cache-Driven Task Anchor
 
-Status: Design draft (rev 2 — grounded against codebase), spec-only PR
+Status: Design draft (rev 3 — finalized: native-channel delivery, two-class injection), spec-only PR
 Date: 2026-05-26
 Author: Noah
 Repo: `juliuscaesar`
@@ -38,19 +38,26 @@ them, it does not wish them away:
    next turn. Any goal that "persists across turns" must live **outside**
    the brain instance — on disk.
 
-2. **Slash commands do not execute through our adapters.**
-   `lib/heartbeat/adapters/claude.sh` runs `claude -p` (headless print
-   mode, "fresh non-interactive session", resumed via `--resume <uuid>`).
-   A `/goal …` line sent as prompt text is delivered to the model as
-   literal text, not executed as an interactive slash command. So there
-   is no "native `/goal`" anchor available here for any brain; the
-   working mechanism is — and only is — prompt text we render each turn.
+2. **No `/goal` slash command, but a real native system-steering channel
+   exists.** `claude.sh` runs `claude -p` headless; a `/goal …` line would
+   be literal prompt text, not an executed slash command. But the harnesses
+   *do* expose a native system-steering input, and the framework **already
+   uses it**: the "gateway output contract" is injected per-harness via
+   `--append-system-prompt` (claude, pi), the API `instructions`/`system`
+   slot (codex_api, gemini, openrouter), or — where the CLI has no such flag
+   — a block prepended to the prompt body (codex-exec, opencode, aider). The
+   goal rides those same channels (§4). This is the mechanism, not a slash
+   command and not a user-turn hack.
 
-3. **`claude.py` skips the preamble.** It sets
-   `needs_l1_preamble = False` (auto-loads `CLAUDE.md`) and overrides
-   `_user_message_body`. So a goal block added to `render_preamble`
-   (`lib/gateway/context.py:350`) would never reach claude. claude's
-   only injection point is `_user_message_body`.
+3. **Adapters receive dynamic values via env vars, not forwarded args.**
+   `claude.sh` consumes only `$1` (model) and builds its own arg list — it
+   does not forward arbitrary extra args. The established seam for feeding an
+   adapter a per-dispatch value is an environment variable: `base.invoke`
+   does `env = os.environ.copy(); … env.update(self.extra_env())` and the
+   adapter reads it (e.g. `JC_RESUME_SESSION`). So the goal reaches a
+   system-prompt-class adapter as an env var (e.g. `JC_GOAL`) that the
+   adapter turns into `--append-system-prompt "$JC_GOAL"` — exactly how
+   resume id and worker mode are already plumbed.
 
 4. **The durable key is `conversation_id`, not a slot number.** Slot ids
    are assigned per-dispatch by the affinity classifier; they are not
@@ -86,17 +93,18 @@ model drifts toward the general chat topic instead of the task.
 - A `format_goal(meta) -> str` helper (in `goal_cache.py` or a small
   util) that builds the goal text from a task-assigned event's `meta`.
   Default `"<title>\n\n<description>"` capped at 500 chars.
-- Goal injection at **two** points (every brain reaches exactly one):
-  - `base.Brain.prompt_for_event` renders a `<goal>…</goal>` block —
-    covers every brain that uses the base prompt path: `codex`,
-    `codex_api`, `pi`, `opencode`, `gemini`, `openrouter`, `aider`
-    (all have `needs_l1_preamble=True`/default and no prompt override, so
-    the base method builds their prompt — including `codex_api`, whose
-    HTTP request body is the base-rendered prompt text).
-  - `claude.py._user_message_body` renders the same block — claude alone
-    sets `needs_l1_preamble=False` and skips the base preamble (§0.1.3).
-  Both read the same cache by `event.conversation_id`. One block, one
-  helper, two call sites.
+- Goal delivery via each task-brain's **native system-steering channel**
+  (§4), keyed by `event.conversation_id`, in **two policies** by brain
+  class:
+  - **System-prompt class** (`claude`, `pi`): `JC_GOAL` env →
+    `--append-system-prompt`; re-applied every call (ephemeral, never
+    enters the transcript).
+  - **Body class** (`codex`-exec, `opencode`, `aider`): goal block
+    prepended to the prompt body, **first turn of a session only**
+    (`resume_session is None`) so it does not pile up in the resumed
+    transcript.
+  Stateless brains (`openrouter`, `gemini`, `codex_api`) are not used as
+  task executors, so they need no goal handling (§2.2).
 - Dispatcher hooks in `lib/gateway/runtime.py`:
   - on a `company.task_assigned` event entering dispatch →
     `goal_cache.set(conversation_id, task_id, format_goal(meta))`.
@@ -109,10 +117,17 @@ model drifts toward the general chat topic instead of the task.
 ### 2.2 Out of scope (deferred)
 
 - **Native slash-command integration.** Not viable through the current
-  headless adapters (§0.1.2). If a brain CLI later exposes a persistent
-  anchor that survives `-p`/headless `--resume`, optimizing that brain to
-  use it (and skip the per-turn token cost) is a follow-up — gated on
-  *verifying* the behavior against the pinned CLI, not assuming it.
+  headless adapters (§0.1.2). The native *system-prompt* channel
+  (`--append-system-prompt`) is what we use instead; if a CLI later ships a
+  true persistent in-session anchor verified under headless `--resume`,
+  optimizing that brain is a follow-up.
+- **Goal support for stateless brains** (`openrouter`, `gemini`,
+  `codex_api`). They are deliberately not used as the task-executing brain
+  (`openrouter` is the narrow unsafe-fallback; `codex_api`/`gemini` serve
+  triage/chat), and a task anchor only matters for the brain that runs the
+  multi-turn task. So no goal handling is added for them — not a gap, a
+  scoping decision. If one is ever promoted to task executor, it gets the
+  body-class or system-message treatment then.
 - **Multi-goal hierarchies** — a parent task with active children on
   separate goals. One goal per conversation; a child spawned onto its own
   `task-root` conversation gets its own goal independently.
@@ -157,36 +172,72 @@ incompatible with `os.replace` (the lock rides the old inode).
 `get` tolerates a missing/corrupt file by returning `None` (a goal is an
 optimization, never required for correctness).
 
-## 4. Brain injection
+## 4. Goal delivery (per brain class)
 
-One mechanism — render the cached goal as a `<goal>` block — wired at the
-point each brain actually renders prompt text:
+The goal text is brain-agnostic (the cache); **delivery uses each
+task-brain's native system-steering channel** — the same channels the
+gateway output contract already rides. One cache, one source of truth, but
+**two injection policies** because the task brains fall into two classes
+with different transcript behavior. Stateless brains are out of scope
+(§2.2), so only the resume-capable task brains are covered here.
+
+Shared helper:
 
 ```python
 # lib/gateway/goal_cache.py
-def render_block(instance_dir, conversation_id) -> str:
+def goal_text(instance_dir, conversation_id) -> str:
     g = get(instance_dir, conversation_id)
-    if not g:
-        return ""
-    return f"<goal>\n{g['text']}\n</goal>\n\n"
+    return g["text"] if g else ""
 ```
 
-- **Base path** — `base.Brain.prompt_for_event` prepends
-  `render_block(...)` ahead of the preamble/event body. This covers every
-  brain that does not override the prompt path: `codex`, `pi`,
-  `opencode`, `gemini`, `openrouter`, `aider`, **and `codex_api`** (the
-  HTTP brain uses the base-rendered prompt as its request content; the
-  brain is rebuilt per dispatch — §0.1.1 — so the block is naturally
-  re-sent every request, no persistent-thread assumption).
-- **`claude.py`** — prepends `render_block(...)` inside its
-  `_user_message_body` override, the only point claude renders, since it
-  skips the preamble (§0.1.3). The block sits above the per-turn clock
-  line, below `CLAUDE.md` (which claude auto-loads).
+### 4.1 System-prompt class — `claude`, `pi`
+
+These adapters already inject directives via `--append-system-prompt`
+(worker mode, output contract — see `claude.sh`). The goal is a third such
+append:
+
+- `base.invoke` sets `env["JC_GOAL"] = goal_text(instance_dir,
+  event.conversation_id)` when non-empty (env is the seam — §0.1.3).
+- `claude.sh` / `pi.sh` add `--append-system-prompt "$JC_GOAL"` when
+  `JC_GOAL` is set (a ~3-line adapter edit, mirroring the `JC_RESUME_SESSION`
+  block).
+
+Re-applied **every** call. The system prompt is ephemeral per invocation —
+it never enters the resumed transcript, so there is no accumulation. This
+is the clean class. Compose, don't clobber: the goal append is additive
+alongside the existing output-contract append; order is goal-last so it is
+the most recent steering the model sees.
+
+### 4.2 Body class — `codex`-exec, `opencode`, `aider`
+
+These CLIs expose no system-prompt flag in headless mode (`codex.sh` says
+so explicitly; `opencode` takes a positional arg; `aider` takes
+`--message-file`), so the goal rides the **prompt body** — exactly where
+those adapters already put the output contract.
+
+- Rendered as a `<goal>…</goal>` block prepended in the prompt path
+  (`base.Brain.prompt_for_event`, which these brains use unchanged).
+- **First turn of a session only** — render the block when
+  `resume_session is None`; skip it when resuming. These brains persist the
+  body into their resumed session/history (`codex exec resume`, aider
+  history files, opencode `--session`), so re-prepending every turn would
+  pile the goal up in the transcript (token bloat + the model seeing it
+  re-instructed). First-turn injection lands the goal in the transcript
+  once; resume carries it thereafter.
+
+### 4.3 Summary
+
+| Brain | Channel | Re-inject policy |
+|---|---|---|
+| claude, pi | `JC_GOAL` env → `--append-system-prompt` | every call (ephemeral) |
+| codex-exec, opencode, aider | prompt-body `<goal>` block | first turn only (`resume_session is None`) |
+| openrouter, gemini, codex_api | — (not task executors, §2.2) | — |
 
 There is no `supports_native_goal` flag, no `set_goal`/`clear_goal` on
-`Brain`, and no `_pending_slash`. The brain is a pure reader of the
-cache; lifecycle writes live in the runtime (§5). This is what §0.1.1
-forces: state the brain can't hold must not live on the brain.
+`Brain`, no `_pending_slash`. The brain reads the cache (directly, or via
+the `JC_GOAL` env the runtime sets); lifecycle writes live in the runtime
+(§5). This respects §0.1.1: state the brain can't hold does not live on the
+brain.
 
 ## 5. Task lifecycle integration
 
@@ -197,11 +248,11 @@ event company.task_assigned arrives (via company-inbox, PR #64)
    conversation_id = task-root:<root_id>, meta.kind = task_assigned
   → dispatch loop, before handing to a slot worker:
        goal_cache.set(conversation_id, meta.task_id, format_goal(meta))
-  → brain dispatch reads the cache → <goal> block in the prompt
+  → brain applies the goal via its native channel (§4)
 
 subsequent dispatch on the same conversation (multi-turn task)
   → no set call needed; the cache still holds the goal
-  → brain reads it again → <goal> block still present
+  → system-prompt class re-applies it; body class relies on resume (§4.2)
 
 task reaches terminal (done | failed | rejected | cancelled | expired)
   → SEE §5.3 — there is no producer of this signal yet
@@ -289,9 +340,9 @@ every prompt).
    the dispatch proceeds — the goal is an optimization, and `meta` still
    carries the task (§5.4). Logged once as a warning.
 
-2. **Cache read fails / corrupt JSON.** `get` returns `None`; no `<goal>`
-   block this turn; `meta` fallback covers it. Self-heals on the next
-   successful `set`.
+2. **Cache read fails / corrupt JSON.** `goal_text` returns `""`; no goal
+   applied this turn; `meta` fallback covers it (§5.4). Self-heals on the
+   next successful `set`.
 
 3. **Stale clear after a new task started on the same conversation.**
    `clear(conversation_id, task_id)` clears only if the stored `task_id`
@@ -300,25 +351,32 @@ every prompt).
    gets a new `task-root` conversation — but the guard is cheap.)
 
 4. **Gateway restart with a goal set.** No action needed: the cache is a
-   file; the next dispatch reads it and renders the block. There is no
-   brain session to re-issue into (§0.1.1/0.1.2), so rev-1's "re-issue
-   set_goal on startup" step is deleted.
+   file; the next dispatch reads it and applies via the brain's channel
+   (§4). There is no brain session to re-issue into (§0.1.1/0.1.2), so
+   rev-1's "re-issue set_goal on startup" step is deleted.
 
 5. **Concurrent dispatch across slots.** Writes are single-writer (dispatch
    loop, §3); worker threads only read; `os.replace` is atomic. No
    corruption, no lock needed.
 
 6. **Goal text with newlines/odd tokens.** §6 sanitiser strips control
-   chars and caps line count; the block is plain text in the prompt, not
-   parsed as commands, so there is no injection surface beyond ordinary
-   prompt content.
+   chars and caps line count; the goal is plain text in a system prompt or
+   prompt body, not parsed as a command, so there is no injection surface
+   beyond ordinary prompt content.
 
 7. **Brain backend swap mid-task** (operator changes `default_brain`).
-   The cache is brain-agnostic; the new brain's `prompt_for_event` reads
-   the same entry and renders the block at its own injection point.
-   Continuity preserved with no per-brain state.
+   The cache is brain-agnostic; the new brain applies the same entry via
+   *its* class channel (§4). If the swap is system-prompt→body, the body
+   class injects on its next fresh session; if body→system-prompt, the env
+   append starts immediately. Continuity preserved with no per-brain state.
 
-8. **Task goes terminal.** Depends on §5.3. With (A): `company.task_closed`
+8. **Body-class re-inject on resume** (codex-exec, opencode, aider). Naively
+   prepending the goal every turn would accumulate it in the resumed
+   transcript. Guarded by the first-turn-only policy (§4.2): inject when
+   `resume_session is None`, skip on resume. System-prompt class is immune
+   (ephemeral append, never in transcript).
+
+9. **Task goes terminal.** Depends on §5.3. With (A): `company.task_closed`
    → `clear`, worst case one poll interval (~10 s) of stale goal. Without
    (A), with (B): cleared within the TTL. Without either: **the goal
    leaks** — which is exactly why §5.3 gates the set path.
@@ -336,12 +394,15 @@ every prompt).
 - Unit (`goal_cache`): set/get/clear round-trip; clear with mismatched
   task_id is a no-op; missing/corrupt file → `get` returns None; atomic
   replace leaves no torn file.
-- Unit (injection): `base.Brain.prompt_for_event` includes the `<goal>`
-  block when the cache has an entry for `event.conversation_id`, and omits
-  it otherwise (covers `codex_api` and the other base-path brains);
-  `claude.py._user_message_body` includes it (claude path).
+- Unit (system-prompt class): with a cache entry for
+  `event.conversation_id`, `base.invoke` sets `JC_GOAL` in the subprocess
+  env; empty/absent → no `JC_GOAL`. Adapter test: `claude.sh`/`pi.sh` add
+  `--append-system-prompt "$JC_GOAL"` iff `JC_GOAL` is set.
+- Unit (body class): the `<goal>` block is prepended on a fresh session
+  (`resume_session is None`) and **omitted on resume** — the accumulation
+  guard (§4.2).
 - Integration: a `company.task_assigned` (conversation `task-root:R`) →
-  the next dispatch's rendered prompt contains the goal; a
+  the next dispatch applies the goal via the active brain's channel; a
   `company.task_closed` → next dispatch has none. (Requires §5.3 (A) or a
   test stub emitting `task_closed`.)
 - Restart: write `goal.json`, restart, assert the next dispatch still
@@ -374,10 +435,11 @@ This PR is **spec-only**. Implementation order, once §5.3 (Q2) is decided:
 
 1. **Clear-trigger prerequisite** — §5.3 (A) and/or (B). Without a clear
    path, the set path leaks goals; this must land first or together.
-2. Implementation PR — `lib/gateway/goal_cache.py`, `format_goal`,
-   injection in `base.Brain.prompt_for_event` + `claude._user_message_body`
-   + `codex_api` system block, dispatcher set/clear hooks in
-   `lib/gateway/runtime.py`, tests.
+2. Implementation PR — `lib/gateway/goal_cache.py` + `format_goal`;
+   dispatcher set/clear hooks in `lib/gateway/runtime.py`; `base.invoke`
+   sets `JC_GOAL`; `claude.sh`/`pi.sh` append `--append-system-prompt
+   "$JC_GOAL"` (system-prompt class, §4.1); body-class `<goal>` block via
+   `base.Brain.prompt_for_event` rendered first-turn-only (§4.2); tests.
 3. Follow-up spec — persona prompt for `task_assigned` handling
    (companion PR #3 of this trilogy).
 
