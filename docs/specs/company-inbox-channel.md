@@ -1,6 +1,6 @@
 # Company Inbox Channel — Operating Spec
 
-Status: Design draft (rev 2 — grounded against codebase), spec-only PR
+Status: Implemented (rev 3) — `lib/gateway/channels/company_inbox.py`
 Date: 2026-05-26
 Author: Noah
 Repo: `juliuscaesar`
@@ -239,9 +239,12 @@ from tasks rotting at `pending`. Degraded ≠ silent.
    on the old key (next tick reloads) or 401s and triggers the reload path
    (§7). No torn read, and no bespoke key-file atomicity argument is needed:
    the key is config-loaded, not byte-read from a path.
-7. **Channel disabled at runtime via gateway.yaml edit + SIGHUP**. The
-   channel acknowledges the disable, drains the seen_cache (so a future
-   re-enable starts fresh), exits its poll loop. Other channels unaffected.
+7. **Channel disabled at runtime via gateway.yaml edit + SIGHUP**. Note: like
+   every gateway channel today, the running thread is *not* torn down on a
+   live config reload — `ChannelLifecycle.reload_config` swaps the config
+   object but does not stop threads; the disable takes effect on the next
+   gateway restart. No channel honours mid-run disable. (If live teardown is
+   wanted, it belongs in `ChannelLifecycle` for all channels, not here.)
 8. **Long backend pause + flood on resume**. If the backend goes down
    for 1 h and comes back with 50 pending tasks for this agent, the
    `max_new_per_tick: 5` cap stretches the resync over 10 ticks ≈ 100 s.
@@ -260,7 +263,7 @@ from tasks rotting at `pending`. Degraded ≠ silent.
   getting processed instead of rotting at `pending`. The dashboard already
   shows the tasks themselves; nothing new is visualised for the happy path.
 
-## 10. Test plan (for the implementation PR, not for this spec)
+## 10. Test plan
 
 - Unit: poll loop with a stub backend, dedup cache, 429 backoff curve.
 - Integration: against a real the-company dev instance, assign 3 tasks,
@@ -292,13 +295,16 @@ These are flagged for review, not pre-decided:
   `task_assigned` if they reference a task_id, for uniformity? Or stay
   in their native event types? Default: stay native. Task graph events
   only come through `company-inbox`.
-- **Q4**: Agent identity for the inbox path. §1 speaks of an owner *slug*
-  (`sergio_dev_ops`) while `lib/company/conf.py:instance_id` is a sha256 of
-  the instance path. The inbox query must key on whatever `owner_agent_id`
-  the-company assigns at `jc company register`. Confirm the exact field and
-  path shape (`/api/agents/{slug}/inbox` vs token-derived `/api/agents/me/inbox`)
-  against the-company before implementation. The channel must reuse the
-  reporter's established identity, not invent one.
+- **Q4** (resolved in impl): Agent identity for the inbox path. Resolution:
+  `jc company register` now persists the server-assigned `agent_id` to
+  `.env` as `COMPANY_AGENT_ID` (see `lib/company/reporter.py`), and
+  `CompanyConfig.agent_id` carries it. The channel addresses
+  `GET /api/agents/{agent_id}/inbox`, falling back to
+  `lib/company/conf.py:instance_id` (what register enrolls with) for agents
+  that registered before this change. **Still to confirm against the-company:**
+  whether `owner_agent_id` equals the persisted `agent_id` or a human slug
+  (`sergio_dev_ops`); if it's the slug, persist that instead. The channel
+  reuses the reporter's identity, never invents one.
 - **Q5**: Two adjacent gaps surfaced while grounding this spec against the
   code. (a) **No api_key rotation** endpoint/command exists — only
   `jc company register` re-enrollment. Sufficient, or do we want a dedicated
@@ -309,15 +315,27 @@ These are flagged for review, not pre-decided:
   re-inject after a reboot, so retention and the `accepted` resync filter (Q1)
   must be designed together.
 
-## 12. Sequence after this spec lands
+## 12. Sequence
 
-This PR is **specs-only**. Once reviewed:
+This PR now carries both the spec **and** the implementation. Shipped here:
 
-1. Implementation PR — `lib/gateway/channels/company_inbox.py`, runtime
-   wiring in `lib/gateway/runtime.py`, config validator updates, tests.
-2. Follow-up spec — `/goal` integration (companion PR #2 of this
-   trilogy).
-3. Follow-up spec — persona prompt for `task_assigned` event handling
-   (companion PR #3).
+- `lib/gateway/channels/company_inbox.py` — the channel (poll loop, dedup,
+  injection, 401/backoff/degraded handling, `health()`).
+- `lib/company/client.py` — `CompanyClient.get_inbox(...)`.
+- `lib/company/conf.py` + `reporter.py` — `agent_id` carried on `CompanyConfig`;
+  `COMPANY_AGENT_ID` persisted at register time (Q4).
+- `lib/gateway/config.py` — `company-inbox` in `SUPPORTED_CHANNELS`, the
+  `inbox_status_filter` / `max_new_per_tick` knobs, defaults, validation,
+  rendered default config.
+- `lib/gateway/channels/registry.py` — factory registration. Runtime wiring is
+  automatic: `ChannelLifecycle` runs every enabled registered channel, so no
+  `runtime.py` edit was required.
+- `tests/gateway/test_company_inbox_channel.py` — unit + config + run-loop tests.
+
+Still deferred (unchanged):
+
+1. Follow-up spec — `/goal` integration (companion PR #2 of this trilogy, #65).
+2. Follow-up spec — persona prompt for `task_assigned` event handling (PR #3).
+3. Open: queue.db retention (Q5) and the-company `owner_agent_id` shape (Q4).
 
 No backend changes in the-company are required for any of this.

@@ -15,7 +15,7 @@ from . import brain_spec as _brain_spec
 
 SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider", "pi")
 SUPPORTED_UNSAFE_FALLBACK_BRAINS = (*SUPPORTED_BRAINS, "openrouter")
-SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email")
+SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email", "company-inbox")
 SUPPORTED_TRIAGE_BACKENDS = (
     "none",
     "always",
@@ -59,6 +59,9 @@ class ChannelConfig:
     paired_with: str | None = None
     asr_provider: str | None = None
     tts_provider: str | None = None
+    # company-inbox only: which task statuses to pull, and the per-tick cap.
+    inbox_status_filter: tuple[str, ...] = ()
+    max_new_per_tick: int | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,12 @@ DEFAULT_CONFIG = GatewayConfig(
         ),
         "email": ChannelConfig(
             enabled=False,
+        ),
+        "company-inbox": ChannelConfig(
+            enabled=False,
+            poll_interval_seconds=10,
+            max_new_per_tick=5,
+            inbox_status_filter=("pending", "accepted"),
         ),
     }
 )
@@ -819,6 +828,9 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "body_limit",
                 "notify_on_unknown",  # Legacy no-op; accepted so old configs still load.
                 "telegram_chat_id",
+                # company-inbox channel.
+                "inbox_status_filter",
+                "max_new_per_tick",
             }
             for raw_key, raw_value in channels_raw.items():
                 normalized = _normalize_channel_key(str(raw_key))
@@ -847,9 +859,15 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                             f"channels.{raw_key}.brain: includes a model; also "
                             "setting model is ambiguous (set only one)"
                         )
-                for key in ("timeout_seconds", "poll_interval_seconds"):
+                for key in ("timeout_seconds", "poll_interval_seconds", "max_new_per_tick"):
                     if raw_value.get(key) is not None:
                         _validate_positive_int(errors, f"channels.{raw_key}.{key}", raw_value[key])
+                if raw_value.get("inbox_status_filter") is not None and not isinstance(
+                    raw_value["inbox_status_filter"], (str, list, tuple)
+                ):
+                    errors.append(
+                        f"channels.{raw_key}.inbox_status_filter: must be a string or list"
+                    )
                 if raw_value.get("chat_ids") is not None and not isinstance(
                     raw_value["chat_ids"], (str, list, tuple)
                 ):
@@ -1243,6 +1261,8 @@ def _load_channel(name: str, raw: dict[str, Any], defaults: ChannelConfig) -> Ch
         paired_with=_opt_str("paired_with", defaults.paired_with),
         asr_provider=_opt_str("asr_provider", defaults.asr_provider),
         tts_provider=_opt_str("tts_provider", defaults.tts_provider),
+        inbox_status_filter=_tuple_str(raw.get("inbox_status_filter", defaults.inbox_status_filter)),
+        max_new_per_tick=_opt_int("max_new_per_tick", defaults.max_new_per_tick),
     )
 
 
@@ -1684,4 +1704,12 @@ channels:
     enabled: true
     watch_dir: state/cron
     poll_interval_seconds: 2
+  # company-inbox: pull task-graph assignments from the-company and inject
+  # them as `company.task_assigned` events. Opt-in; reuses COMPANY_* creds
+  # from .env (same as the supervisor reporter). See docs/specs/company-inbox-channel.md.
+  company-inbox:
+    enabled: false
+    poll_interval_seconds: 10
+    max_new_per_tick: 5
+    inbox_status_filter: [pending, accepted]
 """

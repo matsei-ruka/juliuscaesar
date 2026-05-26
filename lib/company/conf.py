@@ -42,6 +42,7 @@ class CompanyConfig:
     endpoint: str
     api_key: str
     enrollment_token: str
+    agent_id: str = ""
     enabled: bool = True
     redact_conversations: bool = True
     exclude_channels: tuple[str, ...] = ()
@@ -79,6 +80,7 @@ def load(instance_dir: Path) -> CompanyConfig:
         endpoint=env_value(instance_dir, "COMPANY_ENDPOINT").rstrip("/"),
         api_key=env_value(instance_dir, "COMPANY_API_KEY"),
         enrollment_token=env_value(instance_dir, "COMPANY_ENROLLMENT_TOKEN"),
+        agent_id=env_value(instance_dir, "COMPANY_AGENT_ID"),
         enabled=bool(block.get("enabled", True)),
         redact_conversations=bool(block.get("redact_conversations", True)),
         exclude_channels=_tuple_str(block.get("exclude_channels")),

@@ -606,10 +606,16 @@ class Reporter:
         api_key = result.get("api_key")
         if not api_key:
             raise CompanyError("register: server returned no api_key", body=str(result))
-        # Persist the key, drop the bootstrap token, refresh in-process cfg.
+        # Persist the key + server-assigned agent_id, drop the bootstrap token,
+        # refresh in-process cfg. The agent_id lets the company-inbox channel
+        # address GET /api/agents/{agent_id}/inbox without guessing identity.
+        set_keys = {"COMPANY_API_KEY": str(api_key)}
+        agent_id = result.get("agent_id")
+        if agent_id:
+            set_keys["COMPANY_AGENT_ID"] = str(agent_id)
         conf_module.write_env_keys(
             self.instance_dir,
-            set_keys={"COMPANY_API_KEY": str(api_key)},
+            set_keys=set_keys,
             unset_keys=("COMPANY_ENROLLMENT_TOKEN",),
         )
         self.cfg = conf_module.load(self.instance_dir)
