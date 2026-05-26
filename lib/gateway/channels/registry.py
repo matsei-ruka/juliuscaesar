@@ -7,6 +7,7 @@ from typing import Any
 
 from ..config import ChannelConfig, GatewayConfig
 from .base import Channel, LogFn
+from .company_inbox import CompanyInboxChannel
 from .cron import CronChannel
 from .discord import DiscordChannel
 from .email import EmailChannel
@@ -24,6 +25,7 @@ _CHANNEL_FACTORIES = {
     "jc-events": JcEventsChannel,
     "cron": CronChannel,
     "email": EmailChannel,
+    "company-inbox": CompanyInboxChannel,
 }
 
 

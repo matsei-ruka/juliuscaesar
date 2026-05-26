@@ -93,6 +93,34 @@ class CompanyClient:
         params = {"wait": str(wait_seconds)} if wait_seconds > 0 else None
         return self._get(url, params=params, bearer_override=callback_token)
 
+    def get_inbox(
+        self,
+        *,
+        agent_id: str,
+        statuses: tuple[str, ...] = (),
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Pull this agent's task inbox. Returns the server payload (``{items: [...]}``).
+
+        Used by the ``company-inbox`` gateway channel to surface task-graph
+        assignments as local events. Auth is the standard Bearer api_key, so a
+        revoked/rotated key raises ``CompanyError(status=401)`` — the channel
+        treats that distinctly (degraded mode + loud escalation).
+
+        Short timeout: unlike the long-poll approval GET, this is a hot poll
+        loop and must not hang a tick.
+
+        See: docs/specs/company-inbox-channel.md.
+        """
+        params: dict[str, str] = {"order": "created_at", "limit": str(int(limit))}
+        if statuses:
+            params["status"] = ",".join(statuses)
+        return self._get(
+            f"/api/agents/{agent_id}/inbox",
+            params=params,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+
     def upload_approval_media(
         self,
         approval_id: str,
@@ -172,6 +200,7 @@ class CompanyClient:
         *,
         params: Optional[dict[str, str]] = None,
         bearer_override: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         url = f"{self.cfg.endpoint}{path}"
         try:
@@ -179,8 +208,9 @@ class CompanyClient:
                 url,
                 params=params,
                 headers=self._headers(auth=True, bearer_override=bearer_override),
-                # Server caps long-poll at 60s; pad a bit on our side.
-                timeout=HTTP_TIMEOUT_SECONDS + 60,
+                # Default pads for the approval long-poll (server caps at 60s);
+                # callers like get_inbox pass a short timeout for hot polling.
+                timeout=timeout if timeout is not None else HTTP_TIMEOUT_SECONDS + 60,
             )
         except requests.RequestException as exc:
             raise CompanyError(f"transport: {exc}") from exc
