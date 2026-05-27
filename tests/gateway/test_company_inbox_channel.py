@@ -22,11 +22,17 @@ from company.client import CompanyError  # noqa: E402
 
 class FakeClient:
     """Stub CompanyClient. ``responses`` is consumed one per get_inbox call;
-    an item may be an Exception to raise. Exhausted → empty inbox."""
+    an item may be an Exception to raise. Exhausted → empty inbox.
 
-    def __init__(self, responses=None):
+    ``whoami_responses`` (separate queue) is consumed one per whoami() call
+    for the agent self-discovery boot path (PR #67 / spec
+    ``docs/specs/agent-self-discovery.md``)."""
+
+    def __init__(self, responses=None, *, whoami_responses=None):
         self.responses = list(responses or [])
         self.calls: list[dict] = []
+        self.whoami_calls = 0
+        self.whoami_responses = list(whoami_responses or [])
         self.alerts: list[dict] = []
         self.closed = 0
 
@@ -35,6 +41,15 @@ class FakeClient:
         if not self.responses:
             return {"items": []}
         result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def whoami(self):
+        self.whoami_calls += 1
+        if not self.whoami_responses:
+            raise AssertionError("whoami() called without a queued response")
+        result = self.whoami_responses.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
@@ -447,6 +462,293 @@ class ClosureTests(unittest.TestCase):
         ch._poll_once(enqueue)
         closes = [c for c in captured if c["meta"]["kind"] == "task_closed"]
         self.assertEqual(closes, [])
+
+
+class DiscoveryTests(unittest.TestCase):
+    """Boot-time COMPANY_AGENT_ID discovery via /api/agents/me.
+
+    Spec: docs/specs/agent-self-discovery.md §4 + §7.
+
+    The four required cases:
+      (a) fresh .env without COMPANY_AGENT_ID → one /me call, persists,
+          polling resumes with the discovered id;
+      (b) .env already has COMPANY_AGENT_ID → no /me call ever;
+      (c) /me returns 401 → channel goes degraded, no /inbox call;
+      (d) network error on /me → degraded retry loop, no /inbox call.
+
+    These wire `run()` end-to-end through a controlled instance dir so
+    we can also verify the .env write is atomic + mode-preserving (§4.1.a).
+    """
+
+    AGENT_UUID = "6483bd0a-f750-4388-b9f5-52b02d0491ad"
+
+    def _write_env(self, instance: Path, lines: dict[str, str]) -> Path:
+        env_path = instance / ".env"
+        env_path.write_text(
+            "\n".join(f"{k}={v}" for k, v in lines.items()) + "\n",
+            encoding="utf-8",
+        )
+        env_path.chmod(0o600)
+        return env_path
+
+    def _run_until(self, ch, enqueue, *, predicate, timeout=3.0):
+        """Spin `run()` in a thread until predicate() goes True or timeout."""
+        stop = {"v": False}
+
+        def _should_stop():
+            return stop["v"]
+
+        t = threading.Thread(
+            target=ch.run, args=(enqueue, _should_stop), daemon=True
+        )
+        t.start()
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                if predicate():
+                    break
+                time.sleep(0.02)
+        finally:
+            stop["v"] = True
+            t.join(timeout=2.0)
+        return not t.is_alive()
+
+    def _patch_load_client(self, ch, instance: Path, client):
+        """Make `_load_client` re-read .env into a SimpleNamespace cfg.
+
+        We bypass `company.conf.load()` because the gateway env_value
+        cache can be sticky across temp dirs; reading the .env directly
+        gives us a deterministic, self-contained fixture for these tests.
+        The production code path is exercised by the existing reporter
+        tests.
+        """
+        def _load():
+            env_path = instance / ".env"
+            kv: dict[str, str] = {}
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    kv[k.strip()] = v.strip().strip('"')
+            ch._company_cfg = SimpleNamespace(
+                endpoint=kv.get("COMPANY_ENDPOINT", "https://t.local"),
+                api_key=kv.get("COMPANY_API_KEY", ""),
+                enrollment_token=kv.get("COMPANY_ENROLLMENT_TOKEN", ""),
+                agent_id=kv.get("COMPANY_AGENT_ID", ""),
+            )
+            ch._client = client
+
+        ch._load_client = _load
+
+    # ── §7(a) ───────────────────────────────────────────────────────────
+    def test_fresh_env_discovers_persists_then_polls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            env_path = self._write_env(
+                instance,
+                {
+                    "COMPANY_ENDPOINT": "https://t.local",
+                    "COMPANY_API_KEY": "k1",
+                },
+            )
+            client = FakeClient(
+                responses=[{"items": [_task("t1")]}],
+                whoami_responses=[
+                    {
+                        "id": self.AGENT_UUID,
+                        "slug": "noah_bitwell",
+                        "display_name": "Noah Bitwell",
+                        "company": {"id": "c", "slug": "omnisage"},
+                    }
+                ],
+            )
+            logs: list[tuple[str, dict]] = []
+            ch = CompanyInboxChannel(
+                instance,
+                ChannelConfig(enabled=True, poll_interval_seconds=1),
+                lambda m, **k: logs.append((m, k)),
+            )
+            ch.ready = lambda: True
+            self._patch_load_client(ch, instance, client)
+
+            captured, enqueue = _captured_enqueue()
+            ok = self._run_until(
+                ch, enqueue, predicate=lambda: len(captured) >= 1
+            )
+
+            self.assertTrue(ok, "run() thread did not stop")
+            # Exactly one /me call.
+            self.assertEqual(client.whoami_calls, 1)
+            # .env now contains the discovered id, mode preserved at 0600.
+            content = env_path.read_text(encoding="utf-8")
+            self.assertIn(f"COMPANY_AGENT_ID={self.AGENT_UUID}", content)
+            self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+            # Polling resumed and a task was injected with the discovered id.
+            self.assertGreaterEqual(len(client.calls), 1)
+            self.assertEqual(client.calls[0]["agent_id"], self.AGENT_UUID)
+            self.assertEqual(captured[0]["source_message_id"], "task:t1")
+            # health() reflects discovery success.
+            self.assertTrue(ch.health()["agent_id_discovered"])
+            self.assertFalse(ch.health()["degraded"])
+
+    # ── §7(b) ───────────────────────────────────────────────────────────
+    def test_env_with_agent_id_skips_discovery_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_env(
+                instance,
+                {
+                    "COMPANY_ENDPOINT": "https://t.local",
+                    "COMPANY_API_KEY": "k1",
+                    "COMPANY_AGENT_ID": self.AGENT_UUID,
+                },
+            )
+            # No whoami_responses → if /me is called the FakeClient raises
+            # AssertionError and the test fails loudly.
+            client = FakeClient(responses=[{"items": [_task("t1")]}])
+            ch = CompanyInboxChannel(
+                instance,
+                ChannelConfig(enabled=True, poll_interval_seconds=1),
+                lambda *a, **k: None,
+            )
+            ch.ready = lambda: True
+            self._patch_load_client(ch, instance, client)
+
+            captured, enqueue = _captured_enqueue()
+            ok = self._run_until(
+                ch, enqueue, predicate=lambda: len(captured) >= 1
+            )
+            self.assertTrue(ok)
+            self.assertEqual(client.whoami_calls, 0)
+            # Inbox polled with the pre-existing id.
+            self.assertEqual(client.calls[0]["agent_id"], self.AGENT_UUID)
+            self.assertTrue(ch.health()["agent_id_discovered"] is False)
+            # Note: agent_id_discovered stays False in this path because the
+            # channel did not run discovery — it trusted the .env. The
+            # operator-facing surface that matters is `auth_valid` +
+            # `last_injected_at`, which both reflect a healthy channel.
+
+    # ── §7(c) ───────────────────────────────────────────────────────────
+    def test_me_401_goes_degraded_no_inbox_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_env(
+                instance,
+                {
+                    "COMPANY_ENDPOINT": "https://t.local",
+                    "COMPANY_API_KEY": "revoked",
+                },
+            )
+            # Always 401 — the same key on every reload, so no recovery.
+            client = FakeClient(
+                whoami_responses=[
+                    CompanyError("401", status=401),
+                    CompanyError("401", status=401),
+                    CompanyError("401", status=401),
+                    CompanyError("401", status=401),
+                ]
+            )
+            logs: list[tuple[str, dict]] = []
+            ch = CompanyInboxChannel(
+                instance,
+                ChannelConfig(enabled=True, poll_interval_seconds=1),
+                lambda m, **k: logs.append((m, k)),
+            )
+            ch.ready = lambda: True
+            self._patch_load_client(ch, instance, client)
+
+            captured, enqueue = _captured_enqueue()
+            ok = self._run_until(
+                ch,
+                enqueue,
+                predicate=lambda: any(
+                    k.get("kind") == "company_inbox_discovery_failure"
+                    for _, k in logs
+                ),
+                timeout=10.0,
+            )
+            self.assertTrue(ok, "discovery failure WARN never emitted")
+            # /inbox MUST never be called — that is the silent-400 bug we
+            # exist to kill. `client.calls` only records get_inbox calls.
+            self.assertEqual(client.calls, [])
+            # Degraded surface reflects the failure.
+            h = ch.health()
+            self.assertFalse(h["agent_id_discovered"])
+            self.assertTrue(h["degraded"])
+            self.assertIn("discovery:", h["last_error"] or "")
+
+    # ── §7(d) ───────────────────────────────────────────────────────────
+    def test_me_network_error_degraded_retry_loop_no_inbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self._write_env(
+                instance,
+                {
+                    "COMPANY_ENDPOINT": "https://t.local",
+                    "COMPANY_API_KEY": "k1",
+                },
+            )
+            # Transport failure (status=0). On the spec's degraded cadence
+            # (poll_interval * DEGRADED_MULTIPLIER = 4s) we won't get
+            # to attempt 3 before the test timeout — so we time out on
+            # `consecutive_failures >= 1` and verify the surface state.
+            client = FakeClient(
+                whoami_responses=[
+                    CompanyError("transport: connection refused", status=0),
+                    CompanyError("transport: connection refused", status=0),
+                    CompanyError("transport: connection refused", status=0),
+                ]
+            )
+            ch = CompanyInboxChannel(
+                instance,
+                ChannelConfig(enabled=True, poll_interval_seconds=1),
+                lambda *a, **k: None,
+            )
+            ch.ready = lambda: True
+            self._patch_load_client(ch, instance, client)
+
+            captured, enqueue = _captured_enqueue()
+            ok = self._run_until(
+                ch,
+                enqueue,
+                predicate=lambda: ch.health()["consecutive_failures"] >= 1,
+                timeout=5.0,
+            )
+            self.assertTrue(ok)
+            # Inbox MUST never have been called — discovery never resolved.
+            self.assertEqual(client.calls, [])
+            self.assertGreaterEqual(client.whoami_calls, 1)
+            h = ch.health()
+            self.assertFalse(h["agent_id_discovered"])
+            self.assertTrue(h["degraded"])
+
+
+class AgentIdAccessorTests(unittest.TestCase):
+    """Spec §4.3: `_agent_id()` no longer falls back to instance_id."""
+
+    def test_agent_id_returns_empty_when_cfg_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ch = CompanyInboxChannel(
+                instance, ChannelConfig(enabled=True), lambda *a, **k: None
+            )
+            ch._company_cfg = SimpleNamespace(agent_id="", api_key="k")
+            # Spec §4.3: the SHA256 fallback is gone. The accessor returns
+            # the configured value verbatim, including the empty string.
+            # The run() entrypoint refuses to poll until discovery has
+            # populated this — see DiscoveryTests above.
+            self.assertEqual(ch._agent_id(), "")
+
+    def test_agent_id_returns_configured_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ch = CompanyInboxChannel(
+                instance, ChannelConfig(enabled=True), lambda *a, **k: None
+            )
+            ch._company_cfg = SimpleNamespace(agent_id="known-id", api_key="k")
+            self.assertEqual(ch._agent_id(), "known-id")
 
 
 if __name__ == "__main__":

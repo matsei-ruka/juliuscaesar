@@ -25,6 +25,7 @@ Spec: docs/specs/company-inbox-channel.md.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +104,10 @@ class CompanyInboxChannel:
         self._consecutive_failures = 0
         self._last_error: str | None = None
         self._last_injected_at: str | None = None
+        # Discovery state — set to True once /api/agents/me has populated
+        # COMPANY_AGENT_ID (or it was already present at boot).
+        self._agent_id_discovered: bool = False
+        self._discovery_escalated: bool = False
 
     # ── Channel lifecycle ────────────────────────────────────────────────
 
@@ -126,6 +131,19 @@ class CompanyInboxChannel:
         if not self.ready():
             return
         self._load_client()
+
+        # Boot-time discovery: if .env did not persist COMPANY_AGENT_ID
+        # (every agent registered before PR #64) we ask the-company for
+        # our own UUID and persist it. Without this we'd fall back to
+        # instance_id (SHA256) and silently 400 forever on /inbox.
+        # Spec: docs/specs/agent-self-discovery.md §4.1.
+        if not self._cfg_agent_id():
+            if not self._discover_agent_id(should_stop):
+                # Discovery never succeeded before shutdown — exit cleanly.
+                self._close_client()
+                self.log("company-inbox stopped", kind="company_inbox_stop")
+                return
+
         self.log(
             f"company-inbox polling every {self.poll_interval}s "
             f"statuses={','.join(self.status_filter)} agent={self._agent_id()}",
@@ -396,18 +414,154 @@ class CompanyInboxChannel:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
+    def _cfg_agent_id(self) -> str:
+        """Raw read of COMPANY_AGENT_ID from the loaded config, or ''."""
+        return str(getattr(self._company_cfg, "agent_id", "") or "") if self._company_cfg else ""
+
     def _agent_id(self) -> str:
-        agent_id = getattr(self._company_cfg, "agent_id", "") if self._company_cfg else ""
-        if agent_id:
-            return str(agent_id)
-        # Fallback before/without a persisted COMPANY_AGENT_ID (set by
-        # `jc company register`). instance_id is what register enrolls with.
-        return company_conf.instance_id(self.instance_dir)
+        """Return this channel's persisted COMPANY_AGENT_ID.
+
+        After spec `docs/specs/agent-self-discovery.md` §4.3, the fallback
+        to ``instance_id`` is GONE. Discovery at boot is the only path that
+        populates this value — by the time the poll loop calls
+        ``_agent_id()`` the run() entrypoint has either confirmed the .env
+        carries one, or refused to enter the loop.
+
+        Callers outside the poll loop (start log line, etc.) may observe
+        the empty string when discovery has not yet completed — that is
+        intentional and surfaced via health().
+        """
+        return self._cfg_agent_id()
 
     def _load_client(self) -> None:
         self._company_cfg = company_conf.load(self.instance_dir)
         self._close_client()
         self._client = CompanyClient(self._company_cfg)
+
+    # ── Boot-time agent_id discovery ────────────────────────────────────
+    #
+    # Spec: docs/specs/agent-self-discovery.md §4.
+    #
+    # An agent registered before PR #64 has no COMPANY_AGENT_ID in its
+    # .env. Without that value the channel used to fall back to
+    # instance_id (SHA256 of the dir), which the-company has never seen
+    # and never will — every /inbox call 400s and no task is ever
+    # delivered. Discovery removes that silent failure by asking the
+    # backend "who am I, by UUID?" with our existing bearer.
+
+    def _discover_agent_id(self, should_stop: Callable[[], bool]) -> bool:
+        """Block until /api/agents/me returns our UUID, or until shutdown.
+
+        Returns True on success (``.env`` persisted + cfg reloaded),
+        False if ``should_stop()`` fires before we ever succeed.
+
+        While discovery is failing we do NOT poll the inbox — the whole
+        point of this routine is to avoid the silent 400 loop. Health
+        surface flips to ``agent_id_discovered=false`` + degraded.
+        """
+        # Persistent error → degraded interval; transient single attempt
+        # uses the normal poll interval as a floor (a fresh boot is the
+        # cheap case and should retry quickly).
+        degraded_interval = min(BACKOFF_CAP_SECONDS, self.poll_interval * DEGRADED_MULTIPLIER)
+        attempts = 0
+        while not should_stop():
+            attempts += 1
+            try:
+                payload = self._client.whoami()
+            except CompanyError as exc:
+                # §4.1.b: 401 means the bearer is revoked. Try a one-shot
+                # .env reload (operator may have just re-registered); if
+                # the key didn't change there's no point hammering — fall
+                # through to the degraded loud path on the next attempt.
+                if getattr(exc, "status", 0) == 401:
+                    prior_key = getattr(self._company_cfg, "api_key", "")
+                    self._load_client()
+                    new_key = getattr(self._company_cfg, "api_key", "")
+                    if new_key and new_key != prior_key:
+                        self.log(
+                            "company-inbox discovery 401 — reloaded a new key "
+                            "from .env, retrying immediately",
+                            kind="company_inbox_discovery_auth_reload",
+                        )
+                        continue  # retry at once with the new key
+                self._on_discovery_failure(exc, degraded_interval)
+                self._sleep(float(degraded_interval), should_stop)
+                continue
+            except Exception as exc:  # noqa: BLE001 — never let discovery crash the thread
+                self._on_discovery_failure(exc, degraded_interval)
+                self._sleep(float(degraded_interval), should_stop)
+                continue
+
+            discovered_id = self._extract_agent_id(payload)
+            if not discovered_id:
+                self._on_discovery_failure(
+                    ValueError(f"/me response missing id: {payload!r}"),
+                    degraded_interval,
+                )
+                self._sleep(float(degraded_interval), should_stop)
+                continue
+
+            # Persist + reload. Failure to write is non-fatal: the value
+            # is correct in memory for this run, next boot will retry.
+            try:
+                company_conf.write_env_keys(
+                    self.instance_dir,
+                    set_keys={"COMPANY_AGENT_ID": discovered_id},
+                )
+            except Exception as exc:  # noqa: BLE001 — spec §6.3
+                self.log(
+                    f"company-inbox discovered agent_id={discovered_id} but "
+                    f".env write failed ({exc}); using in-memory for this run",
+                    kind="company_inbox_discovery_persist_failed",
+                    level="warning",
+                )
+                # Pin the cfg in memory so _agent_id() returns it this run.
+                self._company_cfg = _replace_agent_id(self._company_cfg, discovered_id)
+            else:
+                self._load_client()  # reloads cfg from the freshly-written .env
+
+            with self._lock:
+                self._agent_id_discovered = True
+                self._discovery_escalated = False
+                self._degraded = False
+                self._consecutive_failures = 0
+                self._last_error = None
+
+            self.log(
+                f"company-inbox discovered agent_id={discovered_id} "
+                f"after {attempts} attempt(s); polling resumes",
+                kind="company_inbox_discovery_ok",
+            )
+            return True
+
+        # Shutdown reached before discovery succeeded.
+        return False
+
+    def _on_discovery_failure(self, exc: Exception, degraded_interval: float) -> None:
+        """Mark the channel degraded and escalate ONCE on persistent failure."""
+        status = getattr(exc, "status", 0)
+        with self._lock:
+            self._consecutive_failures += 1
+            self._last_error = f"discovery: status={status}: {exc}"
+            self._degraded = True
+            self._agent_id_discovered = False
+            first_time = not self._discovery_escalated
+            failures = self._consecutive_failures
+
+        # Loud once at the third consecutive failure — matches §4.2 (and
+        # the auth-failure escalation cadence). Any subsequent failures
+        # stay silent until either success or operator action.
+        if first_time and failures >= WARN_AFTER_CONSECUTIVE_FAILURES:
+            with self._lock:
+                self._discovery_escalated = True
+            self.log(
+                "company-inbox AGENT_ID DISCOVERY FAILING — /api/agents/me "
+                f"returned {exc}. This agent will receive NO task assignments "
+                f"until discovery succeeds. Degraded retry every "
+                f"{degraded_interval}s.",
+                kind="company_inbox_discovery_failure",
+                level="warning",
+            )
 
     def _close_client(self) -> None:
         if self._client is not None:
@@ -428,6 +582,21 @@ class CompanyInboxChannel:
                 return
             time.sleep(min(1.0, remaining))
 
+    def _extract_agent_id(self, payload: Any) -> str:
+        """Pull ``id`` out of the /me response, tolerant of envelope shape.
+
+        Accepts the canonical ``AgentOut`` dict, or a ``{"data": {...}}``
+        envelope (server side may wrap a non-dict response).
+        """
+        if isinstance(payload, dict):
+            value = payload.get("id")
+            if value:
+                return str(value)
+            inner = payload.get("data")
+            if isinstance(inner, dict) and inner.get("id"):
+                return str(inner["id"])
+        return ""
+
     # ── Health (watchdog integration) ────────────────────────────────────
 
     def health(self) -> dict[str, Any]:
@@ -439,7 +608,32 @@ class CompanyInboxChannel:
                 "last_error": self._last_error,
                 "last_injected_at": self._last_injected_at,
                 "seen_cache_size": len(self._seen),
+                # Discovery surface (spec §4.2). False until the boot-time
+                # /me call has populated COMPANY_AGENT_ID — operators
+                # consume this to tell "channel is silent because of a
+                # backend outage" from "channel is silent because it
+                # never figured out its own UUID".
+                "agent_id_discovered": self._agent_id_discovered,
             }
+
+
+def _replace_agent_id(cfg: Any, agent_id: str) -> Any:
+    """Return ``cfg`` with ``agent_id`` overridden.
+
+    ``CompanyConfig`` is a frozen dataclass so we can't mutate in place.
+    Tests inject ``SimpleNamespace`` for ``_company_cfg``; we accept both
+    by trying dataclasses.replace first and falling back to a shallow
+    rebind on the attribute.
+    """
+    try:
+        return dataclasses.replace(cfg, agent_id=agent_id)
+    except TypeError:
+        # Not a dataclass (e.g. test SimpleNamespace) — set the attr.
+        try:
+            cfg.agent_id = agent_id  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        return cfg
 
 
 def _extract_items(result: Any) -> list[dict[str, Any]]:

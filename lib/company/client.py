@@ -93,6 +93,30 @@ class CompanyClient:
         params = {"wait": str(wait_seconds)} if wait_seconds > 0 else None
         return self._get(url, params=params, bearer_override=callback_token)
 
+    def whoami(self) -> dict[str, Any]:
+        """Resolve the configured bearer to its catalog row.
+
+        Returns the ``AgentOut`` dict (``id``, ``slug``, ``display_name``,
+        ``company``: ``{id, slug, name}`` plus the rest of the catalog
+        fields). Used by the ``company-inbox`` channel at boot to discover
+        its own ``agent_id`` when ``.env`` does not contain it yet.
+
+        Spec: ``docs/specs/agent-self-discovery.md`` §3 + §4.
+
+        Failure modes:
+          - 401 → bearer invalid/revoked. Channel reloads ``.env`` once,
+            then enters degraded loud mode (§4.1.b).
+          - 5xx / transport → ``CompanyError`` propagates; channel retries
+            on the degraded cadence (§4.1.d).
+          - 404 → endpoint not deployed yet (backend PR not merged).
+            Same handling as a discovery failure: degraded, no inbox poll.
+            See §8 for the deploy-order rationale.
+
+        Short timeout: this is a boot-time call on the run loop; do not
+        hang behind the long-poll default.
+        """
+        return self._get("/api/agents/me", timeout=HTTP_TIMEOUT_SECONDS)
+
     def get_inbox(
         self,
         *,
