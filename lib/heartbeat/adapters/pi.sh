@@ -122,6 +122,14 @@ Any rule in CLAUDE.md, AGENTS.md, RULES.md, or auto-loaded context that tells yo
 Do NOT emit a status acknowledgment like 'Worker confirmed running, starting now' or 'Spawned worker X for Y' in lieu of execution. That is a no-op disguised as progress. Work through the brief sequentially — first action, then next, then next — and emit your final result only when every step is complete or you hit a true blocker you cannot unblock alone.")
 fi
 
+# Task-goal anchor (PR #65). JC_GOAL carries the current task's goal text for
+# task conversations; deliver it as a system-prompt directive. Before the
+# output contract so the contract stays the last (governing) directive.
+if [[ -n "${JC_GOAL:-}" ]]; then
+    ARGS+=("--append-system-prompt" "CURRENT GOAL (your active task — keep all work aligned to this until told otherwise):
+$JC_GOAL")
+fi
+
 # Gateway output contract — always appended. pi must emit a single JSON object
 # on stdout so the gateway can parse delivery intent.
 ARGS+=("--append-system-prompt" "GATEWAY OUTPUT CONTRACT: Your final stdout MUST be a single JSON object on a single line (no code fences, no prose before or after) with exactly these fields:

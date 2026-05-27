@@ -119,6 +119,17 @@ gateway boot
   → on shutdown: drain in-flight HTTP, exit cleanly
 ```
 
+**Task closure (opt-in, `emit_task_closed: true`).** When enabled, the poll
+widens to the non-terminal set (`pending, accepted, in_progress, blocked`) and
+the channel emits a synthetic `company.task_closed` event (`meta.kind=
+task_closed`, same `conversation_id`) when a previously-injected task is absent
+from a **non-truncated** poll — i.e. it went terminal. The runtime routes that
+event to clear the task's goal anchor (goal-integration spec §5.3 A); it is a
+control event and is not dispatched to the brain. Default off — goal clear then
+relies on the `goal_cache` TTL floor (§5.3 B), which needs no backend support.
+Widening to in_progress/blocked is what makes absence mean *terminal* rather
+than merely *moved off pending*. See `lib/gateway/channels/company_inbox.py`.
+
 The `seen_cache` is **boot-scoped** — wiped on gateway restart. Re-seeing a
 task on the first post-restart poll is benign: `queue.enqueue()` uses
 `INSERT OR IGNORE` against the partial unique index

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import capabilities, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
+from . import capabilities, goal_cache, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
 from .brain_output import (
     RECOVERED_ENVELOPE_ERROR,
     parse_brain_output,
@@ -606,6 +606,14 @@ class GatewayRuntime:
                 self.log(f"coalesce: marked {len(batch_ids)} events done ids={batch_ids}")
             self.log(f"event auth-token consumed id={event.id}")
             return True
+
+        # Task-goal lifecycle (PR #65). Done here on the dispatch-loop thread so
+        # the goal cache stays single-writer regardless of parallel slots.
+        #   task_assigned → set the anchor, then dispatch normally (brain works it)
+        #   task_closed   → clear the anchor; control event, never hits the brain
+        if self._apply_goal_lifecycle(event, batch_ids):
+            return True
+
         # Parallel mode: hand the (already-claimed) event off to a slot worker.
         # The worker thread owns the row's complete/fail transition; we return
         # immediately so the dispatch loop can claim the next event.
@@ -1416,6 +1424,50 @@ class GatewayRuntime:
                     if not busy:
                         self._busy_slots.pop(key, None)
                 self._slot_active_threads.discard(threading.current_thread())
+
+    def _apply_goal_lifecycle(self, event: queue.Event, batch_ids: list[int]) -> bool:
+        """Set/clear the task-goal anchor (PR #65). Dispatch-loop thread only.
+
+        Returns True iff the event was fully handled here (task_closed control
+        event → no brain dispatch). task_assigned sets the goal and returns
+        False so the event still dispatches to the brain (which works the task).
+        """
+        meta = decode_meta(event)
+        kind = meta.get("kind")
+        conversation_id = event.conversation_id or ""
+
+        if kind == "task_closed":
+            goal_cache.clear(self.instance_dir, conversation_id, meta.get("task_id"))
+            self.log(
+                f"goal cleared conv={conversation_id or '-'} prev_task={meta.get('task_id')}",
+                kind="goal_cleared",
+            )
+            conn = queue.connect(self.instance_dir)
+            try:
+                for eid in batch_ids:
+                    try:
+                        queue.complete(
+                            conn, eid, response="(task closed)", expected_locked_by=self.worker_id
+                        )
+                    except KeyError:
+                        self.log(
+                            f"complete skipped id={eid} reason=lease_lost worker={self.worker_id}"
+                        )
+            finally:
+                conn.close()
+            return True
+
+        if kind == "task_assigned" and conversation_id:
+            text = goal_cache.format_goal(meta)
+            if text and goal_cache.set(
+                self.instance_dir, conversation_id, str(meta.get("task_id") or ""), text
+            ):
+                self.log(
+                    f"goal set conv={conversation_id} task={meta.get('task_id')} "
+                    f"text_chars={len(text)}",
+                    kind="goal_set",
+                )
+        return False
 
     def process_event(self, event: queue.Event, *, slot: int = 0) -> str:
         monotonic_start = time.monotonic()
