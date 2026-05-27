@@ -23,6 +23,10 @@ class EventState:
     last_card_at: float = 0.0
     last_phase: str = ""
     channel_message_id: str | None = None
+    # Last successfully-delivered card text, used to skip no-op edits that
+    # would otherwise hit Telegram's "message is not modified" 400 and cascade
+    # into the edit_then_send fallback (Bug: card pile-up under stable phase).
+    last_card_text: str = ""
     narration_count: int = 0
     last_narration: str = ""
     recovery_attempts: int = 0

@@ -411,6 +411,27 @@ def _render_and_send(
         return narrator_called
 
     if ev_state.channel_message_id:
+        # Skip edit when rendered text is byte-identical to what we last
+        # delivered — Telegram returns 400 "message is not modified" for
+        # no-op edits, and the existing exception path bypasses the
+        # description check and triggers a spurious edit_then_send cascade
+        # that piles orphan cards in the chat.
+        if card.text == ev_state.last_card_text:
+            _write_log(
+                instance_dir,
+                {
+                    "kind": "supervisor_card_rendered",
+                    "ts": now.isoformat(),
+                    "event_id": snap.event.id,
+                    "action": "skip_unchanged",
+                    "phase": snap.phase.phase,
+                    "emoji": snap.phase.emoji,
+                    "language": ev_state.language,
+                    "message_id": ev_state.channel_message_id,
+                    "ok": True,
+                },
+            )
+            return narrator_called
         ok = sender.edit(
             instance_dir=instance_dir,
             source=source,
@@ -462,6 +483,7 @@ def _render_and_send(
         ev_state.last_card_at = now.timestamp()
         ev_state.last_phase = snap.phase.phase
         ev_state.card_count += 1
+        ev_state.last_card_text = card.text
 
     _write_log(
         instance_dir,
