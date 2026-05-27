@@ -35,6 +35,7 @@ from gateway import queue as gateway_queue  # type: ignore
 from workers import db as workers_db  # type: ignore
 
 from . import conf as conf_module
+from . import runtime as runtime_helpers
 from .client import CompanyClient, CompanyError
 from .conf import (
     BATCH_MAX_EVENTS,
@@ -471,6 +472,11 @@ class Reporter:
         self.cfg = cfg or conf_module.load(self.instance_dir)
         self.log = log_event or _stdlog
         self.instance_boot_id = uuid7()
+        # Wall-clock at reporter init — anchors ``runtime.uptime_seconds``.
+        # Spec: docs/specs/reporter-runtime-snapshot.md §3.5. A reporter
+        # restart resets this; the dashboard reads "how long since the
+        # gateway last booted", which is what operators actually want.
+        self.start_time: float = time.time()
 
         self.client = CompanyClient(self.cfg)
         self.outbox = Outbox(
@@ -590,8 +596,37 @@ class Reporter:
     # --- Snapshots ---------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        """Build a ``gateway.snapshot`` payload from the local instance."""
-        return build_snapshot(self.instance_dir)
+        """Build a ``gateway.snapshot`` payload from the local instance.
+
+        Adds a ``runtime`` block on top of the pure :func:`build_snapshot`
+        output (spec docs/specs/reporter-runtime-snapshot.md §3). Every
+        sub-field is best-effort; introspection failures surface as
+        ``None`` so the snapshot still publishes even when the host is
+        in a degraded state.
+        """
+        payload = build_snapshot(self.instance_dir)
+        payload["runtime"] = self._runtime_block()
+        return payload
+
+    def _runtime_block(self) -> dict[str, Any]:
+        """Assemble the §3.1 runtime sub-payload.
+
+        Each helper is best-effort and returns ``None`` on failure; the
+        backend's ``RuntimeBlock`` schema treats every key as optional.
+        ``reported_at`` is the agent-side wall-clock at capture, so the
+        UI can render "30s ago" without trusting the backend's ingest
+        timestamp.
+        """
+        fw_version = conf_module.framework_version()
+        return {
+            "hostname": runtime_helpers.hostname(),
+            "primary_ip": runtime_helpers.primary_ip(self.cfg.endpoint),
+            "framework_version": fw_version,
+            "framework_commit": runtime_helpers.framework_commit(fw_version),
+            "supervisor_pid": runtime_helpers.supervisor_pid(self.instance_dir),
+            "uptime_seconds": runtime_helpers.uptime_seconds(self.start_time),
+            "reported_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     # --- Internals ---------------------------------------------------------
 
