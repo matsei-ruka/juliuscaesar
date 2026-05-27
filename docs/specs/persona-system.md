@@ -355,6 +355,23 @@ If §24 lands marked IMMUTABILE, its body is the framework's canonical text and 
 - **Heartbeat budget.** `self_model_run` calls Claude. Cadence default? Mario uses `0 9 * * 0` (weekly) for the `scan_weekly` detector. Recommendation: weekly default, document the per-cycle token cost in the runbook.
 - **Backups retention.** `memory/.history/` (self-model applier) and `state/persona/redo/` (interview) accumulate. GC policy? Recommendation: keep 90 days, framework heartbeat builtin sweeps older entries.
 
+## Protocol fragments
+
+In addition to the L1 memory materialization (Layer B), agents that
+participate in operational protocols receive small opt-in prompt fragments
+appended to their system text. The fragments live at
+`lib/personas/fragments/*.md.j2` and are gated per-persona via
+`persona.yaml`.
+
+Today there is one fragment — `task_assigned` — which teaches the persona
+how to walk the task-graph FSM and shape `result.payload` when an event
+arrives through the `company-inbox` channel. See
+`docs/specs/persona-task-assigned.md` for the full spec, opt-in shape
+(`task_graph.participates`), and FSM rules.
+
+Fragments are static, English, and brain-internal. Existing personas
+without `persona.yaml` get no fragments and no behavioural change.
+
 ## References
 
 - Reference instance: `/opt/mario_leone_coo/` (v2.3, 2026-05-01).

@@ -36,6 +36,7 @@ L1_FILES = (
 )
 ACCOUNTABILITIES_MANIFEST_FILE = "accountabilities-manifest.md"
 AUTHORITY_MAP_FILE = "authority-map.md"
+PERSONA_YAML_FILE = "persona.yaml"
 MAX_BYTES_PER_FILE = 8000
 _VOICE_ANCHOR_LINE_RE = re.compile(r"^>\s*(.+)$", re.MULTILINE)
 _SECTION_RE_TEMPLATE = r"^#{{1,6}}\s+{heading}\s*$"
@@ -119,6 +120,7 @@ def _fingerprint(instance_dir: Path) -> tuple[tuple[str, float], ...]:
     )
     paths.append((map_rel, map_path))
     paths.append(("ops/gateway.yaml", instance_dir / "ops" / "gateway.yaml"))
+    paths.append((PERSONA_YAML_FILE, instance_dir / PERSONA_YAML_FILE))
     fingerprint: list[tuple[str, float]] = []
     for name, path in paths:
         mtime = 0.0
@@ -288,6 +290,33 @@ def render_adaptive_discovery_block(instance_dir: Path) -> str:
     )
 
 
+def render_persona_fragments_block(instance_dir: Path) -> str:
+    """Return compiled opt-in persona fragments, or ``""`` when none apply.
+
+    Reads ``persona.yaml`` from the instance dir. When the file is absent or
+    the persona has opted into nothing, returns the empty string and the
+    preamble looks byte-identical to the pre-change output.
+
+    Per docs/specs/persona-task-assigned.md §3, the only fragment today is
+    ``task_assigned``, gated on ``task_graph.participates``. The block sits
+    after the L1 memory block (where RULES.md and accountabilities live) so
+    it reads as protocol guidance from the persona's perspective.
+
+    Malformed ``persona.yaml`` raises ``PersonaConfigError`` rather than
+    silently degrading — a typo in the opt-in flag should fail loudly at
+    boot, not stealth-disable the fragment.
+    """
+    try:
+        from personas import compile_fragments, load_persona_config
+    except Exception:
+        # Defensive: if the personas package fails to import (unlikely —
+        # it has no third-party deps), we behave as if no fragments apply.
+        return ""
+
+    persona = load_persona_config(instance_dir)
+    return compile_fragments(persona)
+
+
 def _style_path(instance_dir: Path) -> Path:
     return _l1_dir(instance_dir) / "STYLE.md"
 
@@ -373,6 +402,9 @@ def render_preamble(instance_dir: Path) -> str:
             adaptive_block = render_adaptive_discovery_block(instance_dir)
             if adaptive_block:
                 sections.append(adaptive_block)
+            persona_fragments_block = render_persona_fragments_block(instance_dir)
+            if persona_fragments_block:
+                sections.append(persona_fragments_block)
     memory_block = "\n\n".join(sections) if sections else "(No L1 memory files found.)"
     parts = [
         _ROLE_PREAMBLE,

@@ -1,0 +1,75 @@
+# Task assignments via company-inbox
+
+When you receive an event whose `source` is `"company-inbox"`, it is a task
+assignment from the-company task graph. The event `meta` carries:
+
+- `task_id` — the UUID you PATCH against `PATCH /api/tasks/{task_id}`.
+- `root_id` — the root task this descends from. Equals `task_id` for a root.
+- `title`, `description` — what you have been asked to do.
+- `payload` — task-specific input. May be empty.
+- `parent_id`, `company_id`, `created_by`, `deadline_at` — context for the
+  task tree; not always present.
+
+The `task_id` is the field you need for every PATCH. Do not look for it in
+the event body — read it from `meta.task_id`.
+
+Your job runs in three steps: Decide, Work, Close.
+
+1. Decide. PATCH the task from `pending` to `accepted` if you will do it.
+   If it is misrouted, outside your competence, or obviously broken, PATCH
+   it to `rejected` with the reason in `result.error.message`. Do not
+   ignore the event — leaving a task in `pending` lets the janitor expire
+   it later, which is indistinguishable from "the system is broken".
+
+2. Work. PATCH `accepted` to `in_progress` when you actually start. Do
+   the work. If you need to delegate sub-tasks, `POST
+   /api/tasks/{task_id}/spawn` — see the goal-integration spec for the
+   payload shape.
+
+3. Close. PATCH `in_progress` to `done` with `result.payload` set, or to
+   `failed` with `result.error` set. The shape is below.
+
+The state machine does not allow shortcuts. The legal transitions are:
+
+    pending      → accepted | rejected
+    accepted     → in_progress | rejected
+    in_progress  → done | failed | blocked | rejected
+    blocked      → in_progress | rejected
+
+Going straight from `pending` to `done` returns 422 `illegal_transition`.
+Walk the states. `blocked` is for the kind of stuck that needs a human or
+sibling-agent decision; raise an approval and stop, do not loop.
+
+Result payload shape — success:
+
+    {
+      "payload": <task-specific artifact>,
+      "notes": "<free-text observation, optional>",
+      "warnings": ["<non-fatal issues to flag>"]
+    }
+
+Result payload shape — failure (use with `failed` or `rejected`):
+
+    {
+      "error": {
+        "code": "<short stable identifier>",
+        "message": "<one-line human-readable>",
+        "details": <optional structured>
+      },
+      "notes": "<context about what was tried>"
+    }
+
+`payload` / `error` / `notes` are the agreed slots. Add task-specific
+top-level keys if you genuinely need them, but those three are the
+contract every consumer reads first.
+
+Failure mode to avoid: PATCHing to `done` with empty `result.payload`
+and no `error` block. That is "silencing the task" — looks successful,
+delivered nothing. If you genuinely have no artifact, PATCH `failed` with
+`error.code = "no_artifact"` and explain in `error.message`.
+
+Idempotent re-injection. If you receive a task assignment for a `task_id`
+that is already in a terminal status (`done`, `failed`, `rejected`,
+`expired`), do nothing and log the fact. The channel's dedup usually
+prevents this, but a boot-time replay can slip one through. Re-PATCHing a
+terminal task returns 422; staying silent is the correct response.
