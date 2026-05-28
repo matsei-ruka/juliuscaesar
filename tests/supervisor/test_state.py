@@ -110,3 +110,43 @@ def test_prune_does_not_pin_active_events(tmp_path):
     state.prune({5}, now=1_000_000.0)
     assert "5" in state.events
     assert state.events["5"].pinned_until == 0.0
+
+
+# Bug — gateway-side adapter respawn (timeout → status='queued') drops the
+# EventState before the event re-enters running, losing channel_message_id
+# and posting a fresh card on respawn. Prune must preserve entries that
+# still own user-visible artifacts (a delivered card or a the-company
+# worker.started row); only _finalize_completed should drop those.
+def test_prune_preserves_entries_with_channel_message_id(tmp_path):
+    state = SupervisorState()
+    ev1 = state.event(10)
+    ev1.channel_message_id = "9115"  # card already delivered
+    ev2 = state.event(11)  # pristine entry, no artifacts
+
+    state.prune({99}, now=1_000_000.0)  # neither in active set
+
+    assert "10" in state.events  # preserved — owns a card
+    assert "11" not in state.events  # dropped — nothing to lose
+    assert state.events["10"].pinned_until == 0.0  # no TTL pin needed
+
+
+def test_prune_preserves_entries_with_unfinished_company_row(tmp_path):
+    state = SupervisorState()
+    ev = state.event(20)
+    ev.company_reported_started = True
+    ev.company_reported_finished = False
+
+    state.prune({99}, now=1_000_000.0)
+
+    assert "20" in state.events  # preserved — open the-company row
+
+
+def test_prune_drops_entries_with_only_finalized_company_row(tmp_path):
+    state = SupervisorState()
+    ev = state.event(30)
+    ev.company_reported_started = True
+    ev.company_reported_finished = True  # already closed
+
+    state.prune({99}, now=1_000_000.0)
+
+    assert "30" not in state.events  # safe to drop, nothing pending

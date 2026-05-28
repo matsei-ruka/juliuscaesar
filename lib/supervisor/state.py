@@ -87,6 +87,20 @@ class SupervisorState:
                     ev.pinned_until = now + RECOVERY_STATE_TTL_SECONDS
                 if now < ev.pinned_until:
                     continue
+            # Preserve entries that still own user-visible artifacts: a
+            # delivered progress card or a the-company worker.started row.
+            # Without this, gateway-side adapter respawns (timeout → requeue,
+            # which leaves the event status='queued' so it falls out of the
+            # supervisor snapshot set) silently drop the EventState, then the
+            # next respawn re-enters with channel_message_id=None and posts a
+            # fresh card. _finalize_completed is the only legitimate path to
+            # drop entries with active artifacts — it deletes the card +
+            # finalizes the-company row in lockstep when status reaches done/
+            # failed/escalated.
+            if ev.channel_message_id or (
+                ev.company_reported_started and not ev.company_reported_finished
+            ):
+                continue
             del self.events[k]
 
     @classmethod
