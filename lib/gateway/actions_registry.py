@@ -52,6 +52,9 @@ _lock = threading.Lock()
 _by_session: dict[str, ActionEntry] = {}
 _by_token: dict[str, str] = {}
 _by_event: dict[int, str] = {}
+# Debounce map: session_id → monotonic timestamp of the last action press.
+# Prevents double-tap races when a user hammers Stop/Background quickly.
+_last_action_ts: dict[str, float] = {}
 
 
 def short_token_for(session_id: str) -> str:
@@ -279,6 +282,7 @@ def unregister(session_id: str) -> None:
         _by_token.pop(entry.short_token, None)
         if entry.event_id is not None:
             _by_event.pop(entry.event_id, None)
+        _last_action_ts.pop(session_id, None)
 
 
 def snapshot() -> list[ActionEntry]:
@@ -287,9 +291,30 @@ def snapshot() -> list[ActionEntry]:
         return list(_by_session.values())
 
 
+def check_and_set_debounce(session_id: str, window_seconds: float = 2.0) -> bool:
+    """Debounce guard for Stop/Background button presses.
+
+    Returns True (= "ignore this press") if an action on ``session_id`` was
+    recorded within ``window_seconds``. Otherwise records the current timestamp
+    and returns False (= "proceed").
+
+    Thread-safe; uses the shared registry lock so the check-then-set is atomic.
+    """
+    if not session_id:
+        return False
+    now = time.monotonic()
+    with _lock:
+        last = _last_action_ts.get(session_id, 0.0)
+        if now - last < window_seconds:
+            return True
+        _last_action_ts[session_id] = now
+        return False
+
+
 def clear() -> None:
     """Reset registry — tests only."""
     with _lock:
         _by_session.clear()
         _by_token.clear()
         _by_event.clear()
+        _last_action_ts.clear()

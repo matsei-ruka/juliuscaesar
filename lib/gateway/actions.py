@@ -64,26 +64,35 @@ def stop_session(
     session_id: str,
     *,
     stop_grace_seconds: int = 5,
+    instance_dir: Optional[Path] = None,
+    actor_chat_id: str = "",
     sleep: callable = time.sleep,
     now: callable = time.monotonic,
 ) -> StopResult:
     """SIGTERM + grace + SIGKILL the brain child's process group. Idempotent."""
     start = now()
     entry = actions_registry.resolve_by_session(session_id)
+    chat_id = entry.chat_id if entry is not None else ""
     if entry is None:
-        return StopResult(
+        result = StopResult(
             ok=False,
             already_stopped=False,
             elapsed_ms=0,
             reason="not_found",
         )
+        _audit(instance_dir, session_id, chat_id, "stop", result, time.time(),
+               actor_chat_id=actor_chat_id)
+        return result
     if entry.stopped:
-        return StopResult(
+        result = StopResult(
             ok=True,
             already_stopped=True,
             elapsed_ms=int((now() - start) * 1000),
             reason="already_stopped",
         )
+        _audit(instance_dir, session_id, chat_id, "stop", result, time.time(),
+               actor_chat_id=actor_chat_id)
+        return result
 
     actions_registry.mark_stopped(session_id)
     pid = entry.child_pid
@@ -91,30 +100,39 @@ def stop_session(
     try:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return StopResult(
+        result = StopResult(
             ok=True,
             already_stopped=True,
             elapsed_ms=int((now() - start) * 1000),
             reason="pid_gone",
         )
+        _audit(instance_dir, session_id, chat_id, "stop", result, time.time(),
+               actor_chat_id=actor_chat_id)
+        return result
     except PermissionError as exc:  # pragma: no cover - defensive
-        return StopResult(
+        result = StopResult(
             ok=False,
             already_stopped=False,
             elapsed_ms=int((now() - start) * 1000),
             reason=f"permission: {exc}",
         )
+        _audit(instance_dir, session_id, chat_id, "stop", result, time.time(),
+               actor_chat_id=actor_chat_id)
+        return result
 
     grace = max(0.0, float(stop_grace_seconds))
     deadline = now() + grace
     while now() < deadline:
         if not _pid_alive(pid):
-            return StopResult(
+            result = StopResult(
                 ok=True,
                 already_stopped=False,
                 elapsed_ms=int((now() - start) * 1000),
                 reason="sigterm",
             )
+            _audit(instance_dir, session_id, chat_id, "stop", result, time.time(),
+                   actor_chat_id=actor_chat_id)
+            return result
         sleep(0.1)
 
     escalated = False
@@ -126,12 +144,15 @@ def stop_session(
     except PermissionError:  # pragma: no cover - defensive
         pass
 
-    return StopResult(
+    result = StopResult(
         ok=True,
         already_stopped=False,
         elapsed_ms=int((now() - start) * 1000),
         reason="sigkill" if escalated else "sigterm_late",
     )
+    _audit(instance_dir, session_id, chat_id, "stop", result, time.time(),
+           actor_chat_id=actor_chat_id)
+    return result
 
 
 def background_session(
@@ -141,6 +162,7 @@ def background_session(
     supervisor_msg_id: Optional[int] = None,
     max_per_chat: int = 3,
     instance_dir: Optional[Path] = None,
+    actor_chat_id: str = "",
     now: callable = time.monotonic,
     wall_now: callable = time.time,
 ) -> BackgroundResult:
@@ -175,7 +197,8 @@ def background_session(
             elapsed_ms=0,
             reason="not_found",
         )
-        _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+        _audit(instance_dir, session_id, chat_id, "background", result, wall_now(),
+               actor_chat_id=actor_chat_id)
         return result
     if entry.role == "backgrounded":
         result = BackgroundResult(
@@ -185,7 +208,8 @@ def background_session(
             elapsed_ms=int((now() - start) * 1000),
             reason="already_backgrounded",
         )
-        _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+        _audit(instance_dir, session_id, chat_id, "background", result, wall_now(),
+               actor_chat_id=actor_chat_id)
         return result
     if actions_registry.count_backgrounded_for_chat(chat_id) >= max_per_chat:
         result = BackgroundResult(
@@ -195,7 +219,8 @@ def background_session(
             elapsed_ms=int((now() - start) * 1000),
             reason="cap_reached",
         )
-        _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+        _audit(instance_dir, session_id, chat_id, "background", result, wall_now(),
+               actor_chat_id=actor_chat_id)
         return result
     actions_registry.mark_backgrounded(
         session_id,
@@ -210,7 +235,8 @@ def background_session(
         elapsed_ms=int((now() - start) * 1000),
         reason="backgrounded",
     )
-    _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+    _audit(instance_dir, session_id, chat_id, "background", result, wall_now(),
+           actor_chat_id=actor_chat_id)
     return result
 
 
@@ -221,12 +247,13 @@ def _audit(
     verb: str,
     result: object,
     ts: float,
+    *,
+    actor_chat_id: str = "",
 ) -> None:
     """Append a structured action-record line to ``state/actions.jsonl``.
 
+    Record shape: {ts, session_id, chat_id, verb, actor_chat_id, result}.
     Best-effort: never raises, never blocks the caller on filesystem errors.
-    Spec §Phase 3 wires this into a richer audit pipeline; Phase 2 starts the
-    log so Phase 3 has historical data.
     """
     if instance_dir is None:
         return
@@ -240,6 +267,7 @@ def _audit(
             "session_id": session_id,
             "chat_id": str(chat_id) if chat_id else "",
             "verb": verb,
+            "actor_chat_id": str(actor_chat_id) if actor_chat_id else "",
             "result": _result_to_dict(result),
         }
         with path.open("a", encoding="utf-8") as fh:
@@ -248,8 +276,33 @@ def _audit(
         pass
 
 
+def audit_background_done(
+    instance_dir: Optional[Path],
+    session_id: str,
+    chat_id: str,
+    *,
+    duration_s: float = 0.0,
+    reason: str = "done",
+) -> None:
+    """Write a background_done record to the audit log.
+
+    Called from runtime._handle_background_completion so the doctor check can
+    correlate backgrounded sessions with their completion records.
+    """
+    _audit(
+        instance_dir,
+        session_id,
+        chat_id,
+        "background_done",
+        {"duration_s": round(duration_s, 1), "reason": reason},
+        time.time(),
+    )
+
+
 def _result_to_dict(result: object) -> dict:
-    """Flatten a frozen dataclass result to a JSON-safe mapping."""
+    """Flatten a frozen dataclass or plain dict result to a JSON-safe mapping."""
+    if isinstance(result, dict):
+        return result
     if hasattr(result, "__dict__"):
         return dict(result.__dict__)
     try:

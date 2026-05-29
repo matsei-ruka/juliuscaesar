@@ -1782,6 +1782,19 @@ class GatewayRuntime:
         if body:
             self._log_outbound_transcript(event, body, meta, channel)
 
+        # Audit completion so jc-doctor can correlate with background records.
+        try:
+            from . import actions as _actions
+            _actions.audit_background_done(
+                self.instance_dir,
+                result.action_session_id or "",
+                str(chat_id),
+                duration_s=elapsed_total,
+                reason="done",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         self.log(
             f"background completion delivered event={event.id} chat={chat_id} "
             f"duration={duration_str} buffered={len(buffered)} body_chars={len(body)}",

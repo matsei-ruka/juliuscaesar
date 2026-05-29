@@ -662,13 +662,20 @@ class TelegramChannel:
             self.log(f"telegram action stop unknown token={short_token}")
             return
 
+        if actions_registry.check_and_set_debounce(entry.session_id):
+            self._answer_callback(cq_id, "")
+            return
+
         # ack the tap before doing real work — Telegram drops the spinner once
         # answered, so the user gets feedback even if the kill takes ~5s.
         self._answer_callback(cq_id, "Stopping…")
 
         grace = self._action_stop_grace_seconds()
         result = actions.stop_session(
-            entry.session_id, stop_grace_seconds=grace
+            entry.session_id,
+            stop_grace_seconds=grace,
+            instance_dir=self.instance_dir,
+            actor_chat_id=from_id,
         )
 
         suffix = self._stopped_suffix(entry, result, language=msg)
@@ -717,6 +724,10 @@ class TelegramChannel:
             self.log(f"telegram action background unknown token={short_token}")
             return
 
+        if actions_registry.check_and_set_debounce(entry.session_id):
+            self._answer_callback(cq_id, "")
+            return
+
         chat_id = str(
             entry.chat_id
             or (msg.get("chat") or {}).get("id")
@@ -731,6 +742,7 @@ class TelegramChannel:
             supervisor_msg_id=int(supervisor_msg_id) if supervisor_msg_id else None,
             max_per_chat=max_per_chat,
             instance_dir=self.instance_dir,
+            actor_chat_id=from_id,
         )
 
         if result.capped:
