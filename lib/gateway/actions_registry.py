@@ -37,6 +37,15 @@ class ActionEntry:
     card_text: str = ""
     started_at: float = field(default_factory=time.time)
     stopped: bool = False
+    # Phase 2: session role layer. "primary" is the live session bound to the
+    # chat; "backgrounded" sessions keep running but their output is
+    # intercepted as a completion notification and new chat traffic spawns a
+    # fresh primary instead of resuming the backgrounded brain.
+    role: str = "primary"
+    bg_supervisor_msg_id: Optional[int] = None
+    bg_chat_id: str = ""
+    backgrounded_at: float = 0.0
+    buffered_tool_messages: list[str] = field(default_factory=list)
 
 
 _lock = threading.Lock()
@@ -132,6 +141,131 @@ def mark_stopped(session_id: str) -> None:
         entry = _by_session.get(session_id)
         if entry is not None:
             entry.stopped = True
+
+
+def mark_backgrounded(
+    session_id: str,
+    *,
+    bg_supervisor_msg_id: Optional[int] = None,
+    bg_chat_id: str = "",
+    when: Optional[float] = None,
+) -> bool:
+    """Demote an entry to ``role='backgrounded'`` and snapshot card binding.
+
+    Returns True iff the entry transitioned ``primary → backgrounded`` (i.e.
+    not already backgrounded). Caller is responsible for the cap check —
+    ``count_backgrounded_for_chat`` exposes the live count.
+    """
+    with _lock:
+        entry = _by_session.get(session_id)
+        if entry is None:
+            return False
+        if entry.role == "backgrounded":
+            return False
+        entry.role = "backgrounded"
+        if bg_supervisor_msg_id is not None:
+            entry.bg_supervisor_msg_id = int(bg_supervisor_msg_id)
+        if bg_chat_id:
+            entry.bg_chat_id = str(bg_chat_id)
+        entry.backgrounded_at = float(when if when is not None else time.time())
+        return True
+
+
+def get_primary(chat_id: str) -> Optional[ActionEntry]:
+    """Return the live ``role='primary'`` entry bound to ``chat_id``, or None.
+
+    A chat has at most one primary at any given moment under serial dispatch;
+    parallel slots may transiently overlap, in which case the first match is
+    returned. Backgrounded entries are intentionally invisible to this lookup
+    so the inbound router spawns fresh rather than queueing behind them.
+    """
+    if not chat_id:
+        return None
+    chat_id = str(chat_id)
+    with _lock:
+        for entry in _by_session.values():
+            if entry.role == "primary" and entry.chat_id == chat_id:
+                return entry
+    return None
+
+
+def get_backgrounded_by_chat_id(chat_id: str) -> list[ActionEntry]:
+    """Return every ``role='backgrounded'`` entry bound to ``chat_id``."""
+    if not chat_id:
+        return []
+    chat_id = str(chat_id)
+    with _lock:
+        return [
+            entry for entry in _by_session.values()
+            if entry.role == "backgrounded" and (
+                entry.chat_id == chat_id or entry.bg_chat_id == chat_id
+            )
+        ]
+
+
+def count_backgrounded_for_chat(chat_id: str) -> int:
+    """Cap-check helper: how many backgrounded sessions exist for ``chat_id``."""
+    return len(get_backgrounded_by_chat_id(chat_id))
+
+
+def has_backgrounded_for_conversation(conversation_id: str) -> bool:
+    """True iff any backgrounded session is bound to ``conversation_id``.
+
+    Used by the inbound router to decide whether a fresh primary should be
+    spawned instead of resuming the backgrounded brain's native session.
+    """
+    if not conversation_id:
+        return False
+    conversation_id = str(conversation_id)
+    with _lock:
+        return any(
+            entry.role == "backgrounded" and entry.conversation_id == conversation_id
+            for entry in _by_session.values()
+        )
+
+
+def is_backgrounded(session_id: str) -> bool:
+    """True iff ``session_id`` is currently registered with ``role='backgrounded'``."""
+    if not session_id:
+        return False
+    with _lock:
+        entry = _by_session.get(session_id)
+        return entry is not None and entry.role == "backgrounded"
+
+
+def buffer_tool_message(session_id: str, text: str) -> bool:
+    """Append ``text`` to the entry's buffered_tool_messages. Returns True on hit."""
+    if not session_id or not text:
+        return False
+    with _lock:
+        entry = _by_session.get(session_id)
+        if entry is None:
+            return False
+        entry.buffered_tool_messages.append(str(text))
+        return True
+
+
+def snapshot_backgrounded_state(session_id: str) -> Optional[dict]:
+    """Return a snapshot of fields the runtime needs at completion-card time.
+
+    Captured before ``unregister`` so the runtime can render the "Background
+    done" card after the brain subprocess exits.
+    """
+    with _lock:
+        entry = _by_session.get(session_id)
+        if entry is None:
+            return None
+        return {
+            "role": entry.role,
+            "chat_id": entry.chat_id,
+            "bg_chat_id": entry.bg_chat_id,
+            "bg_supervisor_msg_id": entry.bg_supervisor_msg_id,
+            "supervisor_msg_id": entry.supervisor_msg_id,
+            "card_text": entry.card_text,
+            "started_at": entry.started_at,
+            "backgrounded_at": entry.backgrounded_at,
+            "buffered_tool_messages": list(entry.buffered_tool_messages),
+        }
 
 
 def unregister(session_id: str) -> None:

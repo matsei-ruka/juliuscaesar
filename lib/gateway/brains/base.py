@@ -45,6 +45,17 @@ class BrainResult:
     response: str
     session_id: str | None = None
     push_marker_path: str | None = None
+    # Phase 2: action-registry state snapshotted just before unregister so
+    # the runtime can post a Background-done card when the subprocess was
+    # demoted to background mid-flight.
+    action_session_id: str | None = None
+    action_role: str = "primary"
+    action_bg_chat_id: str = ""
+    action_bg_supervisor_msg_id: int | None = None
+    action_buffered_tool_messages: tuple[str, ...] = ()
+    action_started_at: float = 0.0
+    action_backgrounded_at: float = 0.0
+    action_card_text: str = ""
 
 
 class AdapterFailure(RuntimeError):
@@ -453,6 +464,10 @@ Your reply is only the text the user reads.
                     f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
                     f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
                 )
+                # Capture the entry snapshot before unregister so the runtime
+                # can detect a mid-flight Background and route the final reply
+                # to a completion card.
+                action_snapshot: dict | None = None
                 try:
                     try:
                         prompt_bytes = prompt.encode("utf-8") if prompt else b""
@@ -476,6 +491,9 @@ Your reply is only the text the user reads.
                         f"rc={proc.returncode} duration={duration:.1f}s"
                     )
                 finally:
+                    action_snapshot = actions_registry.snapshot_backgrounded_state(
+                        action_session_id
+                    )
                     actions_registry.unregister(action_session_id)
             finally:
                 stderr_handle.close()
@@ -504,10 +522,31 @@ Your reply is only the text the user reads.
             session_id = self.capture_session_id(start)
         except Exception:  # noqa: BLE001
             session_id = None
+        snap = action_snapshot or {}
         return BrainResult(
             response=stdout.strip(),
             session_id=session_id,
             push_marker_path=str(push_marker_path),
+            action_session_id=action_session_id,
+            action_role=str(snap.get("role") or "primary"),
+            action_bg_chat_id=str(
+                snap.get("bg_chat_id") or snap.get("chat_id") or ""
+            ),
+            action_bg_supervisor_msg_id=(
+                int(snap["bg_supervisor_msg_id"])
+                if snap.get("bg_supervisor_msg_id") is not None
+                else (
+                    int(snap["supervisor_msg_id"])
+                    if snap.get("supervisor_msg_id") is not None
+                    else None
+                )
+            ),
+            action_buffered_tool_messages=tuple(
+                snap.get("buffered_tool_messages") or ()
+            ),
+            action_started_at=float(snap.get("started_at") or 0.0),
+            action_backgrounded_at=float(snap.get("backgrounded_at") or 0.0),
+            action_card_text=str(snap.get("card_text") or ""),
         )
 
     # --- helpers -----------------------------------------------------------

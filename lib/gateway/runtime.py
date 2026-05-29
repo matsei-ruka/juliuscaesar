@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import capabilities, goal_cache, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
+from . import actions_registry, capabilities, goal_cache, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
+from .channels.telegram_outbound import send_text as telegram_send_text
 from .brain_output import (
     RECOVERED_ENVELOPE_ERROR,
     parse_brain_output,
@@ -1523,6 +1524,22 @@ class GatewayRuntime:
         )
 
         resume_session = self._resume_id(channel, event.conversation_id, brain, slot=slot)
+        # Phase 2 — supervisor card Background: when the session bound to
+        # this conversation has been demoted to background, force a fresh
+        # brain session for the new inbound so the backgrounded native
+        # session keeps running uninterrupted to completion.
+        if (
+            resume_session
+            and event.conversation_id
+            and self.config.actions.enabled
+            and actions_registry.has_backgrounded_for_conversation(event.conversation_id)
+        ):
+            self.log(
+                f"session resume bypass id={event.id} conv={event.conversation_id} "
+                f"reason=backgrounded_active — spawning fresh primary",
+                kind="action_routing",
+            )
+            resume_session = None
         self.log(
             f"session resume id={event.id} conv={event.conversation_id or '-'} "
             f"brain={brain} slot={slot} session={resume_session or 'none'}"
@@ -1564,6 +1581,25 @@ class GatewayRuntime:
         finally:
             typing_stop.set()
         self.log(f"dispatch ok id={event.id} brain={brain}")
+
+        # Phase 2 — Background interception: when the brain subprocess was
+        # demoted to background mid-flight, the reply must not flow through
+        # the normal delivery path (the chat is already owned by a fresh
+        # primary session). Re-render as a "Background done" completion
+        # card targeting the original supervisor message and skip the
+        # session-row write (the backgrounded native session is one-shot).
+        if result.action_role == "backgrounded":
+            self._handle_background_completion(
+                event=event,
+                brain=brain,
+                model=model,
+                result=result,
+                meta=meta,
+                channel=channel,
+                monotonic_start=monotonic_start,
+                slot=slot,
+            )
+            return result.response or ""
 
         if result.session_id:
             self._record_session(
@@ -1647,6 +1683,176 @@ class GatewayRuntime:
             config_channels=self.config.channels,
             live_channels=self.channels,
             log=self.log,
+        )
+
+    def _handle_background_completion(
+        self,
+        *,
+        event: queue.Event,
+        brain: str,
+        model: str | None,
+        result: Any,
+        meta: dict[str, Any],
+        channel: str,
+        monotonic_start: float,
+        slot: int,
+    ) -> None:
+        """Render + deliver a "Background done" card for a demoted session.
+
+        Bypasses the normal reply path:
+          - DOES NOT call ``_deliver_response`` (would race with the fresh
+            primary session that now owns the chat).
+          - DOES NOT record the session_id (the backgrounded native session
+            is single-use; no resume of it ever happens).
+          - DOES write the outbound text to the conversation transcript so
+            the new primary can see what the backgrounded sibling produced.
+        """
+        parsed = parse_brain_output(result.response or "", event_source=event.source)
+        body = (parsed.message or "").strip()
+        buffered = list(result.action_buffered_tool_messages or ())
+        # Buffered tool messages were captured mid-task while suppression was
+        # on; prepend them so the operator sees what the brain "would have"
+        # sent during the run.
+        if buffered:
+            buffered_block = "\n\n".join(b.strip() for b in buffered if b and b.strip())
+            if buffered_block:
+                body = buffered_block + (("\n\n" + body) if body else "")
+
+        elapsed_total = max(
+            0.0,
+            time.time() - float(result.action_started_at or monotonic_start),
+        )
+        mm = int(elapsed_total) // 60
+        ss = int(elapsed_total) % 60
+        duration_str = f"{mm:02d}:{ss:02d}"
+        completion_header = f"🔄 Background done · {duration_str}:"
+        completion_text = (
+            f"{completion_header}\n\n{body}" if body else completion_header
+        )
+
+        chat_id = (
+            result.action_bg_chat_id
+            or meta.get("chat_id")
+            or meta.get("notify_chat_id")
+            or event.conversation_id
+            or ""
+        )
+        # Skip the normal Telegram out-path entirely. Build a minimal meta so
+        # send_text writes a fresh message to the same chat without threading
+        # it as a reply to the inbound that triggered the now-stale primary.
+        send_meta: dict[str, Any] = {"chat_id": str(chat_id)}
+        if meta.get("message_thread_id"):
+            send_meta["message_thread_id"] = meta["message_thread_id"]
+
+        token = env_value(self.instance_dir, "TELEGRAM_BOT_TOKEN")
+        if token and chat_id and completion_text.strip():
+            try:
+                telegram_send_text(
+                    instance_dir=self.instance_dir,
+                    token=token,
+                    response=completion_text,
+                    meta=send_meta,
+                    log=self.log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.log(
+                    f"background completion send failed event={event.id}: {exc}",
+                    kind="action_background_send_error",
+                )
+
+        # Edit the original supervisor card: drop the keyboard, append the
+        # "Done at HH:MM:SS UTC · MM:SS" line so the historical card shows
+        # the final state inline.
+        bg_msg_id = result.action_bg_supervisor_msg_id
+        if token and chat_id and bg_msg_id:
+            done_suffix = self._background_done_suffix(duration_str)
+            original = result.action_card_text or ""
+            new_text = (
+                original.rstrip() + "\n\n" + done_suffix if original else done_suffix
+            )
+            self._edit_supervisor_card_after_background_done(
+                token=token,
+                chat_id=str(chat_id),
+                message_id=int(bg_msg_id),
+                text=new_text,
+            )
+
+        # Persist the outbound to the transcript so any follow-up turn in the
+        # fresh primary has visibility into what the background sibling said.
+        if body:
+            self._log_outbound_transcript(event, body, meta, channel)
+
+        self.log(
+            f"background completion delivered event={event.id} chat={chat_id} "
+            f"duration={duration_str} buffered={len(buffered)} body_chars={len(body)}",
+            kind="action_background_completion",
+        )
+
+    @staticmethod
+    def _background_done_suffix(duration_str: str) -> str:
+        """Build the ``🔄 Done at HH:MM:SS UTC · MM:SS`` trailing card line."""
+        hhmmss = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        return f"🔄 Done at {hhmmss} UTC · {duration_str}"
+
+    def _edit_supervisor_card_after_background_done(
+        self,
+        *,
+        token: str,
+        chat_id: str,
+        message_id: int,
+        text: str,
+    ) -> None:
+        """Drop the keyboard and replace the card text with the Done state."""
+        from .channels._http import http_json
+        from .format import to_markdown_v2
+
+        payload = {
+            "chat_id": str(chat_id),
+            "message_id": int(message_id),
+            "text": to_markdown_v2(text),
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
+            "reply_markup": json.dumps({"inline_keyboard": []}),
+        }
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{token}/editMessageText",
+                data=payload,
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                f"background completion card edit failed: {exc}",
+                kind="action_background_edit_error",
+            )
+            return
+        if data.get("ok"):
+            return
+        description = str(data.get("description") or "").lower()
+        if "not modified" in description:
+            return
+        if "parse" in description or "entit" in description:
+            try:
+                http_json(
+                    f"https://api.telegram.org/bot{token}/editMessageText",
+                    data={
+                        "chat_id": str(chat_id),
+                        "message_id": int(message_id),
+                        "text": text,
+                        "disable_web_page_preview": True,
+                        "reply_markup": json.dumps({"inline_keyboard": []}),
+                    },
+                    timeout=10,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.log(
+                    f"background completion card plain-fallback failed: {exc}",
+                    kind="action_background_edit_error",
+                )
+            return
+        self.log(
+            f"background completion card edit not ok: {data}",
+            kind="action_background_edit_error",
         )
 
     def _start_typing(self, channel: str, meta: dict[str, Any]) -> threading.Event:

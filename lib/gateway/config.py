@@ -126,6 +126,13 @@ class ActionsConfig:
 
     enabled: bool = False
     stop_grace_seconds: int = 5
+    # Phase 2: Background button.
+    # Cap on concurrent backgrounded sessions per chat_id. Refused beyond.
+    max_background_per_chat: int = 3
+    # When true, mid-task Telegram sends from a backgrounded session are
+    # buffered into the action entry and prepended to its completion card
+    # rather than delivered immediately. Off → sends pass through normally.
+    suppress_background_tool_messages: bool = True
 
 
 @dataclass(frozen=True)
@@ -1233,7 +1240,12 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         if not isinstance(actions_raw, dict):
             errors.append("actions: must be a mapping")
         else:
-            allowed_actions = {"enabled", "stop_grace_seconds"}
+            allowed_actions = {
+                "enabled",
+                "stop_grace_seconds",
+                "max_background_per_chat",
+                "suppress_background_tool_messages",
+            }
             for key in actions_raw:
                 if key not in allowed_actions:
                     errors.append(f"actions.{key}: unknown field")
@@ -1247,6 +1259,16 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     "actions.stop_grace_seconds",
                     actions_raw["stop_grace_seconds"],
                 )
+            if actions_raw.get("max_background_per_chat") is not None:
+                _validate_positive_int(
+                    errors,
+                    "actions.max_background_per_chat",
+                    actions_raw["max_background_per_chat"],
+                )
+            if actions_raw.get("suppress_background_tool_messages") is not None and not isinstance(
+                actions_raw["suppress_background_tool_messages"], bool
+            ):
+                errors.append("actions.suppress_background_tool_messages: must be boolean")
 
     if errors:
         raise ConfigError("; ".join(errors))
@@ -1557,6 +1579,14 @@ def _load_actions(data: dict[str, Any]) -> ActionsConfig:
             raw.get("stop_grace_seconds")
             if raw.get("stop_grace_seconds") is not None
             else defaults.stop_grace_seconds
+        ),
+        max_background_per_chat=int(
+            raw.get("max_background_per_chat")
+            if raw.get("max_background_per_chat") is not None
+            else defaults.max_background_per_chat
+        ),
+        suppress_background_tool_messages=bool(
+            raw.get("suppress_background_tool_messages", defaults.suppress_background_tool_messages)
         ),
     )
 

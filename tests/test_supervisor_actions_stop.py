@@ -309,7 +309,12 @@ class TelegramActionCallbackTests(unittest.TestCase):
         finally:
             channel.close()
 
-    def test_background_button_answers_coming_soon(self) -> None:
+    def test_background_button_unknown_token_answers_session_ended(self) -> None:
+        # Phase 2 wired the Background button. With no entry registered for
+        # the token, the handler answers "session already ended" and does
+        # not invoke ``background_session`` — same shape as the unknown-stop
+        # case. Phase 2 happy-path coverage lives in
+        # ``test_supervisor_actions_background.py``.
         instance = _make_instance(allowed_chat_ids=["28547271"])
         channel = _make_channel(instance, ["28547271"])
         try:
@@ -331,7 +336,7 @@ class TelegramActionCallbackTests(unittest.TestCase):
                 channel._handle_callback_query(update)
                 self.assertFalse(mock_bg.called)
                 payload = mock_http.call_args.kwargs.get("data") or {}
-                self.assertEqual(payload.get("text"), "Coming soon")
+                self.assertEqual(payload.get("text"), "session already ended")
         finally:
             channel.close()
 

@@ -1,9 +1,5 @@
 """Operator-driven session actions: Stop (Phase 1) and Background (Phase 2).
 
-Phase 1 implements ``stop_session`` only. ``background_session`` is a
-placeholder that returns a ``not_implemented`` result; the Telegram callback
-handler answers "Coming soon" without invoking it.
-
 Stop semantics:
   1. Look up the action entry by ``session_id``.
   2. Mark the entry stopped so a second tap is a no-op.
@@ -17,16 +13,32 @@ Stop semantics:
      ``actions_registry.unregister``, and the natural slot-release path in
      ``_run_in_slot.finally`` frees the parallel slot.
 
-Idempotent — repeated calls return ``already_stopped=True`` without sending
-new signals.
+Background semantics:
+  1. Look up the action entry by ``session_id``.
+  2. Check the per-chat cap (``max_background_per_chat``).
+  3. Flip ``role`` to ``backgrounded``, snapshot the original card binding
+     so the runtime can edit it on completion.
+  4. The brain subprocess keeps running unaware. The inbound router treats
+     the chat as having no primary, so a new inbound message spawns a fresh
+     session immediately. The runtime intercepts the backgrounded session's
+     final reply as a "Background done" completion card.
+  5. Every action attempt is appended to ``state/actions.jsonl`` as a
+     structured audit record.
+
+Both handlers are idempotent — double tap returns ``already_*`` without
+re-executing side effects.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
 from . import actions_registry
 
@@ -42,6 +54,9 @@ class StopResult:
 @dataclass(frozen=True)
 class BackgroundResult:
     ok: bool
+    already_backgrounded: bool = False
+    capped: bool = False
+    elapsed_ms: int = 0
     reason: str = ""
 
 
@@ -119,9 +134,129 @@ def stop_session(
     )
 
 
-def background_session(session_id: str) -> BackgroundResult:
-    """Phase 2 stub. Phase 1 callers answer the callback_query with 'Coming soon'."""
-    return BackgroundResult(ok=False, reason="not_implemented")
+def background_session(
+    session_id: str,
+    *,
+    chat_id: str,
+    supervisor_msg_id: Optional[int] = None,
+    max_per_chat: int = 3,
+    instance_dir: Optional[Path] = None,
+    now: callable = time.monotonic,
+    wall_now: callable = time.time,
+) -> BackgroundResult:
+    """Demote a running session to background. Idempotent + cap-enforced.
+
+    Args:
+      session_id: action-registry session UUID for the running brain child.
+      chat_id: Telegram chat_id the session is bound to. Required so the
+        per-chat cap is enforced consistently regardless of which entry
+        field stored it.
+      supervisor_msg_id: Telegram message_id of the supervisor card to edit
+        on completion. Snapshotted onto the entry as ``bg_supervisor_msg_id``.
+      max_per_chat: refuse if already ``max_per_chat`` backgrounded sessions
+        for this chat (default 3 from ``gateway.actions.max_background_per_chat``).
+      instance_dir: when set, append the audit record to ``state/actions.jsonl``.
+
+    Returns ``BackgroundResult``. Side effects:
+      - registry entry's role → "backgrounded" (mark_backgrounded).
+      - bg_supervisor_msg_id + bg_chat_id snapshotted on entry.
+      - audit record written to ``state/actions.jsonl`` when instance_dir set.
+
+    The brain subprocess is NOT signaled and never learns it was backgrounded
+    — Background is a pure gateway-layer routing trick.
+    """
+    start = now()
+    entry = actions_registry.resolve_by_session(session_id)
+    if entry is None:
+        result = BackgroundResult(
+            ok=False,
+            already_backgrounded=False,
+            capped=False,
+            elapsed_ms=0,
+            reason="not_found",
+        )
+        _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+        return result
+    if entry.role == "backgrounded":
+        result = BackgroundResult(
+            ok=True,
+            already_backgrounded=True,
+            capped=False,
+            elapsed_ms=int((now() - start) * 1000),
+            reason="already_backgrounded",
+        )
+        _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+        return result
+    if actions_registry.count_backgrounded_for_chat(chat_id) >= max_per_chat:
+        result = BackgroundResult(
+            ok=False,
+            already_backgrounded=False,
+            capped=True,
+            elapsed_ms=int((now() - start) * 1000),
+            reason="cap_reached",
+        )
+        _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+        return result
+    actions_registry.mark_backgrounded(
+        session_id,
+        bg_supervisor_msg_id=supervisor_msg_id,
+        bg_chat_id=str(chat_id) if chat_id else "",
+        when=wall_now(),
+    )
+    result = BackgroundResult(
+        ok=True,
+        already_backgrounded=False,
+        capped=False,
+        elapsed_ms=int((now() - start) * 1000),
+        reason="backgrounded",
+    )
+    _audit(instance_dir, session_id, chat_id, "background", result, wall_now())
+    return result
+
+
+def _audit(
+    instance_dir: Optional[Path],
+    session_id: str,
+    chat_id: str,
+    verb: str,
+    result: object,
+    ts: float,
+) -> None:
+    """Append a structured action-record line to ``state/actions.jsonl``.
+
+    Best-effort: never raises, never blocks the caller on filesystem errors.
+    Spec §Phase 3 wires this into a richer audit pipeline; Phase 2 starts the
+    log so Phase 3 has historical data.
+    """
+    if instance_dir is None:
+        return
+    try:
+        path = Path(instance_dir) / "state" / "actions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(
+                timespec="seconds"
+            ).replace("+00:00", "Z"),
+            "session_id": session_id,
+            "chat_id": str(chat_id) if chat_id else "",
+            "verb": verb,
+            "result": _result_to_dict(result),
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def _result_to_dict(result: object) -> dict:
+    """Flatten a frozen dataclass result to a JSON-safe mapping."""
+    if hasattr(result, "__dict__"):
+        return dict(result.__dict__)
+    try:
+        from dataclasses import asdict
+        return asdict(result)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        return {"repr": repr(result)}
 
 
 def _pid_alive(pid: int) -> bool:

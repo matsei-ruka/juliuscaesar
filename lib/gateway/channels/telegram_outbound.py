@@ -16,6 +16,23 @@ from ._http import http_json
 from .base import LogFn
 
 
+def _is_session_backgrounded(action_session_id: str) -> bool:
+    """Defer-load the registry to avoid a hard import cycle on cold tests."""
+    try:
+        from .. import actions_registry  # local import to keep this module light
+        return actions_registry.is_backgrounded(action_session_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _buffer_for_backgrounded(action_session_id: str, text: str) -> None:
+    try:
+        from .. import actions_registry
+        actions_registry.buffer_tool_message(action_session_id, text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def send_typing(
     *,
     token: str,
@@ -80,8 +97,27 @@ def send_text(
     response: str,
     meta: dict[str, Any],
     log: LogFn,
+    action_session_id: str | None = None,
+    suppress_if_backgrounded: bool = True,
 ) -> str | None:
+    """Send `response` to Telegram.
+
+    When ``action_session_id`` identifies a backgrounded session AND
+    ``suppress_if_backgrounded`` is True, the send is buffered onto the
+    action-registry entry (via ``buffer_tool_message``) and the function
+    returns ``None`` without contacting Telegram. The runtime prepends the
+    buffered messages to the session's "Background done" completion card.
+    Set ``suppress_if_backgrounded=False`` (or omit ``action_session_id``)
+    to bypass the hook and deliver normally.
+    """
     if not token or not response.strip():
+        return None
+    if (
+        action_session_id
+        and suppress_if_backgrounded
+        and _is_session_backgrounded(action_session_id)
+    ):
+        _buffer_for_backgrounded(action_session_id, response)
         return None
     chat_id = str(
         meta.get("chat_id")
