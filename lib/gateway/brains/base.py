@@ -15,11 +15,13 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .. import actions_registry
 from .. import chats as chats_module
 from .. import goal_cache
 from .. import transcripts as transcripts_module
@@ -423,31 +425,58 @@ Your reply is only the text the user reads.
                         f"adapter spawn failed event={event.id} brain={self.name} reason={exc}"
                     )
                     raise
+                # Register the live brain child with the action registry so
+                # the supervisor card can carry a ✋ Stop / 🔄 Background
+                # button bound to this exact session. The subprocess was
+                # launched with start_new_session=True so its PGID == its PID.
+                action_session_id = uuid.uuid4().hex
+                action_short_token = actions_registry.short_token_for(action_session_id)
+                meta_dict = self._meta(event)
+                action_slot = 0
+                try:
+                    action_slot = int(meta_dict.get("slot") or 0)
+                except (TypeError, ValueError):
+                    action_slot = 0
+                action_chat_id = str(
+                    meta_dict.get("chat_id") or event.conversation_id or ""
+                )
+                actions_registry.register(
+                    short_token=action_short_token,
+                    session_id=action_session_id,
+                    child_pid=proc.pid,
+                    slot_id=action_slot,
+                    chat_id=action_chat_id,
+                    conversation_id=event.conversation_id or "",
+                    event_id=event.id,
+                )
                 log(
                     f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
                     f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
                 )
                 try:
-                    prompt_bytes = prompt.encode("utf-8") if prompt else b""
-                    _, _ = proc.communicate(prompt_bytes, timeout=timeout)
-                except subprocess.TimeoutExpired:
+                    try:
+                        prompt_bytes = prompt.encode("utf-8") if prompt else b""
+                        _, _ = proc.communicate(prompt_bytes, timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        duration = time.monotonic() - wall_start
+                        log(
+                            f"adapter timeout event={event.id} brain={self.name} "
+                            f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                        )
+                        killpg(proc.pid, signal.SIGTERM)
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            killpg(proc.pid, signal.SIGKILL)
+                            proc.wait()
+                        raise AdapterTimeout(self.name, timeout, _read_tail(stderr_path))
                     duration = time.monotonic() - wall_start
                     log(
-                        f"adapter timeout event={event.id} brain={self.name} "
-                        f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                        f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
+                        f"rc={proc.returncode} duration={duration:.1f}s"
                     )
-                    killpg(proc.pid, signal.SIGTERM)
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                    raise AdapterTimeout(self.name, timeout, _read_tail(stderr_path))
-                duration = time.monotonic() - wall_start
-                log(
-                    f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
-                    f"rc={proc.returncode} duration={duration:.1f}s"
-                )
+                finally:
+                    actions_registry.unregister(action_session_id)
             finally:
                 stderr_handle.close()
                 stdout_handle.close()

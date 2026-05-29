@@ -116,6 +116,19 @@ class ParallelClassifierConfig:
 
 
 @dataclass(frozen=True)
+class ActionsConfig:
+    """Supervisor card action buttons (Stop / Background).
+
+    Phase 1 gates everything behind ``enabled`` (default off). Cards continue
+    to render without buttons when off, matching pre-feature behavior.
+    See docs/specs/supervisor-card-actions.md.
+    """
+
+    enabled: bool = False
+    stop_grace_seconds: int = 5
+
+
+@dataclass(frozen=True)
 class ParallelConfig:
     """Per-conversation parallel-slot dispatch.
 
@@ -227,6 +240,7 @@ class GatewayConfig:
         default_factory=AdaptiveDiscoveryConfig
     )
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
+    actions: ActionsConfig = field(default_factory=ActionsConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -571,6 +585,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "triage_backup",
         "supervisor",
         "parallel",
+        "actions",
     }
     for key in data:
         if key not in allowed_top:
@@ -1213,6 +1228,26 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                                 errors, f"parallel.classifier.{key}", classifier_raw[key]
                             )
 
+    actions_raw = data.get("actions")
+    if actions_raw is not None:
+        if not isinstance(actions_raw, dict):
+            errors.append("actions: must be a mapping")
+        else:
+            allowed_actions = {"enabled", "stop_grace_seconds"}
+            for key in actions_raw:
+                if key not in allowed_actions:
+                    errors.append(f"actions.{key}: unknown field")
+            if actions_raw.get("enabled") is not None and not isinstance(
+                actions_raw["enabled"], bool
+            ):
+                errors.append("actions.enabled: must be boolean")
+            if actions_raw.get("stop_grace_seconds") is not None:
+                _validate_positive_int(
+                    errors,
+                    "actions.stop_grace_seconds",
+                    actions_raw["stop_grace_seconds"],
+                )
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1513,6 +1548,19 @@ def _load_parallel(data: dict[str, Any]) -> ParallelConfig:
     )
 
 
+def _load_actions(data: dict[str, Any]) -> ActionsConfig:
+    raw = data.get("actions") if isinstance(data.get("actions"), dict) else {}
+    defaults = ActionsConfig()
+    return ActionsConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        stop_grace_seconds=int(
+            raw.get("stop_grace_seconds")
+            if raw.get("stop_grace_seconds") is not None
+            else defaults.stop_grace_seconds
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1630,6 +1678,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         inter_agent_protocol=_load_inter_agent_protocol(data),
         adaptive_discovery=_load_adaptive_discovery(data),
         parallel=_load_parallel(data),
+        actions=_load_actions(data),
     )
 
 

@@ -18,6 +18,7 @@ wires the AI narrator).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .models import PhaseResult
 
@@ -62,11 +63,42 @@ _LABELS: dict[str, dict[str, str]] = {
 
 @dataclass(frozen=True)
 class Card:
-    """A rendered supervisor card ready for channel delivery."""
+    """A rendered supervisor card ready for channel delivery.
+
+    ``reply_markup`` and ``short_token`` are populated only when supervisor
+    card actions (`gateway.actions.enabled: true`) are on. Delivery layers
+    that support inline keyboards (Telegram today) attach the markup to the
+    outbound payload and bind ``short_token`` → ``supervisor_msg_id`` in the
+    action registry after a successful send. Channels without inline-keyboard
+    support ignore both fields.
+    """
     text: str
     phase: str
     emoji: str
     language: str
+    reply_markup: dict[str, Any] | None = None
+    short_token: str | None = None
+
+
+def build_action_keyboard(short_token: str) -> dict[str, Any]:
+    """Inline keyboard for supervisor card actions: ✋ Stop | 🔄 Background.
+
+    callback_data format: ``act:<verb>:<short_token>`` where ``<short_token>``
+    is the first 12 chars of the action session UUID (hex). Bounded well
+    under Telegram's 64-byte callback_data limit.
+    """
+    return {
+        "inline_keyboard": [[
+            {
+                "text": "✋ Stop",
+                "callback_data": f"act:stop:{short_token}",
+            },
+            {
+                "text": "🔄 Background",
+                "callback_data": f"act:bg:{short_token}",
+            },
+        ]]
+    }
 
 
 def render_card(
@@ -78,6 +110,7 @@ def render_card(
     language: str = "en",
     slot: int | None = None,
     max_concurrent: int = 1,
+    actions_short_token: str | None = None,
 ) -> Card:
     """Build the card text. Pure function; no I/O.
 
@@ -115,11 +148,16 @@ def render_card(
             lines.append(f"{_LABELS['signal'][lang]}: {narration}")
         lines.append(elapsed_line)
 
+    reply_markup = (
+        build_action_keyboard(actions_short_token) if actions_short_token else None
+    )
     return Card(
         text="\n".join(lines),
         phase=phase.phase,
         emoji=phase.emoji,
         language=lang,
+        reply_markup=reply_markup,
+        short_token=actions_short_token,
     )
 
 
