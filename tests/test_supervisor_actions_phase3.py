@@ -562,5 +562,112 @@ class DoctorActionsCheckTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Cross-process registry persistence (disk shadow)
+# ---------------------------------------------------------------------------
+
+
+class DiskPersistenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        actions_registry.clear()
+
+    def tearDown(self) -> None:
+        actions_registry.clear()
+
+    def test_register_writes_event_file(self) -> None:
+        instance = Path(tempfile.mkdtemp(prefix="disk-reg-"))
+        sid = "s" * 32
+        actions_registry.register(
+            short_token=sid[:12],
+            session_id=sid,
+            child_pid=1234,
+            slot_id=0,
+            chat_id="111",
+            event_id=42,
+            instance_dir=instance,
+        )
+        event_file = instance / "state" / "actions" / "event-42.json"
+        self.assertTrue(event_file.exists(), "event file should be written on register")
+        data = json.loads(event_file.read_text())
+        self.assertEqual(data["session_id"], sid)
+        self.assertEqual(data["short_token"], sid[:12])
+        self.assertEqual(data["event_id"], 42)
+
+    def test_unregister_removes_event_file(self) -> None:
+        instance = Path(tempfile.mkdtemp(prefix="disk-unreg-"))
+        sid = "t" * 32
+        actions_registry.register(
+            short_token=sid[:12],
+            session_id=sid,
+            child_pid=1,
+            slot_id=0,
+            event_id=99,
+            instance_dir=instance,
+        )
+        event_file = instance / "state" / "actions" / "event-99.json"
+        self.assertTrue(event_file.exists())
+        actions_registry.unregister(sid, instance_dir=instance)
+        self.assertFalse(event_file.exists(), "event file should be removed on unregister")
+
+    def test_resolve_by_event_with_disk_cross_process(self) -> None:
+        """Simulate cross-process lookup: write entry, clear memory, read from disk."""
+        instance = Path(tempfile.mkdtemp(prefix="disk-xproc-"))
+        sid = "u" * 32
+        actions_registry.register(
+            short_token=sid[:12],
+            session_id=sid,
+            child_pid=999,
+            slot_id=0,
+            chat_id="222",
+            event_id=77,
+            instance_dir=instance,
+        )
+        # Simulate another process: clear in-mem state.
+        actions_registry.clear()
+        entry = actions_registry.resolve_by_event_with_disk(instance, 77)
+        self.assertIsNotNone(entry, "should fall back to disk-loaded entry")
+        self.assertEqual(entry.session_id, sid)
+        self.assertEqual(entry.short_token, sid[:12])
+        self.assertEqual(entry.chat_id, "222")
+        self.assertFalse(entry.stopped)
+
+    def test_resolve_with_disk_returns_inmem_when_present(self) -> None:
+        instance = Path(tempfile.mkdtemp(prefix="disk-prefer-mem-"))
+        sid = "v" * 32
+        actions_registry.register(
+            short_token=sid[:12],
+            session_id=sid,
+            child_pid=42,
+            slot_id=0,
+            event_id=55,
+            instance_dir=instance,
+        )
+        entry = actions_registry.resolve_by_event_with_disk(instance, 55)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.child_pid, 42)
+
+    def test_resolve_with_disk_returns_none_when_missing(self) -> None:
+        instance = Path(tempfile.mkdtemp(prefix="disk-empty-"))
+        entry = actions_registry.resolve_by_event_with_disk(instance, 1234)
+        self.assertIsNone(entry)
+
+    def test_mark_stopped_persists_to_disk(self) -> None:
+        instance = Path(tempfile.mkdtemp(prefix="disk-stop-"))
+        sid = "w" * 32
+        actions_registry.register(
+            short_token=sid[:12],
+            session_id=sid,
+            child_pid=1,
+            slot_id=0,
+            event_id=33,
+            instance_dir=instance,
+        )
+        actions_registry.mark_stopped(sid, instance_dir=instance)
+        actions_registry.clear()
+        entry = actions_registry.resolve_by_event_with_disk(instance, 33)
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry.stopped, "stopped flag should survive cross-process")
+
+
 if __name__ == "__main__":
     unittest.main()

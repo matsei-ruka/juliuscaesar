@@ -94,7 +94,7 @@ def stop_session(
                actor_chat_id=actor_chat_id)
         return result
 
-    actions_registry.mark_stopped(session_id)
+    actions_registry.mark_stopped(session_id, instance_dir=instance_dir)
     pid = entry.child_pid
 
     try:
@@ -227,6 +227,7 @@ def background_session(
         bg_supervisor_msg_id=supervisor_msg_id,
         bg_chat_id=str(chat_id) if chat_id else "",
         when=wall_now(),
+        instance_dir=instance_dir,
     )
     result = BackgroundResult(
         ok=True,

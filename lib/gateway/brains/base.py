@@ -459,6 +459,7 @@ Your reply is only the text the user reads.
                     chat_id=action_chat_id,
                     conversation_id=event.conversation_id or "",
                     event_id=event.id,
+                    instance_dir=self.instance_dir,
                 )
                 log(
                     f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
@@ -494,7 +495,9 @@ Your reply is only the text the user reads.
                     action_snapshot = actions_registry.snapshot_backgrounded_state(
                         action_session_id
                     )
-                    actions_registry.unregister(action_session_id)
+                    actions_registry.unregister(
+                        action_session_id, instance_dir=self.instance_dir
+                    )
             finally:
                 stderr_handle.close()
                 stdout_handle.close()

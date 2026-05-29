@@ -760,7 +760,7 @@ def _actions_short_token(instance_dir: Path, event_id: int) -> str | None:
             return None
     except Exception:  # noqa: BLE001 — never block card render on a config error
         return None
-    entry = actions_registry.resolve_by_event(int(event_id))
+    entry = actions_registry.resolve_by_event_with_disk(instance_dir, int(event_id))
     if entry is None or entry.stopped:
         return None
     return entry.short_token

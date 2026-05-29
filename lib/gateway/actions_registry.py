@@ -18,9 +18,12 @@ slot-worker threads while the Telegram poller reads + mutates concurrently.
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
@@ -57,6 +60,87 @@ _by_event: dict[int, str] = {}
 _last_action_ts: dict[str, float] = {}
 
 
+# --- Disk persistence (cross-process visibility) ---------------------------
+#
+# `actions_registry` is in-process state, but two distinct processes need to
+# read the same entry:
+#   - gateway PID: registers entries when spawning brain children, resolves
+#     callback tokens, marks stopped/backgrounded.
+#   - supervisor PID: rendering a supervisor card needs the entry's
+#     short_token (looked up by event_id) so the card carries the inline
+#     keyboard. Without disk persistence the supervisor's in-memory map is
+#     always empty and no buttons ever appear.
+#
+# Shadow each in-mem entry to ``<instance_dir>/state/actions/event-<id>.json``.
+# Cheap one-shot JSON write; cleanup on unregister. The supervisor's
+# ``_actions_short_token`` reads the file when in-mem misses.
+
+
+def _event_file(instance_dir: Path, event_id: int) -> Path:
+    return Path(instance_dir) / "state" / "actions" / f"event-{int(event_id)}.json"
+
+
+def _persist_entry(instance_dir: Optional[Path], entry: ActionEntry) -> None:
+    if instance_dir is None or entry.event_id is None:
+        return
+    try:
+        path = _event_file(instance_dir, entry.event_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": entry.session_id,
+            "short_token": entry.short_token,
+            "child_pid": entry.child_pid,
+            "slot_id": entry.slot_id,
+            "chat_id": entry.chat_id,
+            "conversation_id": entry.conversation_id,
+            "event_id": entry.event_id,
+            "supervisor_msg_id": entry.supervisor_msg_id,
+            "started_at": entry.started_at,
+            "stopped": entry.stopped,
+            "role": entry.role,
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _remove_entry_file(instance_dir: Optional[Path], event_id: Optional[int]) -> None:
+    if instance_dir is None or event_id is None:
+        return
+    try:
+        _event_file(instance_dir, event_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _load_entry_from_disk(instance_dir: Path, event_id: int) -> Optional[ActionEntry]:
+    path = _event_file(instance_dir, event_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return ActionEntry(
+        session_id=data.get("session_id", ""),
+        short_token=data.get("short_token", ""),
+        child_pid=int(data.get("child_pid") or 0),
+        slot_id=int(data.get("slot_id") or 0),
+        chat_id=str(data.get("chat_id") or ""),
+        conversation_id=str(data.get("conversation_id") or ""),
+        event_id=int(data["event_id"]) if data.get("event_id") is not None else None,
+        supervisor_msg_id=(
+            int(data["supervisor_msg_id"])
+            if data.get("supervisor_msg_id") is not None else None
+        ),
+        started_at=float(data.get("started_at") or 0.0),
+        stopped=bool(data.get("stopped") or False),
+        role=str(data.get("role") or "primary"),
+    )
+
+
 def short_token_for(session_id: str) -> str:
     """Return the 12-char short token for a session UUID (hex, no dashes)."""
     return session_id.replace("-", "")[:12]
@@ -72,8 +156,14 @@ def register(
     chat_id: str = "",
     conversation_id: str = "",
     event_id: Optional[int] = None,
+    instance_dir: Optional[Path] = None,
 ) -> None:
-    """Register a freshly-spawned brain child. Idempotent on session_id."""
+    """Register a freshly-spawned brain child. Idempotent on session_id.
+
+    When ``instance_dir`` is set, also persists the entry to
+    ``state/actions/event-<event_id>.json`` so the supervisor process (a
+    different PID) can read it.
+    """
     entry = ActionEntry(
         session_id=session_id,
         short_token=short_token,
@@ -89,6 +179,7 @@ def register(
         _by_token[short_token] = session_id
         if entry.event_id is not None:
             _by_event[entry.event_id] = session_id
+    _persist_entry(instance_dir, entry)
 
 
 def resolve(short_token: str) -> Optional[ActionEntry]:
@@ -138,12 +229,14 @@ def attach_supervisor_message_by_token(
         return True
 
 
-def mark_stopped(session_id: str) -> None:
+def mark_stopped(session_id: str, *, instance_dir: Optional[Path] = None) -> None:
     """Mark an entry as stopped so a second tap is a no-op."""
     with _lock:
         entry = _by_session.get(session_id)
         if entry is not None:
             entry.stopped = True
+    if entry is not None:
+        _persist_entry(instance_dir, entry)
 
 
 def mark_backgrounded(
@@ -152,6 +245,7 @@ def mark_backgrounded(
     bg_supervisor_msg_id: Optional[int] = None,
     bg_chat_id: str = "",
     when: Optional[float] = None,
+    instance_dir: Optional[Path] = None,
 ) -> bool:
     """Demote an entry to ``role='backgrounded'`` and snapshot card binding.
 
@@ -171,7 +265,8 @@ def mark_backgrounded(
         if bg_chat_id:
             entry.bg_chat_id = str(bg_chat_id)
         entry.backgrounded_at = float(when if when is not None else time.time())
-        return True
+    _persist_entry(instance_dir, entry)
+    return True
 
 
 def get_primary(chat_id: str) -> Optional[ActionEntry]:
@@ -271,10 +366,11 @@ def snapshot_backgrounded_state(session_id: str) -> Optional[dict]:
         }
 
 
-def unregister(session_id: str) -> None:
+def unregister(session_id: str, *, instance_dir: Optional[Path] = None) -> None:
     """Drop the entry — called from base.py finally when the subprocess exits."""
     if not session_id:
         return
+    event_id_to_remove: Optional[int] = None
     with _lock:
         entry = _by_session.pop(session_id, None)
         if entry is None:
@@ -282,7 +378,25 @@ def unregister(session_id: str) -> None:
         _by_token.pop(entry.short_token, None)
         if entry.event_id is not None:
             _by_event.pop(entry.event_id, None)
+            event_id_to_remove = entry.event_id
         _last_action_ts.pop(session_id, None)
+    _remove_entry_file(instance_dir, event_id_to_remove)
+
+
+def resolve_by_event_with_disk(
+    instance_dir: Optional[Path], event_id: int
+) -> Optional[ActionEntry]:
+    """Like ``resolve_by_event`` but also consults the on-disk shadow.
+
+    Lets the supervisor process (separate PID from gateway) read entries
+    registered by the gateway. Disk fallback only when in-memory misses.
+    """
+    in_mem = resolve_by_event(event_id)
+    if in_mem is not None:
+        return in_mem
+    if instance_dir is None or event_id is None:
+        return None
+    return _load_entry_from_disk(Path(instance_dir), int(event_id))
 
 
 def snapshot() -> list[ActionEntry]:
