@@ -17,9 +17,9 @@ if [[ "$MODEL" == claude:* ]]; then
     MODEL="${MODEL#claude:}"
 fi
 case "$MODEL" in
-    opus|opus-4-7|opus-4-7-1m) MODEL="claude-opus-4-7"    ;;
-    sonnet|sonnet-4-6)          MODEL="claude-sonnet-4-6"  ;;
-    haiku|haiku-4-5*)           MODEL="claude-haiku-4-5-20251001" ;;
+    opus|opus-4-7|opus-4-7-1m|opus-4-8) MODEL="opus"   ;;
+    sonnet|sonnet-4-6|sonnet-4-7)        MODEL="sonnet" ;;
+    haiku|haiku-4-5*)                    MODEL="haiku"  ;;
 esac
 
 # Use subscription auth (no API key env var set). No --channels flag: scheduled
