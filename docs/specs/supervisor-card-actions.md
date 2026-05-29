@@ -186,13 +186,13 @@ Acceptance: zero leaked backgrounded sessions in 7-day fleet observation window;
 
 ---
 
-## 6. Open questions for Luca
+## 6. Design decisions (resolved 2026-05-29)
 
-1. **Stop signal:** SIGTERM with `stop_grace_seconds=5` then SIGKILL (graceful drain attempt) — or SIGKILL immediately (no graceful, no risk of stuck process)? Default proposed: graceful.
-2. **Background concurrency cap:** `max_background_per_chat=3` — should this be lower (1-2) to prevent operator from accidentally spawning a runaway? Default proposed: 3.
-3. **Background completion delivery:** when the backgrounded session completes, does the completion card reply to the ORIGINAL supervisor message thread, or land as a fresh message at the bottom of the chat? Default proposed: fresh message + edit of the original card.
-4. **Authorization tier:** only operator chat_ids in `channels.telegram.chat_ids`, or open to any chat_id that already passed `chat_auth`? Default proposed: operator-only.
-5. **Codex output interception:** stdout sidecar buffers the whole session; how do we detect "final reply" vs "intermediate output"? Proposed: use sidecar EOF + exit code. Open to alternatives.
+1. **Stop signal:** SIGTERM + `stop_grace_seconds=5` then SIGKILL. ✅ graceful.
+2. **Background concurrency cap:** `max_background_per_chat=3`. ✅ proposed.
+3. **Background completion delivery:** fresh message + edit original card. ✅ proposed.
+4. **Authorization tier:** any chat_id that passed `chat_auth` (not just operator-only). ✅ open.
+5. **Codex final-reply detection:** stdout EOF + exit code. ✅ proposed.
 
 ---
 
