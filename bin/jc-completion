@@ -57,7 +57,7 @@ _jc_complete() {
         commitments)  COMPREPLY=( $(compgen -W "tick add list show cancel --instance-dir --dry-run --status --tag" -- "$cur") ) ;;
         dream)        COMPREPLY=( $(compgen -W "tick dry-run run list show pending approve reject --instance-dir --since --until --dry-run" -- "$cur") ) ;;
         gateway)      COMPREPLY=( $(compgen -W "init status run start stop restart tail logs enqueue claim complete fail list events retry config validate-config work-once metrics reload --instance-dir" -- "$cur") ) ;;
-        company)      COMPREPLY=( $(compgen -W "register status alert approval replay --instance-dir" -- "$cur") ) ;;
+        company)      COMPREPLY=( $(compgen -W "register status alert approval task replay --instance-dir" -- "$cur") ) ;;
         setup)        COMPREPLY=( $(compgen -W "--defaults --force --start --no-start --install-watchdog --no-watchdog --no-wait --channel" -- "$cur") ) ;;
         update)       COMPREPLY=( $(compgen -W "--check-only --yes --instance-dir" -- "$cur") ) ;;
         upgrade)      COMPREPLY=( $(compgen -W "--instance-dir --defaults --restart" -- "$cur") ) ;;
@@ -107,7 +107,7 @@ case "$words[2]" in
   commitments)  _values 'commitments command' tick add list show cancel ;;
   dream)        _values 'dream command' tick dry-run run list show pending approve reject ;;
   gateway)      _values 'gateway command' init status run start stop restart tail logs enqueue claim complete fail list events retry config validate-config work-once metrics reload ;;
-  company)      _values 'company command' register status alert approval replay ;;
+  company)      _values 'company command' register status alert approval task replay ;;
   user-model)   _values 'user-model command' run-now status review apply reject install uninstall ;;
   self-model)   _values 'self-model command' run status list approve reject history ;;
   persona)      _values 'persona command' interview gaps doctor ;;

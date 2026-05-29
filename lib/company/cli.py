@@ -7,6 +7,7 @@ Subcommands:
 * ``status`` — endpoint, agent_id, API-key presence, outbox depth, reporter run.
 * ``alert`` — fire-and-forget alert POST.
 * ``approval`` — raise + optionally block until decided.
+* ``task`` — task graph read / create / update helpers.
 * ``replay`` — drain ``state/company/outbox/`` to the backend.
 """
 
@@ -65,6 +66,45 @@ def _parse_since(token: str) -> datetime:
     if delta is None:
         raise ValueError(f"--since unit must be s/m/h/d: {token!r}")
     return datetime.now(timezone.utc) - delta
+
+
+def _load_json_arg(value: str | None, *, field: str) -> dict[str, Any]:
+    """Parse an inline JSON object or @path JSON object.
+
+    Empty / missing values map to ``{}``. This keeps CLI calls idempotent
+    and avoids forcing agents to create temporary files for simple payloads.
+    """
+    if not value:
+        return {}
+    text: str
+    if value.startswith("@"):
+        path = Path(value[1:]).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise SystemExit(f"{field}: file not found: {path}") from exc
+    else:
+        text = value
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{field}: invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"{field}: JSON must be an object")
+    return data
+
+
+def _client_for(instance: Path) -> CompanyClient:
+    cfg = conf_module.load(instance)
+    if not cfg.endpoint:
+        raise SystemExit("COMPANY_ENDPOINT missing — run `jc company register` first")
+    if not cfg.api_key:
+        raise SystemExit("COMPANY_API_KEY missing — run `jc company register` first")
+    return CompanyClient(cfg)
+
+
+def _print_json(data: dict[str, Any]) -> None:
+    print(json.dumps(data, indent=2, sort_keys=True))
 
 
 # --- register --------------------------------------------------------------
@@ -245,6 +285,129 @@ def cmd_approval(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- task ------------------------------------------------------------------
+
+
+def cmd_task_inbox(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        agent = client.whoami()
+        agent_id = str(agent.get("id") or "")
+        if not agent_id:
+            raise SystemExit(f"whoami returned no id: {agent}")
+        result = client.get_inbox(
+            agent_id=agent_id,
+            statuses=tuple(args.status or ("pending", "accepted", "in_progress", "blocked")),
+            limit=args.limit,
+        )
+    except CompanyError as exc:
+        raise SystemExit(f"task inbox failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def cmd_task_list(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        result = client.list_tasks(
+            statuses=tuple(args.status or ()),
+            owner_agent_id=args.owner_agent_id,
+            root_id=args.root_id,
+            company_id=args.company_id,
+            limit=args.limit,
+        )
+    except CompanyError as exc:
+        raise SystemExit(f"task list failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def cmd_task_get(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        result = client.get_task(args.task_id)
+    except CompanyError as exc:
+        raise SystemExit(f"task get failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def _task_body(args: argparse.Namespace, *, include_budgets: bool) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "owner_slug": args.owner,
+        "title": args.title,
+        "payload": _load_json_arg(args.payload, field="--payload"),
+    }
+    if args.description:
+        body["description"] = args.description
+    if getattr(args, "parent_task_id", None):
+        body["parent_task_id"] = args.parent_task_id
+    if include_budgets:
+        for attr in ("max_nodes", "max_depth", "max_age_seconds"):
+            value = getattr(args, attr, None)
+            if value is not None:
+                body[attr] = value
+    return body
+
+
+def cmd_task_create(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        result = client.create_task(_task_body(args, include_budgets=True))
+    except CompanyError as exc:
+        raise SystemExit(f"task create failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def cmd_task_spawn(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        result = client.spawn_task(
+            args.task_id,
+            _task_body(args, include_budgets=False),
+        )
+    except CompanyError as exc:
+        raise SystemExit(f"task spawn failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def cmd_task_update(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    body: dict[str, Any] = {}
+    if args.status:
+        body["status"] = args.status
+    if args.result:
+        body["result"] = _load_json_arg(args.result, field="--result")
+    if not body:
+        raise SystemExit("task update requires --status and/or --result")
+    client = _client_for(instance)
+    try:
+        result = client.patch_task(args.task_id, body)
+    except CompanyError as exc:
+        raise SystemExit(f"task update failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
 # --- replay ----------------------------------------------------------------
 
 
@@ -311,6 +474,45 @@ def build_parser() -> argparse.ArgumentParser:
     apr.add_argument("--expires-in", type=int, default=None, help="seconds until expiry")
     apr.add_argument("--wait", type=int, default=0, help="block up to N seconds waiting for decision")
 
+    tp = subs.add_parser("task", help="task graph operations")
+    task_sub = tp.add_subparsers(dest="task_cmd", required=True)
+
+    ti = task_sub.add_parser("inbox", help="list this agent's inbox")
+    ti.add_argument("--status", action="append", default=None)
+    ti.add_argument("--limit", type=int, default=20)
+
+    tl = task_sub.add_parser("list", help="list tasks by status/root/owner id")
+    tl.add_argument("--status", action="append", default=None)
+    tl.add_argument("--owner-agent-id", default=None)
+    tl.add_argument("--root-id", default=None)
+    tl.add_argument("--company-id", default=None)
+    tl.add_argument("--limit", type=int, default=100)
+
+    tg = task_sub.add_parser("get", help="get task detail")
+    tg.add_argument("task_id")
+
+    tc = task_sub.add_parser("create", help="create a root task")
+    tc.add_argument("--owner", required=True, help="owner agent slug")
+    tc.add_argument("--title", required=True)
+    tc.add_argument("--description", default=None)
+    tc.add_argument("--payload", default=None, help="inline JSON object or @path")
+    tc.add_argument("--parent-task-id", default=None, help="optional parent task id")
+    tc.add_argument("--max-nodes", type=int, default=None)
+    tc.add_argument("--max-depth", type=int, default=None)
+    tc.add_argument("--max-age-seconds", type=int, default=None)
+
+    ts = task_sub.add_parser("spawn", help="spawn a child task under an owned task")
+    ts.add_argument("task_id", help="parent task id")
+    ts.add_argument("--owner", required=True, help="child owner agent slug")
+    ts.add_argument("--title", required=True)
+    ts.add_argument("--description", default=None)
+    ts.add_argument("--payload", default=None, help="inline JSON object or @path")
+
+    tu = task_sub.add_parser("update", help="patch task status/result")
+    tu.add_argument("task_id")
+    tu.add_argument("--status", choices=["pending", "accepted", "in_progress", "blocked", "done", "failed", "rejected"])
+    tu.add_argument("--result", default=None, help="inline JSON object or @path")
+
     rpy = subs.add_parser("replay", help="re-send buffered outbox events")
     rpy.add_argument("--since", default=None, help="only replay events newer than this (e.g. 1h, 30m, 2d)")
 
@@ -322,6 +524,14 @@ HANDLERS = {
     "status": cmd_status,
     "alert": cmd_alert,
     "approval": cmd_approval,
+    "task": lambda args: {
+        "inbox": cmd_task_inbox,
+        "list": cmd_task_list,
+        "get": cmd_task_get,
+        "create": cmd_task_create,
+        "spawn": cmd_task_spawn,
+        "update": cmd_task_update,
+    }[args.task_cmd](args),
     "replay": cmd_replay,
 }
 

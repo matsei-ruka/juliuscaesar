@@ -145,6 +145,44 @@ class CompanyClient:
             timeout=HTTP_TIMEOUT_SECONDS,
         )
 
+    def create_task(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Create a root task or child task via ``parent_task_id``.
+
+        Server auth decides scope. For agent bearers, root creation is
+        same-company only and child creation follows task ownership rules.
+        """
+        return self._post("/api/tasks", body)
+
+    def spawn_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Create a child task under ``task_id``."""
+        return self._post(f"/api/tasks/{task_id}/spawn", body)
+
+    def list_tasks(
+        self,
+        *,
+        statuses: tuple[str, ...] = (),
+        owner_agent_id: str | None = None,
+        root_id: str | None = None,
+        company_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        params: list[tuple[str, str]] = [("limit", str(int(limit)))]
+        if owner_agent_id:
+            params.append(("owner_agent_id", owner_agent_id))
+        if root_id:
+            params.append(("root_id", root_id))
+        if company_id:
+            params.append(("company_id", company_id))
+        if statuses:
+            params.extend(("status", status) for status in statuses)
+        return self._get("/api/tasks", params=params, timeout=HTTP_TIMEOUT_SECONDS)
+
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        return self._get(f"/api/tasks/{task_id}", timeout=HTTP_TIMEOUT_SECONDS)
+
+    def patch_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self._patch(f"/api/tasks/{task_id}", body)
+
     def upload_approval_media(
         self,
         approval_id: str,
@@ -218,11 +256,30 @@ class CompanyClient:
             raise CompanyError(f"transport: {exc}") from exc
         return self._unwrap(resp)
 
+    def _patch(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        bearer_override: Optional[str] = None,
+    ) -> dict[str, Any]:
+        url = f"{self.cfg.endpoint}{path}"
+        try:
+            resp = self.session.patch(
+                url,
+                json=body,
+                headers=self._headers(auth=True, bearer_override=bearer_override),
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
+            raise CompanyError(f"transport: {exc}") from exc
+        return self._unwrap(resp)
+
     def _get(
         self,
         path: str,
         *,
-        params: Optional[dict[str, str]] = None,
+        params: Optional[Any] = None,
         bearer_override: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:

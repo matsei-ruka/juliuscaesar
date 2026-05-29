@@ -67,5 +67,52 @@ class ReplaySinceTests(unittest.TestCase):
             self.assertFalse(recent_path.exists())
 
 
+class TaskCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        gw_config.clear_env_cache()
+
+    def test_task_create_posts_structured_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            args = company_cli.build_parser().parse_args(
+                [
+                    "--instance-dir",
+                    str(instance),
+                    "task",
+                    "create",
+                    "--owner",
+                    "sarah-liu",
+                    "--title",
+                    "Draft task contract",
+                    "--description",
+                    "Write the expected task contract.",
+                    "--payload",
+                    '{"expected_output":"contract","reason":"fleet rollout"}',
+                    "--max-depth",
+                    "4",
+                ]
+            )
+
+            with patch("company.cli.CompanyClient") as MockClient:
+                fake = MagicMock()
+                fake.create_task.return_value = {"id": "task-1"}
+                MockClient.return_value = fake
+                rc = company_cli.cmd_task_create(args)
+
+            self.assertEqual(rc, 0)
+            fake.create_task.assert_called_once_with(
+                {
+                    "owner_slug": "sarah-liu",
+                    "title": "Draft task contract",
+                    "description": "Write the expected task contract.",
+                    "payload": {
+                        "expected_output": "contract",
+                        "reason": "fleet rollout",
+                    },
+                    "max_depth": 4,
+                }
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

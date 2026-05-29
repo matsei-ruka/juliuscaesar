@@ -81,6 +81,14 @@ PRE_SHIPPED: tuple[SkillSpec, ...] = (
         test_kind="deep-research",
         description="Browser-driven Gemini Deep Research (per-host login, no API cost).",
     ),
+    SkillSpec(
+        name="taskgraph",
+        display="Task Graph",
+        path="taskgraph/SKILL.md",
+        required_env=("COMPANY_ENDPOINT", "COMPANY_API_KEY"),
+        test_kind="",
+        description="Read, create, spawn, and update The Company task graph via jc company task.",
+    ),
 )
 
 PRE_SHIPPED_BY_NAME = {s.name: s for s in PRE_SHIPPED}

@@ -42,10 +42,12 @@ def test_status_json_reports_preshipped_inactive(tmp_path: Path) -> None:
 
     payload = json.loads(result.stdout)
     rows = {row["name"]: row for row in payload["skills"]}
-    assert set(rows) >= {"brave", "tavily", "firecrawl", "browser-use"}
+    assert set(rows) >= {"brave", "tavily", "firecrawl", "browser-use", "taskgraph"}
     assert rows["brave"]["installed"] is True
     assert rows["brave"]["status"] == "inactive"
     assert rows["brave"]["missing_env"] == ["BRAVE_API_KEY"]
+    assert rows["taskgraph"]["status"] == "inactive"
+    assert rows["taskgraph"]["missing_env"] == ["COMPANY_ENDPOINT", "COMPANY_API_KEY"]
 
 
 def test_configure_sets_env_and_marks_skill_active(tmp_path: Path) -> None:
@@ -98,6 +100,7 @@ def test_sync_copies_preshipped_skills_into_older_instance(tmp_path: Path) -> No
     assert (instance / "skills" / "Index.md").exists()
     assert (instance / "skills" / "brave" / "SKILL.md").exists()
     assert (instance / "skills" / "browser-use" / "SKILL.md").exists()
+    assert (instance / "skills" / "taskgraph" / "SKILL.md").exists()
 
 
 def test_router_lists_and_dispatches_skills(tmp_path: Path) -> None:
