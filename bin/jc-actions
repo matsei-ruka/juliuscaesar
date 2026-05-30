@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# jc-actions — Supervisor card actions CLI.
+#
+# Usage:
+#   jc actions list   [--instance-dir <path>]  List active/recent backgrounded sessions.
+#   jc actions audit  [--instance-dir <path>]  Tail the raw actions audit log.
+#
+# Subcommands:
+#   list    Show backgrounded sessions that have not yet completed.
+#   audit   Print all records in state/actions.jsonl (newest last).
+
+set -euo pipefail
+
+FRAMEWORK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+VENV_PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/juliuscaesar/venv/bin/python"
+if [[ -x "${JULIUSCAESAR_PYTHON:-}" ]]; then
+    JC_PYTHON="$JULIUSCAESAR_PYTHON"
+elif [[ -x "$VENV_PYTHON" ]]; then
+    JC_PYTHON="$VENV_PYTHON"
+else
+    JC_PYTHON="$(command -v python3 || true)"
+fi
+
+INSTANCE_DIR="${JC_INSTANCE_DIR:-$(pwd)}"
+
+usage() {
+    cat <<'EOF'
+jc-actions — Supervisor card actions CLI.
+
+Usage: jc actions <subcommand> [options]
+
+Subcommands:
+  list    Show backgrounded sessions that have not yet completed.
+  audit   Print all records in state/actions.jsonl.
+
+Options:
+  --instance-dir <path>  Override instance directory.
+  -h, --help             Show this help.
+EOF
+}
+
+# Parse global flags.
+SUBCMD=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        list|audit) SUBCMD="$1"; shift ;;
+        --instance-dir)
+            shift
+            INSTANCE_DIR="$1"
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; exit 1 ;;
+    esac
+done
+
+if [[ -z "$SUBCMD" ]]; then
+    usage >&2
+    exit 1
+fi
+
+ACTIONS_LOG="$INSTANCE_DIR/state/actions.jsonl"
+
+case "$SUBCMD" in
+    list)
+        if [[ ! -f "$ACTIONS_LOG" ]]; then
+            echo "No actions log found at $ACTIONS_LOG"
+            exit 0
+        fi
+        "$JC_PYTHON" - "$INSTANCE_DIR" "$ACTIONS_LOG" <<'PY'
+import json, sys, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+instance_dir = Path(sys.argv[1])
+log_path = Path(sys.argv[2])
+
+# Read adapter_timeout_seconds from gateway.yaml (best-effort).
+timeout_s = 1800
+try:
+    sys.path.insert(0, str(instance_dir.parent.parent / "lib"))
+    from gateway.config import load_config
+    cfg = load_config(instance_dir)
+    timeout_s = int(getattr(cfg, "adapter_timeout_seconds", None) or timeout_s)
+except Exception:
+    pass
+
+now = time.time()
+
+backgrounded: dict[str, dict] = {}
+done_sessions: set[str] = set()
+
+for line in log_path.read_text("utf-8", errors="replace").splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    verb = rec.get("verb", "")
+    sid = rec.get("session_id", "")
+    if not sid:
+        continue
+    if verb == "background" and (rec.get("result") or {}).get("ok"):
+        if not (rec.get("result") or {}).get("already_backgrounded"):
+            backgrounded[sid] = rec
+    elif verb in ("background_done", "stop"):
+        done_sessions.add(sid)
+
+active = [(sid, rec) for sid, rec in backgrounded.items() if sid not in done_sessions]
+
+if not active:
+    print("No active backgrounded sessions.")
+    sys.exit(0)
+
+print(f"{'SESSION':14}  {'CHAT':12}  {'AGE':>8}  {'ACTOR':12}  STATUS")
+print("-" * 70)
+for sid, rec in active:
+    try:
+        ts = datetime.fromisoformat(rec.get("ts", "").replace("Z", "+00:00")).timestamp()
+        age = int(now - ts)
+        mm, ss = divmod(age, 60)
+        hh, mm = divmod(mm, 60)
+        age_str = f"{hh:02d}:{mm:02d}:{ss:02d}"
+    except Exception:
+        age_str = "?:?:?"
+        age = 0
+    chat = rec.get("chat_id", "")[:12]
+    actor = rec.get("actor_chat_id", "")[:12]
+    status = "LEAKED" if age > timeout_s * 2 else "running"
+    print(f"{sid[:14]}  {chat:<12}  {age_str:>8}  {actor:<12}  {status}")
+PY
+        ;;
+
+    audit)
+        if [[ ! -f "$ACTIONS_LOG" ]]; then
+            echo "No actions log found at $ACTIONS_LOG"
+            exit 0
+        fi
+        "$JC_PYTHON" - "$ACTIONS_LOG" <<'PY'
+import json, sys
+
+log_path = sys.argv[1]
+with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            print(json.dumps(rec, indent=2))
+        except json.JSONDecodeError:
+            print(line)
+PY
+        ;;
+esac

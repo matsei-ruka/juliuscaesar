@@ -116,6 +116,26 @@ class ParallelClassifierConfig:
 
 
 @dataclass(frozen=True)
+class ActionsConfig:
+    """Supervisor card action buttons (Stop / Background).
+
+    Phase 1 gates everything behind ``enabled`` (default off). Cards continue
+    to render without buttons when off, matching pre-feature behavior.
+    See docs/specs/supervisor-card-actions.md.
+    """
+
+    enabled: bool = False
+    stop_grace_seconds: int = 5
+    # Phase 2: Background button.
+    # Cap on concurrent backgrounded sessions per chat_id. Refused beyond.
+    max_background_per_chat: int = 3
+    # When true, mid-task Telegram sends from a backgrounded session are
+    # buffered into the action entry and prepended to its completion card
+    # rather than delivered immediately. Off → sends pass through normally.
+    suppress_background_tool_messages: bool = True
+
+
+@dataclass(frozen=True)
 class ParallelConfig:
     """Per-conversation parallel-slot dispatch.
 
@@ -227,6 +247,7 @@ class GatewayConfig:
         default_factory=AdaptiveDiscoveryConfig
     )
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
+    actions: ActionsConfig = field(default_factory=ActionsConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -571,6 +592,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "triage_backup",
         "supervisor",
         "parallel",
+        "actions",
     }
     for key in data:
         if key not in allowed_top:
@@ -1213,6 +1235,41 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                                 errors, f"parallel.classifier.{key}", classifier_raw[key]
                             )
 
+    actions_raw = data.get("actions")
+    if actions_raw is not None:
+        if not isinstance(actions_raw, dict):
+            errors.append("actions: must be a mapping")
+        else:
+            allowed_actions = {
+                "enabled",
+                "stop_grace_seconds",
+                "max_background_per_chat",
+                "suppress_background_tool_messages",
+            }
+            for key in actions_raw:
+                if key not in allowed_actions:
+                    errors.append(f"actions.{key}: unknown field")
+            if actions_raw.get("enabled") is not None and not isinstance(
+                actions_raw["enabled"], bool
+            ):
+                errors.append("actions.enabled: must be boolean")
+            if actions_raw.get("stop_grace_seconds") is not None:
+                _validate_positive_int(
+                    errors,
+                    "actions.stop_grace_seconds",
+                    actions_raw["stop_grace_seconds"],
+                )
+            if actions_raw.get("max_background_per_chat") is not None:
+                _validate_positive_int(
+                    errors,
+                    "actions.max_background_per_chat",
+                    actions_raw["max_background_per_chat"],
+                )
+            if actions_raw.get("suppress_background_tool_messages") is not None and not isinstance(
+                actions_raw["suppress_background_tool_messages"], bool
+            ):
+                errors.append("actions.suppress_background_tool_messages: must be boolean")
+
     if errors:
         raise ConfigError("; ".join(errors))
 
@@ -1513,6 +1570,27 @@ def _load_parallel(data: dict[str, Any]) -> ParallelConfig:
     )
 
 
+def _load_actions(data: dict[str, Any]) -> ActionsConfig:
+    raw = data.get("actions") if isinstance(data.get("actions"), dict) else {}
+    defaults = ActionsConfig()
+    return ActionsConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        stop_grace_seconds=int(
+            raw.get("stop_grace_seconds")
+            if raw.get("stop_grace_seconds") is not None
+            else defaults.stop_grace_seconds
+        ),
+        max_background_per_chat=int(
+            raw.get("max_background_per_chat")
+            if raw.get("max_background_per_chat") is not None
+            else defaults.max_background_per_chat
+        ),
+        suppress_background_tool_messages=bool(
+            raw.get("suppress_background_tool_messages", defaults.suppress_background_tool_messages)
+        ),
+    )
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1630,6 +1708,7 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         inter_agent_protocol=_load_inter_agent_protocol(data),
         adaptive_discovery=_load_adaptive_discovery(data),
         parallel=_load_parallel(data),
+        actions=_load_actions(data),
     )
 
 

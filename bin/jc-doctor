@@ -898,6 +898,93 @@ while IFS= read -r line; do
     esac
 done <<<"$INTER_AGENT_REPORT"
 
+# --- Actions (supervisor card leak check) ---
+
+section "Actions"
+
+ACTIONS_LOG="$INSTANCE_DIR/state/actions.jsonl"
+if [[ ! -f "$ACTIONS_LOG" ]]; then
+    info "state/actions.jsonl not yet created (no actions fired)"
+else
+    ACTIONS_REPORT=$("$JC_PYTHON" - "$INSTANCE_DIR" "$ACTIONS_LOG" <<'PY' 2>&1
+import json, sys, time, os
+from pathlib import Path
+
+instance_dir = Path(sys.argv[1])
+log_path = Path(sys.argv[2])
+
+# Read adapter_timeout_seconds from gateway.yaml (best-effort).
+timeout_s = 1800
+try:
+    sys.path.insert(0, str(instance_dir.parent.parent / "lib"))
+    from gateway.config import load_config
+    cfg = load_config(instance_dir)
+    timeout_s = int(getattr(cfg, "adapter_timeout_seconds", None) or timeout_s)
+except Exception:
+    pass
+
+leak_threshold = timeout_s * 2
+now = time.time()
+
+backgrounded: dict[str, float] = {}
+done_sessions: set[str] = set()
+
+try:
+    for line in log_path.read_text("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        verb = rec.get("verb", "")
+        sid = rec.get("session_id", "")
+        ts_str = rec.get("ts", "")
+        if not sid:
+            continue
+        if verb == "background":
+            result = rec.get("result") or {}
+            if result.get("ok") and not result.get("already_backgrounded"):
+                # Parse ISO8601 ts (e.g. "2026-05-29T14:00:00Z")
+                try:
+                    from datetime import datetime, timezone
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = 0.0
+                backgrounded[sid] = ts
+        elif verb in ("background_done", "stop"):
+            done_sessions.add(sid)
+except OSError:
+    print("WARN:cannot read state/actions.jsonl")
+    sys.exit(0)
+
+leaked = [
+    (sid, ts) for sid, ts in backgrounded.items()
+    if sid not in done_sessions and (now - ts) > leak_threshold
+]
+
+if not backgrounded:
+    print("OK:no backgrounded sessions on record")
+elif not leaked:
+    print(f"OK:{len(backgrounded)} backgrounded session(s), none leaked (threshold {leak_threshold}s)")
+else:
+    for sid, ts in leaked:
+        age = int(now - ts)
+        print(f"WARN:backgrounded session {sid[:12]}... age {age}s > threshold {leak_threshold}s — may be leaked (run: jc actions list)")
+PY
+)
+    while IFS= read -r line; do
+        case "$line" in
+            OK:*) ok "${line#OK:}" ;;
+            WARN:*) warn "${line#WARN:}" ;;
+            INFO:*) info "${line#INFO:}" ;;
+            ERROR:*) fail "${line#ERROR:}" ;;
+            Traceback*) fail "actions check crashed: $line" ;;
+        esac
+    done <<<"$ACTIONS_REPORT"
+fi
+
 # --- Adaptive discovery ---
 
 section "Adaptive discovery"

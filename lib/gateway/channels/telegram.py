@@ -77,6 +77,8 @@ class TelegramChannel:
     _AUTH_CALLBACK_PREFIX = "chat_auth:"
     _EMAIL_CALLBACK_PREFIX = "jcemail:"
     _APPROVAL_CALLBACK_PREFIX = "apv:"
+    _ACTION_STOP_PREFIX = "act:stop:"
+    _ACTION_BG_PREFIX = "act:bg:"
 
     def __init__(self, instance_dir: Path, cfg: ChannelConfig, log: LogFn):
         self.instance_dir = instance_dir
@@ -553,7 +555,7 @@ class TelegramChannel:
             self._auth_prompts_sent.add(chat_id)
 
     def _handle_callback_query(self, update: dict) -> None:
-        """Process an inline-keyboard tap. Handles chat_auth: and jcemail: prefixes."""
+        """Process an inline-keyboard tap. Handles chat_auth: / jcemail: / apv: / act: prefixes."""
         cq = update.get("callback_query") or {}
         cq_id = cq.get("id")
         data = cq.get("data") or ""
@@ -564,6 +566,16 @@ class TelegramChannel:
             return
         if data.startswith(self._APPROVAL_CALLBACK_PREFIX):
             self._handle_approval_callback(cq_id, data, from_user, msg)
+            return
+        if data.startswith(self._ACTION_STOP_PREFIX):
+            self._handle_action_stop(
+                cq_id, data[len(self._ACTION_STOP_PREFIX):], from_user, msg
+            )
+            return
+        if data.startswith(self._ACTION_BG_PREFIX):
+            self._handle_action_background(
+                cq_id, data[len(self._ACTION_BG_PREFIX):], from_user, msg
+            )
             return
         if not data.startswith(self._AUTH_CALLBACK_PREFIX):
             return
@@ -619,6 +631,323 @@ class TelegramChannel:
             f"telegram auth flipped chat_id={target_chat_id} action={action} "
             f"(config-only)"
         )
+
+    def _handle_action_stop(
+        self,
+        cq_id: Any,
+        short_token: str,
+        from_user: dict,
+        msg: dict,
+    ) -> None:
+        """Stop the brain child for the session bound to ``short_token``.
+
+        Authorization: any ``chat_auth``-approved chat_id (caller's user_id /
+        in DMs equals the chat_id). Per spec §4.7, not operator-only.
+        """
+        from .. import actions, actions_registry
+
+        if not short_token:
+            self._answer_callback(cq_id, "bad payload")
+            return
+        from_id = str(from_user.get("id", ""))
+        if not from_id or not self._is_authorized(from_id):
+            self._answer_callback(cq_id, "not authorized")
+            self.log(
+                f"telegram action stop rejected: from={from_id} token={short_token}"
+            )
+            return
+        entry = actions_registry.resolve(short_token)
+        if entry is None:
+            self._answer_callback(cq_id, "session already ended")
+            self.log(f"telegram action stop unknown token={short_token}")
+            return
+
+        if actions_registry.check_and_set_debounce(entry.session_id):
+            self._answer_callback(cq_id, "")
+            return
+
+        # ack the tap before doing real work — Telegram drops the spinner once
+        # answered, so the user gets feedback even if the kill takes ~5s.
+        self._answer_callback(cq_id, "Stopping…")
+
+        grace = self._action_stop_grace_seconds()
+        result = actions.stop_session(
+            entry.session_id,
+            stop_grace_seconds=grace,
+            instance_dir=self.instance_dir,
+            actor_chat_id=from_id,
+        )
+
+        suffix = self._stopped_suffix(entry, result, language=msg)
+        original = entry.card_text or self._extract_message_text(msg) or ""
+        new_text = (original.rstrip() + "\n\n" + suffix) if original else suffix
+        self._edit_card_after_stop(
+            chat_id=msg.get("chat", {}).get("id"),
+            message_id=msg.get("message_id"),
+            text=new_text,
+        )
+        self.log(
+            f"telegram action stop session={entry.session_id[:12]} "
+            f"pid={entry.child_pid} ok={result.ok} "
+            f"already_stopped={result.already_stopped} reason={result.reason} "
+            f"elapsed_ms={result.elapsed_ms}"
+        )
+
+    def _handle_action_background(
+        self,
+        cq_id: Any,
+        short_token: str,
+        from_user: dict,
+        msg: dict,
+    ) -> None:
+        """Demote the session bound to ``short_token`` to background.
+
+        The brain subprocess keeps running; the inbound router immediately
+        spawns a fresh primary for the chat. The runtime intercepts the
+        backgrounded session's final reply as a "Background done" card.
+        """
+        from .. import actions, actions_registry
+
+        if not short_token:
+            self._answer_callback(cq_id, "bad payload")
+            return
+        from_id = str(from_user.get("id", ""))
+        if not from_id or not self._is_authorized(from_id):
+            self._answer_callback(cq_id, "not authorized")
+            self.log(
+                f"telegram action background rejected: from={from_id} token={short_token}"
+            )
+            return
+        entry = actions_registry.resolve(short_token)
+        if entry is None:
+            self._answer_callback(cq_id, "session already ended")
+            self.log(f"telegram action background unknown token={short_token}")
+            return
+
+        if actions_registry.check_and_set_debounce(entry.session_id):
+            self._answer_callback(cq_id, "")
+            return
+
+        chat_id = str(
+            entry.chat_id
+            or (msg.get("chat") or {}).get("id")
+            or ""
+        )
+        supervisor_msg_id = entry.supervisor_msg_id or msg.get("message_id")
+        max_per_chat = self._action_max_background_per_chat()
+
+        result = actions.background_session(
+            entry.session_id,
+            chat_id=chat_id,
+            supervisor_msg_id=int(supervisor_msg_id) if supervisor_msg_id else None,
+            max_per_chat=max_per_chat,
+            instance_dir=self.instance_dir,
+            actor_chat_id=from_id,
+        )
+
+        if result.capped:
+            self._answer_callback(cq_id, "Limit reached")
+            self.log(
+                f"telegram action background capped: token={short_token} "
+                f"chat={chat_id} max={max_per_chat}"
+            )
+            return
+        if result.already_backgrounded:
+            self._answer_callback(cq_id, "Already done")
+            return
+        if not result.ok:
+            self._answer_callback(cq_id, "failed")
+            self.log(
+                f"telegram action background failed: token={short_token} "
+                f"reason={result.reason}"
+            )
+            return
+
+        self._answer_callback(cq_id, "Backgrounded")
+
+        suffix = self._backgrounded_suffix()
+        original = entry.card_text or self._extract_message_text(msg) or ""
+        new_text = (original.rstrip() + "\n\n" + suffix) if original else suffix
+        self._edit_card_after_background(
+            chat_id=(msg.get("chat") or {}).get("id") or chat_id,
+            message_id=msg.get("message_id") or supervisor_msg_id,
+            text=new_text,
+        )
+        self.log(
+            f"telegram action background session={entry.session_id[:12]} "
+            f"pid={entry.child_pid} chat={chat_id} "
+            f"elapsed_ms={result.elapsed_ms}"
+        )
+
+    def _action_max_background_per_chat(self) -> int:
+        """Resolve ``gateway.actions.max_background_per_chat``. Default 3."""
+        try:
+            return int(load_config_cached(self.instance_dir).actions.max_background_per_chat)
+        except Exception:  # noqa: BLE001
+            return 3
+
+    @staticmethod
+    def _backgrounded_suffix() -> str:
+        """Build the trailing ``🔄 Backgrounded at HH:MM:SS UTC`` line."""
+        from datetime import datetime, timezone
+
+        hhmmss = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        return f"🔄 Backgrounded at {hhmmss} UTC"
+
+    @staticmethod
+    def _backgrounded_running_keyboard() -> dict:
+        """Single disabled-style button replacing the Stop/Background row."""
+        return {
+            "inline_keyboard": [[
+                {
+                    "text": "🔄 Backgrounded · running",
+                    # Telegram inline buttons must carry callback_data (or a
+                    # url / switch_inline_query). The token is dead — the
+                    # callback handler tolerates unknown tokens with a
+                    # "session already ended" answer, so a stale press is
+                    # cleanly no-op.
+                    "callback_data": "act:bg:done",
+                },
+            ]]
+        }
+
+    def _edit_card_after_background(
+        self,
+        *,
+        chat_id: Any,
+        message_id: Any,
+        text: str,
+    ) -> None:
+        """Edit the supervisor card to ``Backgrounded · running`` state."""
+        if not chat_id or not message_id or not self.token:
+            return
+        keyboard = json.dumps(self._backgrounded_running_keyboard())
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{self.token}/editMessageText",
+                data={
+                    "chat_id": str(chat_id),
+                    "message_id": int(message_id),
+                    "text": to_markdown_v2(text),
+                    "parse_mode": "MarkdownV2",
+                    "disable_web_page_preview": True,
+                    "reply_markup": keyboard,
+                },
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram editMessageText (background) failed: {exc}")
+            return
+        if data.get("ok"):
+            return
+        description = str(data.get("description") or "").lower()
+        if "not modified" in description:
+            return
+        if "parse" in description or "entit" in description:
+            try:
+                fallback = http_json(
+                    f"https://api.telegram.org/bot{self.token}/editMessageText",
+                    data={
+                        "chat_id": str(chat_id),
+                        "message_id": int(message_id),
+                        "text": text,
+                        "disable_web_page_preview": True,
+                        "reply_markup": keyboard,
+                    },
+                    timeout=10,
+                )
+                if fallback.get("ok"):
+                    return
+                self.log(
+                    f"telegram editMessageText (background) plain-fallback failed: {fallback}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.log(
+                    f"telegram editMessageText (background) plain-fallback error: {exc}"
+                )
+            return
+        self.log(f"telegram editMessageText (background) not ok: {data}")
+
+    def _action_stop_grace_seconds(self) -> int:
+        """Resolve ``gateway.actions.stop_grace_seconds`` from config. Default 5."""
+        try:
+            return int(load_config_cached(self.instance_dir).actions.stop_grace_seconds)
+        except Exception:  # noqa: BLE001
+            return 5
+
+    @staticmethod
+    def _stopped_suffix(entry: Any, result: Any, language: dict | None = None) -> str:
+        """Build the trailing ``✋ Stopped at HH:MM:SS UTC · MM:SS`` line."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        hhmmss = now.strftime("%H:%M:%S")
+        duration_seconds = max(0, int(time.time() - float(entry.started_at)))
+        mm = duration_seconds // 60
+        ss = duration_seconds % 60
+        duration_str = f"{mm:02d}:{ss:02d}"
+        return f"✋ Stopped at {hhmmss} UTC · {duration_str}"
+
+    @staticmethod
+    def _extract_message_text(msg: dict) -> str:
+        """Best-effort: read the ``text`` field from a callback's message payload."""
+        if not isinstance(msg, dict):
+            return ""
+        text = msg.get("text") or msg.get("caption") or ""
+        return text if isinstance(text, str) else ""
+
+    def _edit_card_after_stop(
+        self,
+        *,
+        chat_id: Any,
+        message_id: Any,
+        text: str,
+    ) -> None:
+        """Edit the supervisor card to its stopped form and drop the keyboard."""
+        if not chat_id or not message_id or not self.token:
+            return
+        try:
+            data = http_json(
+                f"https://api.telegram.org/bot{self.token}/editMessageText",
+                data={
+                    "chat_id": str(chat_id),
+                    "message_id": int(message_id),
+                    "text": to_markdown_v2(text),
+                    "parse_mode": "MarkdownV2",
+                    "disable_web_page_preview": True,
+                    "reply_markup": json.dumps({"inline_keyboard": []}),
+                },
+                timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"telegram editMessageText (stop) failed: {exc}")
+            return
+        if data.get("ok"):
+            return
+        description = str(data.get("description") or "").lower()
+        if "not modified" in description:
+            return
+        # Parse-error fallback: retry without MarkdownV2.
+        if "parse" in description or "entit" in description:
+            try:
+                fallback = http_json(
+                    f"https://api.telegram.org/bot{self.token}/editMessageText",
+                    data={
+                        "chat_id": str(chat_id),
+                        "message_id": int(message_id),
+                        "text": text,
+                        "disable_web_page_preview": True,
+                        "reply_markup": json.dumps({"inline_keyboard": []}),
+                    },
+                    timeout=10,
+                )
+                if fallback.get("ok"):
+                    return
+                self.log(f"telegram editMessageText (stop) plain-fallback failed: {fallback}")
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"telegram editMessageText (stop) plain-fallback error: {exc}")
+            return
+        self.log(f"telegram editMessageText (stop) not ok: {data}")
 
     def _handle_approval_callback(
         self, cq_id: Any, data: str, from_user: dict, msg: dict

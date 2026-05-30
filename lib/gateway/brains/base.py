@@ -15,11 +15,13 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .. import actions_registry
 from .. import chats as chats_module
 from .. import goal_cache
 from .. import transcripts as transcripts_module
@@ -43,6 +45,17 @@ class BrainResult:
     response: str
     session_id: str | None = None
     push_marker_path: str | None = None
+    # Phase 2: action-registry state snapshotted just before unregister so
+    # the runtime can post a Background-done card when the subprocess was
+    # demoted to background mid-flight.
+    action_session_id: str | None = None
+    action_role: str = "primary"
+    action_bg_chat_id: str = ""
+    action_bg_supervisor_msg_id: int | None = None
+    action_buffered_tool_messages: tuple[str, ...] = ()
+    action_started_at: float = 0.0
+    action_backgrounded_at: float = 0.0
+    action_card_text: str = ""
 
 
 class AdapterFailure(RuntimeError):
@@ -423,31 +436,68 @@ Your reply is only the text the user reads.
                         f"adapter spawn failed event={event.id} brain={self.name} reason={exc}"
                     )
                     raise
+                # Register the live brain child with the action registry so
+                # the supervisor card can carry a ✋ Stop / 🔄 Background
+                # button bound to this exact session. The subprocess was
+                # launched with start_new_session=True so its PGID == its PID.
+                action_session_id = uuid.uuid4().hex
+                action_short_token = actions_registry.short_token_for(action_session_id)
+                meta_dict = self._meta(event)
+                action_slot = 0
+                try:
+                    action_slot = int(meta_dict.get("slot") or 0)
+                except (TypeError, ValueError):
+                    action_slot = 0
+                action_chat_id = str(
+                    meta_dict.get("chat_id") or event.conversation_id or ""
+                )
+                actions_registry.register(
+                    short_token=action_short_token,
+                    session_id=action_session_id,
+                    child_pid=proc.pid,
+                    slot_id=action_slot,
+                    chat_id=action_chat_id,
+                    conversation_id=event.conversation_id or "",
+                    event_id=event.id,
+                    instance_dir=self.instance_dir,
+                )
                 log(
                     f"adapter spawn event={event.id} brain={self.name} pid={proc.pid} "
                     f"model={model or '-'} resume={'yes' if resume_session else 'no'}"
                 )
+                # Capture the entry snapshot before unregister so the runtime
+                # can detect a mid-flight Background and route the final reply
+                # to a completion card.
+                action_snapshot: dict | None = None
                 try:
-                    prompt_bytes = prompt.encode("utf-8") if prompt else b""
-                    _, _ = proc.communicate(prompt_bytes, timeout=timeout)
-                except subprocess.TimeoutExpired:
+                    try:
+                        prompt_bytes = prompt.encode("utf-8") if prompt else b""
+                        _, _ = proc.communicate(prompt_bytes, timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        duration = time.monotonic() - wall_start
+                        log(
+                            f"adapter timeout event={event.id} brain={self.name} "
+                            f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                        )
+                        killpg(proc.pid, signal.SIGTERM)
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            killpg(proc.pid, signal.SIGKILL)
+                            proc.wait()
+                        raise AdapterTimeout(self.name, timeout, _read_tail(stderr_path))
                     duration = time.monotonic() - wall_start
                     log(
-                        f"adapter timeout event={event.id} brain={self.name} "
-                        f"pid={proc.pid} duration={duration:.1f}s timeout={timeout}s"
+                        f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
+                        f"rc={proc.returncode} duration={duration:.1f}s"
                     )
-                    killpg(proc.pid, signal.SIGTERM)
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                    raise AdapterTimeout(self.name, timeout, _read_tail(stderr_path))
-                duration = time.monotonic() - wall_start
-                log(
-                    f"adapter exit event={event.id} brain={self.name} pid={proc.pid} "
-                    f"rc={proc.returncode} duration={duration:.1f}s"
-                )
+                finally:
+                    action_snapshot = actions_registry.snapshot_backgrounded_state(
+                        action_session_id
+                    )
+                    actions_registry.unregister(
+                        action_session_id, instance_dir=self.instance_dir
+                    )
             finally:
                 stderr_handle.close()
                 stdout_handle.close()
@@ -475,10 +525,31 @@ Your reply is only the text the user reads.
             session_id = self.capture_session_id(start)
         except Exception:  # noqa: BLE001
             session_id = None
+        snap = action_snapshot or {}
         return BrainResult(
             response=stdout.strip(),
             session_id=session_id,
             push_marker_path=str(push_marker_path),
+            action_session_id=action_session_id,
+            action_role=str(snap.get("role") or "primary"),
+            action_bg_chat_id=str(
+                snap.get("bg_chat_id") or snap.get("chat_id") or ""
+            ),
+            action_bg_supervisor_msg_id=(
+                int(snap["bg_supervisor_msg_id"])
+                if snap.get("bg_supervisor_msg_id") is not None
+                else (
+                    int(snap["supervisor_msg_id"])
+                    if snap.get("supervisor_msg_id") is not None
+                    else None
+                )
+            ),
+            action_buffered_tool_messages=tuple(
+                snap.get("buffered_tool_messages") or ()
+            ),
+            action_started_at=float(snap.get("started_at") or 0.0),
+            action_backgrounded_at=float(snap.get("backgrounded_at") or 0.0),
+            action_card_text=str(snap.get("card_text") or ""),
         )
 
     # --- helpers -----------------------------------------------------------

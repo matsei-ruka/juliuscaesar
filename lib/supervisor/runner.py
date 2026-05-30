@@ -16,7 +16,8 @@ from typing import Any, Callable
 
 from company import supervisor_conf as company_conf
 from company.supervisor_reporter import Reporter as CompanyReporter
-from gateway import queue
+from gateway import actions_registry, queue
+from gateway.config import load_config_cached as load_gateway_config_cached
 
 from .cards import Card, render_card, render_stopped_card
 from .config import SupervisorConfig, load_config as load_supervisor_config
@@ -404,6 +405,7 @@ def _render_and_send(
         language=ev_state.language,
         slot=snap.slot,
         max_concurrent=2 if snap.slot is not None else 1,
+        actions_short_token=_actions_short_token(instance_dir, snap.event.id),
     )
 
     source = snap.event.source or "telegram"
@@ -742,6 +744,26 @@ def _elapsed_from_status_row(row: dict[str, Any], now: datetime) -> float:
         except ValueError:
             pass
     return 0.0
+
+
+def _actions_short_token(instance_dir: Path, event_id: int) -> str | None:
+    """Return the short token for ``event_id`` when actions are enabled, else None.
+
+    Looks up the action entry registered by ``Brain.invoke`` for the running
+    brain child. Returns None when the feature flag is off, the registry has
+    no entry (brain not spawned yet / already finished), or any lookup error
+    occurs — callers fall back to a buttonless card.
+    """
+    try:
+        gateway_cfg = load_gateway_config_cached(instance_dir)
+        if not gateway_cfg.actions.enabled:
+            return None
+    except Exception:  # noqa: BLE001 — never block card render on a config error
+        return None
+    entry = actions_registry.resolve_by_event_with_disk(instance_dir, int(event_id))
+    if entry is None or entry.stopped:
+        return None
+    return entry.short_token
 
 
 def _title_from_meta(meta: dict[str, Any], content: str) -> str:

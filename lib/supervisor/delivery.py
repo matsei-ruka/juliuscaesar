@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from gateway import actions_registry
 from gateway.channels._http import http_json
 from gateway.config import env_value
 from gateway.format import to_markdown_v2
@@ -81,9 +82,16 @@ def send_card_telegram(
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
         payload["allow_sending_without_reply"] = True
+    if card.reply_markup is not None:
+        payload["reply_markup"] = json.dumps(card.reply_markup)
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    return _post_or_fallback(url, payload, card.text, log=log)
+    mid = _post_or_fallback(url, payload, card.text, log=log)
+    if mid is not None and card.short_token:
+        actions_registry.attach_supervisor_message_by_token(
+            card.short_token, mid, card_text=card.text
+        )
+    return mid
 
 
 def delete_card_telegram(
@@ -141,6 +149,12 @@ def edit_card_telegram(
         "disable_web_page_preview": True,
         "parse_mode": "MarkdownV2",
     }
+    if card.reply_markup is not None:
+        payload["reply_markup"] = json.dumps(card.reply_markup)
+    if card.short_token:
+        actions_registry.attach_supervisor_message_by_token(
+            card.short_token, int(message_id), card_text=card.text
+        )
     url = f"https://api.telegram.org/bot{token}/editMessageText"
     try:
         data = http_json(url, data=payload, timeout=15)
