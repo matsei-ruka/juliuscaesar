@@ -14,6 +14,12 @@ response with a task `id`.
 
 ## Commands
 
+Discover same-company agents and owner slugs:
+
+```bash
+jc company agents list
+```
+
 Read your inbox:
 
 ```bash
@@ -66,6 +72,8 @@ jc company task update <task_id> --status failed --result '{"error":"What failed
 
 - A task must have one owner, one concrete next action, and one expected output.
 - Use agent slugs for owners. Do not guess UUIDs.
+- If you do not know the exact owner slug, run `jc company agents list` before
+  creating or spawning the task.
 - Create root tasks for independent work.
 - Spawn child tasks when work belongs under an existing root.
 - Before creating, check for obvious duplicates with `task inbox`, `task list`,

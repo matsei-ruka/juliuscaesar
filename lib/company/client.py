@@ -117,6 +117,14 @@ class CompanyClient:
         """
         return self._get("/api/agents/me", timeout=HTTP_TIMEOUT_SECONDS)
 
+    def organigram(self) -> dict[str, Any]:
+        """Return same-company peer roster for task routing.
+
+        Used by agents before creating/spawning tasks when they know a human
+        name or responsibility but not the stable owner slug.
+        """
+        return self._get("/api/agents/organigram", timeout=HTTP_TIMEOUT_SECONDS)
+
     def get_inbox(
         self,
         *,

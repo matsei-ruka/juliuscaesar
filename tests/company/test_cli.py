@@ -71,6 +71,30 @@ class TaskCliTests(unittest.TestCase):
     def setUp(self) -> None:
         gw_config.clear_env_cache()
 
+    def test_agents_list_prints_organigram(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            args = company_cli.build_parser().parse_args(
+                [
+                    "--instance-dir",
+                    str(instance),
+                    "agents",
+                    "list",
+                ]
+            )
+
+            with patch("company.cli.CompanyClient") as MockClient:
+                fake = MagicMock()
+                fake.organigram.return_value = {
+                    "self_slug": "amara_okonkwo",
+                    "agents": [{"slug": "sarah_liu"}],
+                }
+                MockClient.return_value = fake
+                rc = company_cli.cmd_agents_list(args)
+
+            self.assertEqual(rc, 0)
+            fake.organigram.assert_called_once_with()
+
     def test_task_create_posts_structured_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = _make_instance(tmp)

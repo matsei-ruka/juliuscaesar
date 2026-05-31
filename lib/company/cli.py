@@ -7,6 +7,7 @@ Subcommands:
 * ``status`` — endpoint, agent_id, API-key presence, outbox depth, reporter run.
 * ``alert`` — fire-and-forget alert POST.
 * ``approval`` — raise + optionally block until decided.
+* ``agents`` — same-company organigram / peer discovery.
 * ``task`` — task graph read / create / update helpers.
 * ``replay`` — drain ``state/company/outbox/`` to the backend.
 """
@@ -285,6 +286,22 @@ def cmd_approval(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- agents ---------------------------------------------------------------
+
+
+def cmd_agents_list(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        result = client.organigram()
+    except CompanyError as exc:
+        raise SystemExit(f"agents list failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
 # --- task ------------------------------------------------------------------
 
 
@@ -474,6 +491,10 @@ def build_parser() -> argparse.ArgumentParser:
     apr.add_argument("--expires-in", type=int, default=None, help="seconds until expiry")
     apr.add_argument("--wait", type=int, default=0, help="block up to N seconds waiting for decision")
 
+    ag = subs.add_parser("agents", help="same-company organigram / peer discovery")
+    agent_sub = ag.add_subparsers(dest="agents_cmd", required=True)
+    agent_sub.add_parser("list", help="list peer agents in this company")
+
     tp = subs.add_parser("task", help="task graph operations")
     task_sub = tp.add_subparsers(dest="task_cmd", required=True)
 
@@ -524,6 +545,9 @@ HANDLERS = {
     "status": cmd_status,
     "alert": cmd_alert,
     "approval": cmd_approval,
+    "agents": lambda args: {
+        "list": cmd_agents_list,
+    }[args.agents_cmd](args),
     "task": lambda args: {
         "inbox": cmd_task_inbox,
         "list": cmd_task_list,

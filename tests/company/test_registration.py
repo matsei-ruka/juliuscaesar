@@ -161,6 +161,29 @@ class CompanyClientRegisterTests(unittest.TestCase):
                 ],
             )
 
+    def test_organigram_uses_agent_bearer_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(
+                tmp,
+                env_lines=["COMPANY_ENDPOINT=http://x", "COMPANY_API_KEY=k"],
+            )
+            cfg = company_conf.load(instance)
+            session = MagicMock()
+            session.get.return_value = _ok_response({"agents": []})
+            client = CompanyClient(cfg, session=session)
+
+            client.organigram()
+
+            session.get.assert_called_once()
+            self.assertEqual(
+                session.get.call_args.args[0],
+                "http://x/api/agents/organigram",
+            )
+            self.assertEqual(
+                session.get.call_args.kwargs["headers"]["Authorization"],
+                "Bearer k",
+            )
+
 
 class ReporterRegistrationTests(unittest.TestCase):
     """End-to-end: token-only .env -> Reporter._register -> key persisted."""
