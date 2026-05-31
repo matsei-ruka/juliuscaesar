@@ -26,6 +26,7 @@ Spec: docs/specs/company-inbox-channel.md.
 from __future__ import annotations
 
 import dataclasses
+import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,7 @@ WARN_AFTER_CONSECUTIVE_FAILURES = 3
 # move. Requires the-company to honour these status values in the inbox query.
 CLOSURE_EXTRA_STATUSES = ("in_progress", "blocked")
 CLOSURE_POLL_LIMIT = 50
+TERMINAL_REPLY_STATUSES = frozenset({"done", "failed", "rejected"})
 
 
 def _now_iso() -> str:
@@ -95,6 +97,7 @@ class CompanyInboxChannel:
         self._injected: dict[str, str] = {}
         self._company_cfg: Any = None
         self._client: Any = None
+        self._updates_cursor: int | None = self._load_updates_cursor()
 
         # In-memory health/diagnostics (watchdog-readable via health()).
         self._lock = threading.Lock()
@@ -193,14 +196,28 @@ class CompanyInboxChannel:
         cfg = company_conf.load(self.instance_dir)
         client = CompanyClient(cfg)
         try:
+            parsed = _parse_task_reply(message)
+            comment_message = (
+                str(parsed.get("comment") or "").strip()
+                if parsed is not None
+                else ""
+            ) or message
+            result_payload = parsed.get("result") if parsed is not None else None
+            requested_status = (
+                str(parsed.get("status") or "").strip().lower()
+                if parsed is not None
+                else ""
+            )
+
             comment = client.comment_task(
                 task_id,
                 {
-                    "message": message,
+                    "message": comment_message,
                     "payload": {
                         "source": self.name,
                         "conversation_id": meta.get("conversation_id"),
                         "root_id": meta.get("root_id"),
+                        "final": requested_status in TERMINAL_REPLY_STATUSES,
                     },
                 },
             )
@@ -209,11 +226,20 @@ class CompanyInboxChannel:
             try:
                 task = client.get_task(task_id)
                 if str(task.get("status") or "") == "pending":
-                    client.patch_task(task_id, {"status": "accepted"})
+                    task = client.patch_task(task_id, {"status": "accepted"})
+                if requested_status in TERMINAL_REPLY_STATUSES:
+                    self._close_task_from_reply(
+                        client,
+                        task_id,
+                        task,
+                        requested_status,
+                        result_payload,
+                        comment_message,
+                    )
             except Exception as exc:  # noqa: BLE001
                 self.log(
-                    f"company-inbox comment saved but accept failed task={task_id} reason={exc}",
-                    kind="company_inbox_accept_failed",
+                    f"company-inbox comment saved but state update failed task={task_id} reason={exc}",
+                    kind="company_inbox_state_update_failed",
                 )
         finally:
             try:
@@ -223,7 +249,8 @@ class CompanyInboxChannel:
 
         comment_id = comment.get("id") if isinstance(comment, dict) else None
         self.log(
-            f"company-inbox reply wrote comment task={task_id} comment={comment_id}",
+            f"company-inbox reply wrote comment task={task_id} comment={comment_id} "
+            f"final={requested_status in TERMINAL_REPLY_STATUSES}",
             kind="company_inbox_reply_written",
         )
         return f"task-comment:{task_id}:{comment_id or 'ok'}"
@@ -294,6 +321,94 @@ class CompanyInboxChannel:
         if self.emit_task_closed:
             self._detect_closures(enqueue, present_ids, truncated=len(items) >= limit)
 
+        injected += self._poll_updates(enqueue)
+        return injected
+
+    def _close_task_from_reply(
+        self,
+        client: Any,
+        task_id: str,
+        task: dict[str, Any],
+        requested_status: str,
+        result_payload: Any,
+        fallback_message: str,
+    ) -> None:
+        current = str(task.get("status") or "")
+        if current in TERMINAL_REPLY_STATUSES:
+            if result_payload is not None:
+                client.patch_task(task_id, {"result": _coerce_result(result_payload, fallback_message)})
+            return
+        if requested_status == "done":
+            if current == "accepted":
+                task = client.patch_task(task_id, {"status": "in_progress"})
+                current = str(task.get("status") or "")
+            if current == "pending":
+                task = client.patch_task(task_id, {"status": "accepted"})
+                current = str(task.get("status") or "")
+                task = client.patch_task(task_id, {"status": "in_progress"})
+                current = str(task.get("status") or "")
+            if current == "in_progress":
+                client.patch_task(
+                    task_id,
+                    {
+                        "status": "done",
+                        "result": _coerce_result(result_payload, fallback_message),
+                    },
+                )
+            return
+        if requested_status in {"failed", "rejected"}:
+            if current == "accepted":
+                task = client.patch_task(task_id, {"status": "in_progress"})
+                current = str(task.get("status") or "")
+            if current == "pending":
+                if requested_status == "rejected":
+                    client.patch_task(task_id, {"status": "rejected"})
+                    return
+                task = client.patch_task(task_id, {"status": "accepted"})
+                current = str(task.get("status") or "")
+                task = client.patch_task(task_id, {"status": "in_progress"})
+                current = str(task.get("status") or "")
+            if current == "in_progress":
+                client.patch_task(task_id, {"status": requested_status})
+
+    def _poll_updates(self, enqueue: EnqueueFn) -> int:
+        client = self._client
+        if client is None:
+            return 0
+        if not hasattr(client, "list_task_updates"):
+            return 0
+
+        cursor = self._updates_cursor
+        if cursor is None:
+            result = client.list_task_updates(after_event_id=-1, limit=1)
+            self._updates_cursor = int(result.get("next_cursor") or 0)
+            self._save_updates_cursor(self._updates_cursor)
+            return 0
+
+        result = client.list_task_updates(
+            after_event_id=cursor,
+            limit=max(CLOSURE_POLL_LIMIT, self.max_new_per_tick * 2),
+        )
+        items = _extract_items(result)
+        injected = 0
+        max_cursor = cursor
+        for item in items:
+            event = item.get("event") if isinstance(item, dict) else None
+            task = item.get("task") if isinstance(item, dict) else None
+            if not isinstance(event, dict) or not isinstance(task, dict):
+                continue
+            event_id = int(event.get("id") or 0)
+            if event_id <= cursor:
+                continue
+            max_cursor = max(max_cursor, event_id)
+            self._inject_update(enqueue, event, task)
+            injected += 1
+        next_cursor = result.get("next_cursor")
+        if next_cursor is not None:
+            max_cursor = max(max_cursor, int(next_cursor))
+        if max_cursor != cursor:
+            self._updates_cursor = max_cursor
+            self._save_updates_cursor(max_cursor)
         return injected
 
     def _detect_closures(
@@ -362,6 +477,15 @@ class CompanyInboxChannel:
         }
 
         conversation_id = f"task-root:{root_id}"
+        if content:
+            content = (
+                f"{content}\n\n"
+                "Company task reply protocol:\n"
+                "- Use plain text for interim updates or blockers.\n"
+                "- When the task is complete, reply with JSON exactly like:\n"
+                '{"company_task":{"status":"done","comment":"final note",'
+                '"result":{"summary":"...","artifacts":[]}}}'
+            )
         enqueue(
             source=self.name,
             source_message_id=f"task:{task_id}",
@@ -371,6 +495,67 @@ class CompanyInboxChannel:
             meta=meta,
         )
         self._injected[task_id] = conversation_id
+
+    def _inject_update(
+        self,
+        enqueue: EnqueueFn,
+        event: dict[str, Any],
+        task: dict[str, Any],
+    ) -> None:
+        event_id = str(event.get("id") or "")
+        task_id = str(task.get("id") or event.get("task_id") or "")
+        root_id = str(task.get("root_id") or event.get("root_id") or task_id)
+        event_type = str(event.get("event_type") or "task_updated")
+        title = str(task.get("title") or task_id)
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        lines = [f"Task update: {title}", f"Event: {event_type}", f"Status: {task.get('status') or ''}"]
+        message = str(payload.get("message") or "").strip()
+        if message:
+            lines.append(f"Comment: {message}")
+        result = task.get("result")
+        if result:
+            lines.append(f"Result: {json.dumps(result, ensure_ascii=False, sort_keys=True)}")
+        conversation_id = f"task-root:{root_id}"
+        enqueue(
+            source=self.name,
+            source_message_id=f"task-update:{event_id}",
+            user_id=None,
+            conversation_id=conversation_id,
+            content="\n".join(lines),
+            meta={
+                "kind": "task_updated",
+                "event_id": event_id,
+                "event_type": event_type,
+                "task_id": task_id,
+                "root_id": root_id,
+                "company_status": task.get("status"),
+                "title": title,
+                "payload": payload,
+            },
+        )
+
+    def _updates_cursor_path(self) -> Path:
+        return self.instance_dir / "state" / "company" / "task_updates_cursor"
+
+    def _load_updates_cursor(self) -> int | None:
+        try:
+            text = self._updates_cursor_path().read_text(encoding="utf-8").strip()
+            return int(text) if text else None
+        except FileNotFoundError:
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _save_updates_cursor(self, cursor: int) -> None:
+        try:
+            path = self._updates_cursor_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{int(cursor)}\n", encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                f"company-inbox could not save update cursor: {exc}",
+                kind="company_inbox_update_cursor_failed",
+            )
 
     # ── Error handling ───────────────────────────────────────────────────
 
@@ -685,6 +870,57 @@ def _replace_agent_id(cfg: Any, agent_id: str) -> Any:
         except Exception:  # noqa: BLE001
             pass
         return cfg
+
+
+def _parse_task_reply(message: str) -> dict[str, Any] | None:
+    """Extract the explicit company_task envelope from a brain reply.
+
+    Plain text intentionally remains plain text: it is an interim comment.
+    Closing a task must be explicit because accidental terminal transitions
+    are worse than an accepted task that needs follow-up.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    candidates: list[str] = []
+    if "```" in text:
+        parts = text.split("```")
+        for idx, part in enumerate(parts):
+            block = part.strip()
+            if idx % 2 == 1:
+                if block.startswith("json"):
+                    block = block[4:].strip()
+                candidates.append(block)
+    if text.startswith("{") and text.endswith("}"):
+        candidates.append(text)
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(payload, dict):
+            continue
+        envelope = payload.get("company_task")
+        if not isinstance(envelope, dict):
+            continue
+        status = str(envelope.get("status") or "").strip().lower()
+        if status not in TERMINAL_REPLY_STATUSES:
+            return None
+        return {
+            "status": status,
+            "comment": envelope.get("comment"),
+            "result": envelope.get("result"),
+        }
+    return None
+
+
+def _coerce_result(result_payload: Any, fallback_message: str) -> dict[str, Any]:
+    if isinstance(result_payload, dict) and result_payload:
+        return result_payload
+    if result_payload not in (None, "", [], {}):
+        return {"value": result_payload}
+    return {"message": fallback_message}
 
 
 def _extract_items(result: Any) -> list[dict[str, Any]]:

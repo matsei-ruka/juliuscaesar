@@ -75,6 +75,20 @@ jc company task comment <task_id> --message "I saw this and am waiting on the pu
 jc company task comments <task_id>
 ```
 
+When a task arrives through `company-inbox`, a plain text reply is treated as
+an interim task comment. To close the task through the reply path, return this
+JSON envelope exactly:
+
+```json
+{"company_task":{"status":"done","comment":"Done.","result":{"payload":"artifact-or-summary","notes":"optional"}}}
+```
+
+For terminal failure:
+
+```json
+{"company_task":{"status":"failed","comment":"Could not complete.","result":{"error":{"code":"short_code","message":"What failed"}}}}
+```
+
 ## Policy
 
 - A task must have one owner, one concrete next action, and one expected output.
@@ -85,7 +99,8 @@ jc company task comments <task_id>
 - Spawn child tasks when work belongs under an existing root.
 - Before creating, check for obvious duplicates with `task inbox`, `task list`,
   or `task get` if a related task ID is known.
-- Never mark a task done without a useful `--result` payload.
+- Never mark a task done without a useful `--result` payload or final reply
+  envelope.
 - Use comments for acknowledgements, interim updates, blockers, and handoff
   notes. Use `--result` only for final deliverables or terminal failure data.
 - Never hide failure. If a command fails, report the error and leave the task
@@ -101,9 +116,9 @@ Failure paths:
 
 `pending -> rejected`
 
-`accepted|in_progress -> blocked`
+`in_progress -> blocked`
 
-`accepted|in_progress|blocked -> failed`
+`in_progress -> failed`
 
 Avoid jumping straight from `pending` to `done`. Accept the task first unless
 the task is invalid and should be rejected.

@@ -39,6 +39,8 @@ class FakeClient:
         self.comments: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
         self.tasks: dict[str, dict] = {}
+        self.update_responses: list[dict] = []
+        self.update_calls: list[dict] = []
         self.closed = 0
 
     def get_inbox(self, *, agent_id, statuses, limit):
@@ -75,6 +77,12 @@ class FakeClient:
         task = self.tasks.setdefault(task_id, {"id": task_id})
         task.update(body)
         return task
+
+    def list_task_updates(self, *, after_event_id=0, limit=50):
+        self.update_calls.append({"after_event_id": after_event_id, "limit": limit})
+        if not self.update_responses:
+            return {"items": [], "next_cursor": after_event_id}
+        return self.update_responses.pop(0)
 
     def close(self):
         self.closed += 1
@@ -258,6 +266,76 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(message_id, "task-comment:task-1:99")
         self.assertEqual(len(send_client.comments), 1)
         self.assertEqual(send_client.patches, [])
+
+    def test_send_final_envelope_closes_task_with_result(self):
+        send_client = FakeClient()
+        ch = _make_channel()
+        response = (
+            '{"company_task":{"status":"done","comment":"Published.",'
+            '"result":{"url":"https://example.test/post","title":"Post",'
+            '"summary":"One line."}}}'
+        )
+
+        with (
+            patch.object(company_inbox_mod.company_conf, "load", return_value=SimpleNamespace()),
+            patch.object(company_inbox_mod, "CompanyClient", return_value=send_client),
+        ):
+            message_id = ch.send(response, {"task_id": "task-1", "root_id": "root-1"})
+
+        self.assertEqual(message_id, "task-comment:task-1:99")
+        self.assertEqual(send_client.comments[0][1]["message"], "Published.")
+        self.assertEqual(
+            send_client.patches,
+            [
+                ("task-1", {"status": "accepted"}),
+                ("task-1", {"status": "in_progress"}),
+                (
+                    "task-1",
+                    {
+                        "status": "done",
+                        "result": {
+                            "url": "https://example.test/post",
+                            "title": "Post",
+                            "summary": "One line.",
+                        },
+                    },
+                ),
+            ],
+        )
+
+    def test_poll_updates_injects_participant_notification(self):
+        captured, enqueue = _captured_enqueue()
+        client = FakeClient([{"items": []}])
+        client.update_responses = [
+            {
+                "items": [
+                    {
+                        "event": {
+                            "id": 11,
+                            "event_type": "comment_added",
+                            "payload": {"message": "Done with URL."},
+                        },
+                        "task": {
+                            "id": "task-1",
+                            "root_id": "root-1",
+                            "title": "Daily blog",
+                            "status": "done",
+                            "result": {"url": "https://example.test/post"},
+                        },
+                    }
+                ],
+                "next_cursor": 11,
+            }
+        ]
+        ch = _make_channel(client=client)
+        ch._updates_cursor = 10
+
+        self.assertEqual(ch._poll_once(enqueue), 1)
+        self.assertEqual(captured[0]["source_message_id"], "task-update:11")
+        self.assertEqual(captured[0]["conversation_id"], "task-root:root-1")
+        self.assertEqual(captured[0]["meta"]["kind"], "task_updated")
+        self.assertIn("Done with URL.", captured[0]["content"])
+        self.assertEqual(ch._updates_cursor, 11)
 
 
 class ErrorHandlingTests(unittest.TestCase):

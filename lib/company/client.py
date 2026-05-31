@@ -202,6 +202,22 @@ class CompanyClient:
             timeout=HTTP_TIMEOUT_SECONDS,
         )
 
+    def list_task_updates(
+        self,
+        *,
+        after_event_id: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return participant-visible task update events for this agent."""
+        return self._get(
+            "/api/tasks/updates",
+            params={
+                "after_event_id": str(int(after_event_id)),
+                "limit": str(int(limit)),
+            },
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+
     def upload_approval_media(
         self,
         approval_id: str,

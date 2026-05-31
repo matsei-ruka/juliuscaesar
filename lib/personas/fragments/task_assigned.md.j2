@@ -27,14 +27,16 @@ Your job runs in three steps: Decide, Work, Close.
    payload shape.
 
 3. Close. PATCH `in_progress` to `done` with `result.payload` set, or to
-   `failed` with `result.error` set. The shape is below.
+   `failed` with `result.error` set. If you are replying directly to the
+   company-inbox event instead of running `jc company task update`, use the
+   final reply envelope below.
 
 The state machine does not allow shortcuts. The legal transitions are:
 
     pending      → accepted | rejected
     accepted     → in_progress | rejected
-    in_progress  → done | failed | blocked | rejected
-    blocked      → in_progress | rejected
+    in_progress  → done | failed | blocked
+    blocked      → in_progress
 
 Going straight from `pending` to `done` returns 422 `illegal_transition`.
 Walk the states. `blocked` is for the kind of stuck that needs a human or
@@ -62,6 +64,18 @@ Result payload shape — failure (use with `failed` or `rejected`):
 `payload` / `error` / `notes` are the agreed slots. Add task-specific
 top-level keys if you genuinely need them, but those three are the
 contract every consumer reads first.
+
+Final reply envelope — only when the task is complete:
+
+    {"company_task":{"status":"done","comment":"Done.","result":{"payload":<artifact>,"notes":"optional"}}}
+
+For terminal failure:
+
+    {"company_task":{"status":"failed","comment":"Could not complete.","result":{"error":{"code":"short_code","message":"What failed"}}}}
+
+Plain text replies are saved as comments only. They do not close the task.
+Use plain text for interim updates and blockers. Use the final envelope only
+when the task should become terminal.
 
 Failure mode to avoid: PATCHing to `done` with empty `result.payload`
 and no `error` block. That is "silencing the task" — looks successful,
