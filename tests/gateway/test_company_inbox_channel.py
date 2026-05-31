@@ -34,6 +34,9 @@ class FakeClient:
         self.whoami_calls = 0
         self.whoami_responses = list(whoami_responses or [])
         self.alerts: list[dict] = []
+        self.comments: list[tuple[str, dict]] = []
+        self.patches: list[tuple[str, dict]] = []
+        self.tasks: dict[str, dict] = {}
         self.closed = 0
 
     def get_inbox(self, *, agent_id, statuses, limit):
@@ -57,6 +60,19 @@ class FakeClient:
     def post_alert(self, body):
         self.alerts.append(body)
         return {}
+
+    def comment_task(self, task_id, body):
+        self.comments.append((task_id, body))
+        return {"id": 99, "task_id": task_id, **body}
+
+    def get_task(self, task_id):
+        return self.tasks.get(task_id, {"id": task_id, "status": "pending"})
+
+    def patch_task(self, task_id, body):
+        self.patches.append((task_id, body))
+        task = self.tasks.setdefault(task_id, {"id": task_id})
+        task.update(body)
+        return task
 
     def close(self):
         self.closed += 1
@@ -198,6 +214,39 @@ class InjectionTests(unittest.TestCase):
         ch2 = _make_channel(client=FakeClient([[_task("x")]]))
         c2, e2 = _captured_enqueue()
         self.assertEqual(ch2._poll_once(e2), 1)
+
+    def test_send_writes_task_comment_and_accepts_pending_task(self):
+        client = FakeClient()
+        ch = _make_channel(client=client)
+        ch._load_client = lambda: None
+        ch._close_client = lambda: None
+
+        message_id = ch.send(
+            "I saw it.",
+            {
+                "task_id": "task-1",
+                "root_id": "root-1",
+                "conversation_id": "task-root:root-1",
+            },
+        )
+
+        self.assertEqual(message_id, "task-comment:task-1:99")
+        self.assertEqual(client.comments[0][0], "task-1")
+        self.assertEqual(client.comments[0][1]["message"], "I saw it.")
+        self.assertEqual(client.patches, [("task-1", {"status": "accepted"})])
+
+    def test_send_comments_but_does_not_reaccept_non_pending_task(self):
+        client = FakeClient()
+        client.tasks["task-1"] = {"id": "task-1", "status": "in_progress"}
+        ch = _make_channel(client=client)
+        ch._load_client = lambda: None
+        ch._close_client = lambda: None
+
+        message_id = ch.send("Still working.", {"task_id": "task-1"})
+
+        self.assertEqual(message_id, "task-comment:task-1:99")
+        self.assertEqual(len(client.comments), 1)
+        self.assertEqual(client.patches, [])
 
 
 class ErrorHandlingTests(unittest.TestCase):

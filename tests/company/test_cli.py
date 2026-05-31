@@ -137,6 +137,38 @@ class TaskCliTests(unittest.TestCase):
                 }
             )
 
+    def test_task_comment_posts_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _make_instance(tmp)
+            args = company_cli.build_parser().parse_args(
+                [
+                    "--instance-dir",
+                    str(instance),
+                    "task",
+                    "comment",
+                    "task-1",
+                    "--message",
+                    "I saw it.",
+                    "--payload",
+                    '{"source":"test"}',
+                ]
+            )
+
+            with patch("company.cli.CompanyClient") as MockClient:
+                fake = MagicMock()
+                fake.comment_task.return_value = {"id": 7}
+                MockClient.return_value = fake
+                rc = company_cli.cmd_task_comment(args)
+
+            self.assertEqual(rc, 0)
+            fake.comment_task.assert_called_once_with(
+                "task-1",
+                {
+                    "message": "I saw it.",
+                    "payload": {"source": "test"},
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

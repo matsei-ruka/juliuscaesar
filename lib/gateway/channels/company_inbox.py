@@ -4,11 +4,11 @@ Polls ``GET /api/agents/{self}/inbox`` every ``poll_interval_seconds`` and
 injects each new task as a synthetic ``company.task_assigned`` event into the
 local ``queue.db``. The brain receives it through the normal dispatch path.
 
-Inbound-only: ``send()`` is a no-op (the brain acts on tasks via its own HTTP
-skill — out of scope here). Credentials and agent identity are the *same ones
-the supervisor reporter uses* — ``COMPANY_*`` from ``.env`` loaded by
-``lib/company/conf.py`` into a ``CompanyConfig`` and driven through
-``lib/company/client.py``.
+Inbound task delivery uses the normal queue. Outbound replies from the brain
+are written back to the task as comments, then a first reply accepts a pending
+task. Credentials and agent identity are the *same ones the supervisor reporter
+uses* — ``COMPANY_*`` from ``.env`` loaded by ``lib/company/conf.py`` into a
+``CompanyConfig`` and driven through ``lib/company/client.py``.
 
 Dedup is belt-and-suspenders: a boot-scoped in-memory ``seen`` set, plus the
 ``queue.db`` partial unique index ``idx_events_dedup (source,
@@ -175,7 +175,54 @@ class CompanyInboxChannel:
         self.log("company-inbox stopped", kind="company_inbox_stop")
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
-        return None
+        task_id = str(meta.get("task_id") or "").strip()
+        if not task_id:
+            self.log(
+                "company-inbox reply missing task_id; cannot write back",
+                kind="company_inbox_reply_missing_task_id",
+            )
+            return None
+        message = (response or "").strip()
+        if not message:
+            self.log(
+                f"company-inbox empty reply task={task_id}; nothing to write back",
+                kind="company_inbox_reply_empty",
+            )
+            return None
+
+        self._load_client()
+        try:
+            comment = self._client.comment_task(
+                task_id,
+                {
+                    "message": message,
+                    "payload": {
+                        "source": self.name,
+                        "conversation_id": meta.get("conversation_id"),
+                        "root_id": meta.get("root_id"),
+                    },
+                },
+            )
+            # First proof-of-life from the owner should move pending → accepted.
+            # If another path already moved it, keep the comment and leave state.
+            try:
+                task = self._client.get_task(task_id)
+                if str(task.get("status") or "") == "pending":
+                    self._client.patch_task(task_id, {"status": "accepted"})
+            except Exception as exc:  # noqa: BLE001
+                self.log(
+                    f"company-inbox comment saved but accept failed task={task_id} reason={exc}",
+                    kind="company_inbox_accept_failed",
+                )
+        finally:
+            self._close_client()
+
+        comment_id = comment.get("id") if isinstance(comment, dict) else None
+        self.log(
+            f"company-inbox reply wrote comment task={task_id} comment={comment_id}",
+            kind="company_inbox_reply_written",
+        )
+        return f"task-comment:{task_id}:{comment_id or 'ok'}"
 
     def close(self) -> None:
         self._close_client()

@@ -68,6 +68,13 @@ jc company task update <task_id> --status done --result '{"summary":"What change
 jc company task update <task_id> --status failed --result '{"error":"What failed","next_step":"Retry path or owner"}'
 ```
 
+Add an interim comment without closing the task:
+
+```bash
+jc company task comment <task_id> --message "I saw this and am waiting on the publish job."
+jc company task comments <task_id>
+```
+
 ## Policy
 
 - A task must have one owner, one concrete next action, and one expected output.
@@ -79,6 +86,8 @@ jc company task update <task_id> --status failed --result '{"error":"What failed
 - Before creating, check for obvious duplicates with `task inbox`, `task list`,
   or `task get` if a related task ID is known.
 - Never mark a task done without a useful `--result` payload.
+- Use comments for acknowledgements, interim updates, blockers, and handoff
+  notes. Use `--result` only for final deliverables or terminal failure data.
 - Never hide failure. If a command fails, report the error and leave the task
   state truthful.
 

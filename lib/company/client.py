@@ -191,6 +191,17 @@ class CompanyClient:
     def patch_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return self._patch(f"/api/tasks/{task_id}", body)
 
+    def comment_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Add an interim comment to a task."""
+        return self._post(f"/api/tasks/{task_id}/comments", body)
+
+    def list_task_comments(self, task_id: str, *, limit: int = 100) -> dict[str, Any]:
+        return self._get(
+            f"/api/tasks/{task_id}/comments",
+            params={"limit": str(int(limit))},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+
     def upload_approval_media(
         self,
         approval_id: str,

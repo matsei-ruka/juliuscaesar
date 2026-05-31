@@ -425,6 +425,36 @@ def cmd_task_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_task_comment(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    body: dict[str, Any] = {"message": args.message}
+    payload = _load_json_arg(args.payload, field="--payload")
+    if payload:
+        body["payload"] = payload
+    client = _client_for(instance)
+    try:
+        result = client.comment_task(args.task_id, body)
+    except CompanyError as exc:
+        raise SystemExit(f"task comment failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def cmd_task_comments(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    client = _client_for(instance)
+    try:
+        result = client.list_task_comments(args.task_id, limit=args.limit)
+    except CompanyError as exc:
+        raise SystemExit(f"task comments failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
 # --- replay ----------------------------------------------------------------
 
 
@@ -534,6 +564,15 @@ def build_parser() -> argparse.ArgumentParser:
     tu.add_argument("--status", choices=["pending", "accepted", "in_progress", "blocked", "done", "failed", "rejected"])
     tu.add_argument("--result", default=None, help="inline JSON object or @path")
 
+    tco = task_sub.add_parser("comment", help="add an interim task comment")
+    tco.add_argument("task_id")
+    tco.add_argument("--message", required=True)
+    tco.add_argument("--payload", default=None, help="inline JSON object or @path")
+
+    tcs = task_sub.add_parser("comments", help="list task comments")
+    tcs.add_argument("task_id")
+    tcs.add_argument("--limit", type=int, default=100)
+
     rpy = subs.add_parser("replay", help="re-send buffered outbox events")
     rpy.add_argument("--since", default=None, help="only replay events newer than this (e.g. 1h, 30m, 2d)")
 
@@ -555,6 +594,8 @@ HANDLERS = {
         "create": cmd_task_create,
         "spawn": cmd_task_spawn,
         "update": cmd_task_update,
+        "comment": cmd_task_comment,
+        "comments": cmd_task_comments,
     }[args.task_cmd](args),
     "replay": cmd_replay,
 }
