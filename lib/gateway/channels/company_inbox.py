@@ -178,6 +178,15 @@ class CompanyInboxChannel:
         self.log("company-inbox stopped", kind="company_inbox_stop")
 
     def send(self, response: str, meta: dict[str, Any]) -> str | None:
+        if str(meta.get("kind") or "") == "task_updated":
+            event_id = str(meta.get("event_id") or "ok")
+            task_id = str(meta.get("task_id") or "").strip()
+            self.log(
+                f"company-inbox update notification acknowledged task={task_id} event={event_id}",
+                kind="company_inbox_update_ack",
+            )
+            return f"task-update-ack:{event_id}"
+
         task_id = str(meta.get("task_id") or "").strip()
         if not task_id:
             self.log(
@@ -523,6 +532,9 @@ class CompanyInboxChannel:
         result = task.get("result")
         if result:
             lines.append(f"Result: {json.dumps(result, ensure_ascii=False, sort_keys=True)}")
+        lines.append(
+            "Notification only: do not reply to this update unless you need to take a new action."
+        )
         conversation_id = f"task-root:{root_id}"
         enqueue(
             source=self.name,

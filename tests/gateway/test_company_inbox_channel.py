@@ -321,6 +321,23 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(send_client.patches[-1][1]["status"], "done")
         self.assertEqual(send_client.patches[-1][1]["result"], {"payload": {"summary": "ok"}})
 
+    def test_send_task_update_notification_does_not_write_back(self):
+        send_client = FakeClient()
+        ch = _make_channel()
+
+        with (
+            patch.object(company_inbox_mod.company_conf, "load", return_value=SimpleNamespace()),
+            patch.object(company_inbox_mod, "CompanyClient", return_value=send_client),
+        ):
+            message_id = ch.send(
+                "Noted.",
+                {"kind": "task_updated", "task_id": "task-1", "event_id": "42"},
+            )
+
+        self.assertEqual(message_id, "task-update-ack:42")
+        self.assertEqual(send_client.comments, [])
+        self.assertEqual(send_client.patches, [])
+
     def test_poll_updates_injects_participant_notification(self):
         captured, enqueue = _captured_enqueue()
         client = FakeClient([{"items": []}])
@@ -353,6 +370,7 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(captured[0]["conversation_id"], "task-root:root-1")
         self.assertEqual(captured[0]["meta"]["kind"], "task_updated")
         self.assertIn("Done with URL.", captured[0]["content"])
+        self.assertIn("Notification only", captured[0]["content"])
         self.assertEqual(ch._updates_cursor, 11)
 
     def test_poll_updates_coalesces_multiple_events_for_same_task(self):
