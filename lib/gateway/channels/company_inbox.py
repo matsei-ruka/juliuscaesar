@@ -893,6 +893,21 @@ def _parse_task_reply(message: str) -> dict[str, Any] | None:
                 candidates.append(block)
     if text.startswith("{") and text.endswith("}"):
         candidates.append(text)
+    # Brain adapters often append a footer after the JSON object. Parse any
+    # leading balanced JSON object instead of requiring the whole stdout to be
+    # JSON.
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            payload, _end = decoder.raw_decode(text[start:])
+        except Exception:  # noqa: BLE001
+            start = text.find("{", start + 1)
+            continue
+        if isinstance(payload, dict):
+            candidates.append(json.dumps(payload))
+            break
+        start = text.find("{", start + 1)
 
     for candidate in candidates:
         try:

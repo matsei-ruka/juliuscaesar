@@ -303,6 +303,24 @@ class InjectionTests(unittest.TestCase):
             ],
         )
 
+    def test_send_final_envelope_with_footer_still_closes_task(self):
+        send_client = FakeClient()
+        ch = _make_channel()
+
+        with (
+            patch.object(company_inbox_mod.company_conf, "load", return_value=SimpleNamespace()),
+            patch.object(company_inbox_mod, "CompanyClient", return_value=send_client),
+        ):
+            ch.send(
+                '{"company_task":{"status":"done","comment":"Closed.",'
+                '"result":{"payload":{"summary":"ok"}}}}\n\nfooter text',
+                {"task_id": "task-1"},
+            )
+
+        self.assertEqual(send_client.comments[0][1]["message"], "Closed.")
+        self.assertEqual(send_client.patches[-1][1]["status"], "done")
+        self.assertEqual(send_client.patches[-1][1]["result"], {"payload": {"summary": "ok"}})
+
     def test_poll_updates_injects_participant_notification(self):
         captured, enqueue = _captured_enqueue()
         client = FakeClient([{"items": []}])
