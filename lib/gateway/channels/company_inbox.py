@@ -190,9 +190,10 @@ class CompanyInboxChannel:
             )
             return None
 
-        self._load_client()
+        cfg = company_conf.load(self.instance_dir)
+        client = CompanyClient(cfg)
         try:
-            comment = self._client.comment_task(
+            comment = client.comment_task(
                 task_id,
                 {
                     "message": message,
@@ -206,16 +207,19 @@ class CompanyInboxChannel:
             # First proof-of-life from the owner should move pending → accepted.
             # If another path already moved it, keep the comment and leave state.
             try:
-                task = self._client.get_task(task_id)
+                task = client.get_task(task_id)
                 if str(task.get("status") or "") == "pending":
-                    self._client.patch_task(task_id, {"status": "accepted"})
+                    client.patch_task(task_id, {"status": "accepted"})
             except Exception as exc:  # noqa: BLE001
                 self.log(
                     f"company-inbox comment saved but accept failed task={task_id} reason={exc}",
                     kind="company_inbox_accept_failed",
                 )
         finally:
-            self._close_client()
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
         comment_id = comment.get("id") if isinstance(comment, dict) else None
         self.log(

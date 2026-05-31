@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import config as gateway_config  # noqa: E402
+from gateway.channels import company_inbox as company_inbox_mod  # noqa: E402
 from gateway.channels.company_inbox import CompanyInboxChannel  # noqa: E402
 from gateway.config import ChannelConfig, ConfigError, load_config  # noqa: E402
 
@@ -216,37 +218,46 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(ch2._poll_once(e2), 1)
 
     def test_send_writes_task_comment_and_accepts_pending_task(self):
-        client = FakeClient()
-        ch = _make_channel(client=client)
-        ch._load_client = lambda: None
-        ch._close_client = lambda: None
+        poll_client = FakeClient()
+        send_client = FakeClient()
+        ch = _make_channel(client=poll_client)
+        ch.instance_dir = Path("/tmp/send-test")
 
-        message_id = ch.send(
-            "I saw it.",
-            {
-                "task_id": "task-1",
-                "root_id": "root-1",
-                "conversation_id": "task-root:root-1",
-            },
-        )
+        with (
+            patch.object(company_inbox_mod.company_conf, "load", return_value=SimpleNamespace()),
+            patch.object(company_inbox_mod, "CompanyClient", return_value=send_client),
+        ):
+            message_id = ch.send(
+                "I saw it.",
+                {
+                    "task_id": "task-1",
+                    "root_id": "root-1",
+                    "conversation_id": "task-root:root-1",
+                },
+            )
 
         self.assertEqual(message_id, "task-comment:task-1:99")
-        self.assertEqual(client.comments[0][0], "task-1")
-        self.assertEqual(client.comments[0][1]["message"], "I saw it.")
-        self.assertEqual(client.patches, [("task-1", {"status": "accepted"})])
+        self.assertEqual(send_client.comments[0][0], "task-1")
+        self.assertEqual(send_client.comments[0][1]["message"], "I saw it.")
+        self.assertEqual(send_client.patches, [("task-1", {"status": "accepted"})])
+        self.assertIs(ch._client, poll_client)
+        self.assertEqual(poll_client.closed, 0)
+        self.assertEqual(send_client.closed, 1)
 
     def test_send_comments_but_does_not_reaccept_non_pending_task(self):
-        client = FakeClient()
-        client.tasks["task-1"] = {"id": "task-1", "status": "in_progress"}
-        ch = _make_channel(client=client)
-        ch._load_client = lambda: None
-        ch._close_client = lambda: None
+        send_client = FakeClient()
+        send_client.tasks["task-1"] = {"id": "task-1", "status": "in_progress"}
+        ch = _make_channel()
 
-        message_id = ch.send("Still working.", {"task_id": "task-1"})
+        with (
+            patch.object(company_inbox_mod.company_conf, "load", return_value=SimpleNamespace()),
+            patch.object(company_inbox_mod, "CompanyClient", return_value=send_client),
+        ):
+            message_id = ch.send("Still working.", {"task_id": "task-1"})
 
         self.assertEqual(message_id, "task-comment:task-1:99")
-        self.assertEqual(len(client.comments), 1)
-        self.assertEqual(client.patches, [])
+        self.assertEqual(len(send_client.comments), 1)
+        self.assertEqual(send_client.patches, [])
 
 
 class ErrorHandlingTests(unittest.TestCase):
