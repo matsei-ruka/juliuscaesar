@@ -392,6 +392,7 @@ class CompanyInboxChannel:
         items = _extract_items(result)
         injected = 0
         max_cursor = cursor
+        latest_by_task: dict[str, tuple[int, dict[str, Any], dict[str, Any]]] = {}
         for item in items:
             event = item.get("event") if isinstance(item, dict) else None
             task = item.get("task") if isinstance(item, dict) else None
@@ -401,6 +402,13 @@ class CompanyInboxChannel:
             if event_id <= cursor:
                 continue
             max_cursor = max(max_cursor, event_id)
+            task_id = str(task.get("id") or event.get("task_id") or "")
+            if not task_id:
+                continue
+            prior = latest_by_task.get(task_id)
+            if prior is None or event_id > prior[0]:
+                latest_by_task[task_id] = (event_id, event, task)
+        for _event_id, event, task in latest_by_task.values():
             self._inject_update(enqueue, event, task)
             injected += 1
         next_cursor = result.get("next_cursor")

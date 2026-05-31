@@ -355,6 +355,32 @@ class InjectionTests(unittest.TestCase):
         self.assertIn("Done with URL.", captured[0]["content"])
         self.assertEqual(ch._updates_cursor, 11)
 
+    def test_poll_updates_coalesces_multiple_events_for_same_task(self):
+        captured, enqueue = _captured_enqueue()
+        client = FakeClient([{"items": []}])
+        client.update_responses = [
+            {
+                "items": [
+                    {
+                        "event": {"id": 11, "event_type": "comment_added", "payload": {}},
+                        "task": {"id": "task-1", "root_id": "root-1", "title": "Task", "status": "accepted"},
+                    },
+                    {
+                        "event": {"id": 12, "event_type": "status_changed", "payload": {}},
+                        "task": {"id": "task-1", "root_id": "root-1", "title": "Task", "status": "done"},
+                    },
+                ],
+                "next_cursor": 12,
+            }
+        ]
+        ch = _make_channel(client=client)
+        ch._updates_cursor = 10
+
+        self.assertEqual(ch._poll_once(enqueue), 1)
+        self.assertEqual(captured[0]["source_message_id"], "task-update:12")
+        self.assertIn("Status: done", captured[0]["content"])
+        self.assertEqual(ch._updates_cursor, 12)
+
 
 class ErrorHandlingTests(unittest.TestCase):
     def test_transient_backoff_grows_then_recovers(self):
