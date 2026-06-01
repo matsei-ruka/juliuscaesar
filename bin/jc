@@ -27,6 +27,7 @@
 #   self-model   Autonomous self-observation loop (proposes RULES/IDENTITY/JOURNAL edits).
 #   persona      Persona interview engine (gap-driven slot filling, macro binding).
 #   actions      Supervisor card actions: list backgrounded sessions, audit log.
+#   features     Audit opt-in JC capabilities and notify on disabled / newly available ones.
 #
 # All subcommands accept `--instance-dir <path>` and respect `$JC_INSTANCE_DIR`.
 
@@ -68,6 +69,7 @@ Subcommands:
   approvals    Unified local approvals table (jc-approvals).
   supervisor   Per-event progress cards + silent recovery (jc-supervisor).
   actions      Supervisor card actions: list backgrounded sessions, audit log (jc-actions).
+  features     Audit + notify on opt-in JC capabilities (jc-features).
 Global flags:
   --instance-dir <path>    Override instance dir (or set \$JC_INSTANCE_DIR).
 
@@ -120,7 +122,7 @@ case "$SUB" in
     -v|--version|version)
         echo "juliuscaesar $VERSION"; exit 0
         ;;
-    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|whatsapp|transcripts|commitments|dream|supervisor|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|completion|approvals|actions)
+    memory|heartbeat|voice|watchdog|workers|skills|research|chats|email|whatsapp|transcripts|commitments|dream|supervisor|gateway|company|init|setup|update|doctor|upgrade|user-model|codex-auth|self-model|persona|completion|approvals|actions|features)
         if ! command -v "jc-$SUB" >/dev/null 2>&1; then
             echo "jc-$SUB not found on PATH. Run juliuscaesar/install.sh to set up the shims." >&2
             exit 127

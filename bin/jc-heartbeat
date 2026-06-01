@@ -3,6 +3,8 @@
 
 Usage:
   jc-heartbeat run <task-name> [--dry-run] [--instance-dir <path>]
+  jc-heartbeat cron preview     [--instance-dir <path>]
+  jc-heartbeat cron sync        [--instance-dir <path>] [--dry-run]
 
 Instance dir resolution (same as jc-memory):
   1. --instance-dir flag
@@ -23,6 +25,7 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from heartbeat import run_task  # type: ignore  # noqa: E402
+from heartbeat import cron_sync as _cron_sync  # type: ignore  # noqa: E402
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
 
@@ -31,6 +34,33 @@ def resolve_instance_dir(arg: str | None) -> Path:
         return _resolve_instance_dir(arg, fallback_markers=("heartbeat/tasks.yaml",))
     except InstanceResolutionError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _cmd_cron(args, instance):
+    if args.cron_cmd == "preview":
+        block = _cron_sync.preview(instance)
+        if not block:
+            print("(no scheduled tasks — nothing to install)")
+            return 0
+        sys.stdout.write(block)
+        return 0
+    if args.cron_cmd == "sync":
+        try:
+            summary = _cron_sync.sync(instance, dry_run=args.dry_run)
+        except (RuntimeError, ValueError) as exc:
+            print(f"cron sync failed: {exc}", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            sys.stdout.write(summary["crontab"])
+            return 0
+        scheduled = summary["scheduled"]
+        if summary["installed"]:
+            print(f"installed crontab block ({scheduled} task(s)) for {summary['basename']}")
+        else:
+            print(f"crontab already in sync ({scheduled} task(s)) for {summary['basename']}")
+        return 0
+    print(f"unknown cron subcommand: {args.cron_cmd}", file=sys.stderr)
+    return 2
 
 
 def main() -> int:
@@ -42,9 +72,21 @@ def main() -> int:
     pr.add_argument("task")
     pr.add_argument("--dry-run", action="store_true", help="Skip Telegram send; print output")
 
+    pc = sub.add_parser("cron", help="Sync schedule: lines from tasks.yaml into the user's crontab")
+    pc_sub = pc.add_subparsers(dest="cron_cmd", required=True)
+    pc_preview = pc_sub.add_parser("preview", help="Print the cron block that would be installed")
+    pc_preview.set_defaults(dry_run=False)
+    pc_sync = pc_sub.add_parser("sync", help="Install / refresh the crontab block")
+    pc_sync.add_argument("--dry-run", action="store_true", help="Print resulting crontab; do not install")
+
     args = p.parse_args()
     instance = resolve_instance_dir(args.instance_dir)
-    return run_task(instance, args.task, dry_run=args.dry_run)
+    if args.cmd == "run":
+        return run_task(instance, args.task, dry_run=args.dry_run)
+    if args.cmd == "cron":
+        return _cmd_cron(args, instance)
+    print(f"unknown subcommand: {args.cmd}", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
