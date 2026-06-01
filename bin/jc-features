@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""jc-features — audit + notify on opt-in JC capabilities.
+
+Usage:
+  jc-features list [--instance-dir <path>]
+  jc-features notify-disabled [--only-new] [--dry-run] [--instance-dir <path>]
+
+See docs/specs/feature-audit-notifier.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_LIB = _HERE.parent / "lib"
+if _LIB.exists() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from heartbeat import feature_audit  # type: ignore  # noqa: E402
+from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
+
+
+SEND_TELEGRAM = _LIB / "heartbeat" / "lib" / "send_telegram.py"
+
+
+def resolve_instance_dir(arg: str | None) -> Path:
+    try:
+        return _resolve_instance_dir(arg, fallback_markers=("heartbeat/tasks.yaml",))
+    except InstanceResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _print_table(features) -> None:
+    name_w = max((len(f.name) for f in features), default=4)
+    name_w = max(name_w, 4)
+    status_w = 8
+    print(f"{'NAME':<{name_w}}  {'STATUS':<{status_w}}  HINT")
+    print("-" * (name_w + status_w + 30))
+    for f in features:
+        print(f"{f.name:<{name_w}}  {f.status:<{status_w}}  {f.hint}")
+
+
+def _send_message(instance_dir: Path, body: str) -> int:
+    env = os.environ.copy()
+    env["JC_INSTANCE_DIR"] = str(instance_dir)
+    proc = subprocess.run(
+        [sys.executable, str(SEND_TELEGRAM)],
+        input=body,
+        text=True,
+        env=env,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr or "telegram send failed\n")
+    return proc.returncode
+
+
+def cmd_list(args) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    features = feature_audit.scan(instance)
+    _print_table(features)
+    return 0
+
+
+def cmd_notify(args) -> int:
+    instance = resolve_instance_dir(args.instance_dir)
+    features = feature_audit.scan(instance)
+
+    if args.only_new:
+        snapshot = feature_audit.load_snapshot(instance)
+        candidates = feature_audit.diff_new(features, snapshot)
+    else:
+        candidates = features
+
+    body = feature_audit.build_telegram_message(candidates, only_new=args.only_new)
+    if body is None:
+        # Nothing to say. Snapshot still gets written on a real (non-dry) run
+        # so the next --only-new diff is correctly anchored.
+        if not args.dry_run:
+            feature_audit.write_snapshot(instance, features)
+        return 0
+
+    if args.dry_run:
+        sys.stdout.write(body + "\n")
+        return 0
+
+    rc = _send_message(instance, body)
+    if rc == 0:
+        feature_audit.write_snapshot(instance, features)
+    return rc
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="jc-features")
+    p.add_argument("--instance-dir")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pl = sub.add_parser("list", help="Print feature table (name / status / hint)")
+    pl.set_defaults(func=cmd_list)
+
+    pn = sub.add_parser(
+        "notify-disabled",
+        help="Send a Telegram message listing disabled (or newly available) features",
+    )
+    pn.add_argument("--only-new", action="store_true",
+                    help="Only include features absent from the prior snapshot")
+    pn.add_argument("--dry-run", action="store_true",
+                    help="Print the message body; do not send or update snapshot")
+    pn.set_defaults(func=cmd_notify)
+
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

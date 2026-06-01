@@ -13,6 +13,9 @@
 #   destination:    named destination from the `destinations:` block below
 #                   (string for single, list for multi-fanout; omit to fall
 #                   back to $TELEGRAM_CHAT_ID from .env)
+#   schedule:       5-field cron expression (e.g. "30 3 * * *"). Used by
+#                   `jc heartbeat cron sync` to install the calling user's
+#                   crontab entry. Skipped if `enabled: false` or absent.
 #
 # Send the literal string "SILENT" as output to suppress Telegram delivery —
 # useful for monitor-type tasks that only speak on escalation.
@@ -48,24 +51,42 @@ tasks:
   hot_tidy:
     builtin: hot_tidy
     enabled: false
+    schedule: "15 4 * * *"   # 04:15 instance-local — once/day
+
+  # Built-in: archive resolved threads + stale journal entries to L2.
+  # Ships disabled. Suggested cadence: nightly.
+  journal_tidy:
+    builtin: journal_tidy
+    enabled: false
+    schedule: "30 4 * * *"   # 04:30 instance-local — once/day
 
   # Built-in: fire due deferred commitments from state/commitments/*.yaml.
   # Ships disabled. Suggested cadence after opt-in: every 5 minutes.
   commitments_tick:
     builtin: commitments_tick
     enabled: false
+    schedule: "*/5 * * * *"  # every 5 min
 
   # Built-in: inspect tracked chats and queue re-engagement commitments when
   # silence crosses ops/reengage.yaml thresholds. Ships disabled.
   reengage_tick:
     builtin: reengage_tick
     enabled: false
+    schedule: "0 * * * *"    # hourly on the hour
 
   # Built-in: run the offline reflection cycle and write a dream report.
   # Ships disabled. Suggested cadence after opt-in: nightly at 03:30 local.
   dream_tick:
     builtin: dream_tick
     enabled: false
+    schedule: "30 3 * * *"   # 03:30 instance-local — once/day
+
+  # Built-in: autonomous self-observation loop (RULES/IDENTITY/JOURNAL edits).
+  # Ships disabled. Suggested cadence: nightly after dream_tick.
+  self_model_run:
+    builtin: self_model_run
+    enabled: false
+    schedule: "45 3 * * *"   # 03:45 instance-local — once/day
 
   # Example: a report that fans out to two destinations simultaneously.
   # Uncomment + wire up your destinations above to use.
