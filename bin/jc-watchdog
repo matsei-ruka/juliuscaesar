@@ -61,6 +61,7 @@ Usage:
 Subcommands:
   tick          Run one supervisor tick (intended for cron).
   install       Install @reboot + */2 cron entries for this instance.
+  verify        Check that this instance's cron block is installed.
   uninstall     Remove this instance's cron entries.
   status        Show legacy state, cron entries, recent log.
   status-v2     Show v2 child status table (uses ops/watchdog.yaml).
@@ -152,41 +153,67 @@ case "$SUBCMD" in
         ;;
 
     install)
-        # Determine screen name (same logic as watchdog.sh)
-        SCREEN_NAME="jc-$(basename "$INSTANCE_DIR")"
-        if [[ -f "$INSTANCE_DIR/ops/watchdog.conf" ]]; then
-            # shellcheck disable=SC1091
-            source "$INSTANCE_DIR/ops/watchdog.conf"
-        fi
-        JC_BIN="$HOME/.local/bin/jc-watchdog"
-        [[ -x "$JC_BIN" ]] || { echo "jc-watchdog not installed at $JC_BIN. Run juliuscaesar install.sh first." >&2; exit 1; }
+        DRY_RUN=0
+        for a in "$@"; do
+            case "$a" in
+                --dry-run) DRY_RUN=1 ;;
+            esac
+        done
+        JC_LIB_DIR="$LIB_DIR" PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+            "$PYTHON_BIN" - "$INSTANCE_DIR" "$DRY_RUN" <<'PY'
+import sys
+from pathlib import Path
+from watchdog.install import install
 
-        TAG="# jc-watchdog for $INSTANCE_DIR"
-        ENTRY_REBOOT="@reboot $(shell_quote "$JC_BIN") tick --instance-dir $(shell_quote "$INSTANCE_DIR")  $TAG"
-        ENTRY_TICK="*/2 * * * * $(shell_quote "$JC_BIN") tick --instance-dir $(shell_quote "$INSTANCE_DIR")  $TAG"
+instance = Path(sys.argv[1])
+dry = sys.argv[2] == "1"
+result = install(instance, dry_run=dry)
+basename = result["basename"]
+if dry:
+    print(f"watchdog cron block (dry-run) for instance={basename}:\n")
+    print(result["block"], end="")
+elif result["installed"]:
+    print(f"Installed watchdog cron block for instance={basename}")
+else:
+    print(f"watchdog cron block already current for instance={basename} (no change)")
+PY
+        ;;
 
-        # Build new crontab in a tempfile — crontab(1) refuses stdin that
-        # lacks a trailing newline, and command-substitution strips them.
-        TMP_CRON="$(mktemp)"
-        trap 'rm -f "$TMP_CRON"' EXIT
-        crontab -l 2>/dev/null | grep -vF "$TAG" > "$TMP_CRON" || true
-        {
-            echo ""
-            echo "$ENTRY_REBOOT"
-            echo "$ENTRY_TICK"
-        } >> "$TMP_CRON"
-        crontab "$TMP_CRON"
-        echo "Installed cron entries for $INSTANCE_DIR (screen: $SCREEN_NAME)"
-        crontab -l | grep -F "$TAG"
+    verify)
+        JC_LIB_DIR="$LIB_DIR" PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+            "$PYTHON_BIN" - "$INSTANCE_DIR" <<'PY'
+import sys
+from pathlib import Path
+from watchdog.install import verify
+
+f = verify(Path(sys.argv[1]))
+print(f.message)
+sys.exit(0 if f.level == "ok" else 1)
+PY
+        exit $?
         ;;
 
     uninstall)
-        TAG="# jc-watchdog for $INSTANCE_DIR"
-        TMP_CRON="$(mktemp)"
-        trap 'rm -f "$TMP_CRON"' EXIT
-        crontab -l 2>/dev/null | grep -vF "$TAG" > "$TMP_CRON" || true
-        crontab "$TMP_CRON"
-        echo "Removed cron entries for $INSTANCE_DIR"
+        JC_LIB_DIR="$LIB_DIR" PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+            "$PYTHON_BIN" - "$INSTANCE_DIR" <<'PY'
+import sys
+from pathlib import Path
+from watchdog.install import (
+    compose_crontab,
+    read_current_crontab,
+    _install_crontab,
+)
+
+instance = Path(sys.argv[1]).resolve()
+basename = instance.name
+prior = read_current_crontab()
+new_text = compose_crontab(prior, "", basename)
+if new_text != prior:
+    _install_crontab(new_text)
+    print(f"Removed watchdog cron block for instance={basename}")
+else:
+    print(f"No watchdog cron block present for instance={basename}")
+PY
         ;;
 
     status)

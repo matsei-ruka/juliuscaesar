@@ -20,7 +20,8 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from gateway import queue  # type: ignore  # noqa: E402
-from gateway.config import ConfigError, config_path, load_config, validate_config  # type: ignore  # noqa: E402
+from gateway.config import ConfigError, config_path, load_config, parse_env_file, validate_config  # type: ignore  # noqa: E402
+from gateway.env_isolation import sanitize as _sanitize_env  # type: ignore  # noqa: E402
 from gateway.runtime import GatewayRuntime  # type: ignore  # noqa: E402
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
 
@@ -326,6 +327,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         log_line(instance, f"removed foreign gateway pidfile pid={existing}")
     remove_stale_pid(instance)
     queue.queue_dir(instance).mkdir(parents=True, exist_ok=True)
+    child_env, env_audit = _build_child_env(instance, args)
+    log_line(instance, env_audit)
     log_handle = log_path(instance).open("a", encoding="utf-8")
     cmd = [
         sys.executable,
@@ -343,12 +346,37 @@ def cmd_start(args: argparse.Namespace) -> int:
         stdout=log_handle,
         stderr=log_handle,
         start_new_session=True,
+        env=child_env,
     )
     log_handle.close()
     pid_path(instance).write_text(f"{proc.pid}\n", encoding="utf-8")
     log_line(instance, f"gateway daemon launch requested pid={proc.pid}")
     print(f"gateway started (pid {proc.pid})")
     return 0
+
+
+def _build_child_env(
+    instance: Path, args: argparse.Namespace
+) -> tuple[dict[str, str] | None, str]:
+    """Pick the env to hand to the daemon subprocess.
+
+    Returns ``(env, audit_line)``. ``env=None`` means inherit (used by
+    ``--no-env-isolation``). The audit line is written to gateway.log so
+    operators can spot a misconfigured shell at start time.
+    """
+    if getattr(args, "no_env_isolation", False):
+        return None, "gateway env-isolated: skipped (--no-env-isolation)"
+    dotenv = parse_env_file(instance / ".env")
+    clean, stripped = _sanitize_env(os.environ, dotenv)
+    # Keep PYTHONPATH so the daemon can still import its own libs when
+    # launched from a non-installed checkout (CI, dev shells).
+    if "PYTHONPATH" in os.environ and "PYTHONPATH" not in clean:
+        clean["PYTHONPATH"] = os.environ["PYTHONPATH"]
+    audit = (
+        f"gateway env-isolated: stripped={len(stripped)} keys, "
+        f"loaded={len(dotenv)} from .env"
+    )
+    return clean, audit
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
@@ -388,6 +416,7 @@ def cmd_restart(args: argparse.Namespace) -> int:
     start_args = argparse.Namespace(
         instance_dir=args.instance_dir,
         interval_seconds=args.interval_seconds,
+        no_env_isolation=getattr(args, "no_env_isolation", False),
     )
     return cmd_start(start_args)
 
@@ -671,6 +700,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pstart = sub.add_parser("start", help="Start the gateway daemon")
     pstart.add_argument("--interval-seconds", type=float, default=1.0)
+    pstart.add_argument(
+        "--no-env-isolation",
+        action="store_true",
+        help="Inherit parent env instead of sanitizing (debug only).",
+    )
     pstart.set_defaults(func=cmd_start)
 
     pstop = sub.add_parser("stop", help="Stop the gateway daemon")
@@ -682,6 +716,11 @@ def build_parser() -> argparse.ArgumentParser:
     prestart.add_argument("--interval-seconds", type=float, default=5.0)
     prestart.add_argument("--timeout-seconds", type=float, default=10.0)
     prestart.add_argument("--kill", action="store_true", help="SIGKILL if SIGTERM timeout expires")
+    prestart.add_argument(
+        "--no-env-isolation",
+        action="store_true",
+        help="Inherit parent env instead of sanitizing (debug only).",
+    )
     prestart.set_defaults(func=cmd_restart)
 
     ptail = sub.add_parser("tail", help="Print gateway log tail")

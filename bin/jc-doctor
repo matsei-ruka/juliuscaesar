@@ -458,12 +458,24 @@ if [[ -f "$INSTANCE_DIR/ops/watchdog.conf" ]]; then
 fi
 ok "watchdog runtime mode: $RUNTIME_MODE"
 
-TAG="# jc-watchdog for $INSTANCE_DIR"
-if crontab -l 2>/dev/null | grep -qF "$TAG"; then
-    ok "watchdog cron entries installed"
-else
-    info "watchdog cron not installed (optional — run: jc watchdog install)"
-fi
+# Watchdog cron block — marker-block verify.
+# See docs/specs/watchdog-self-install.md.
+WATCHDOG_VERIFY=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+from watchdog.install import verify
+
+f = verify(Path(sys.argv[1]))
+print(f"{f.level.upper()}:{f.message}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+        Traceback*) fail "watchdog verify crashed: $line" ;;
+    esac
+done <<<"$WATCHDOG_VERIFY"
 
 if [[ "$RUNTIME_MODE" == "gateway" ]]; then
     info "legacy live Claude/plugin checks skipped in gateway mode"
@@ -651,18 +663,26 @@ PY
     fi
 fi
 
-GATEWAY_PIDFILE="$INSTANCE_DIR/state/gateway/jc-gateway.pid"
-if [[ -f "$GATEWAY_PIDFILE" ]]; then
-    GATEWAY_PID=$(cat "$GATEWAY_PIDFILE" 2>/dev/null)
-    if [[ -n "$GATEWAY_PID" ]] && kill -0 "$GATEWAY_PID" 2>/dev/null; then
-        ok "gateway daemon running (pid $GATEWAY_PID)"
-    elif [[ "$FIX" == 1 ]]; then
-        rm -f "$GATEWAY_PIDFILE"
-        fixed "removed stale gateway pidfile"
-    else
-        warn "gateway pidfile is stale: $GATEWAY_PIDFILE"
-    fi
-fi
+# Liveness — gateway + supervisor PIDs, plus telegram-409 log scan.
+# See docs/specs/doctor-pid-liveness.md.
+LIVENESS_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+from gateway.liveness import all_liveness_findings
+
+for f in all_liveness_findings(Path(sys.argv[1])):
+    print(f"{f.level.upper()}:{f.message}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+        Traceback*) fail "liveness check crashed: $line" ;;
+    esac
+done <<<"$LIVENESS_REPORT"
 
 # --- Codex readiness ---
 # Per docs/specs/codex-main-brain-hardening.md §Phase 6.
