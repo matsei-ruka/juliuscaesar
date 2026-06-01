@@ -218,51 +218,68 @@ class CompanyInboxChannel:
                 else ""
             )
 
-            comment = client.comment_task(
-                task_id,
-                {
-                    "message": comment_message,
-                    "payload": {
-                        "source": self.name,
-                        "conversation_id": meta.get("conversation_id"),
-                        "root_id": meta.get("root_id"),
-                        "final": requested_status in TERMINAL_REPLY_STATUSES,
-                    },
-                },
-            )
-            # First proof-of-life from the owner should move pending → accepted.
-            # If another path already moved it, keep the comment and leave state.
-            try:
-                task = client.get_task(task_id)
-                if str(task.get("status") or "") == "pending":
-                    task = client.patch_task(task_id, {"status": "accepted"})
-                if requested_status in TERMINAL_REPLY_STATUSES:
-                    self._close_task_from_reply(
-                        client,
-                        task_id,
-                        task,
-                        requested_status,
-                        result_payload,
-                        comment_message,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                self.log(
-                    f"company-inbox comment saved but state update failed task={task_id} reason={exc}",
-                    kind="company_inbox_state_update_failed",
+            final = requested_status in TERMINAL_REPLY_STATUSES
+            if final:
+                result = _coerce_result(result_payload, comment_message)
+                approval_required = bool(
+                    result.pop("approval_required", False)
+                    if isinstance(result, dict)
+                    else False
                 )
+                complete = client.complete_task(
+                    task_id,
+                    {
+                        "status": requested_status,
+                        "comment": comment_message,
+                        "result": result,
+                        "approval_required": approval_required,
+                    },
+                )
+                writeback_id = f"task-complete:{task_id}"
+                self.log(
+                    f"company-inbox reply completed task={task_id} "
+                    f"status={complete.get('status') if isinstance(complete, dict) else requested_status} "
+                    f"approval_required={approval_required}",
+                    kind="company_inbox_reply_completed",
+                )
+            else:
+                comment = client.comment_task(
+                    task_id,
+                    {
+                        "message": comment_message,
+                        "payload": {
+                            "source": self.name,
+                            "conversation_id": meta.get("conversation_id"),
+                            "root_id": meta.get("root_id"),
+                            "final": False,
+                        },
+                    },
+                )
+                comment_id = comment.get("id") if isinstance(comment, dict) else None
+                writeback_id = f"task-comment:{task_id}:{comment_id or 'ok'}"
+                # First proof-of-life from the owner should move pending → accepted.
+                # If another path already moved it, keep the comment and leave state.
+                try:
+                    task = client.get_task(task_id)
+                    if str(task.get("status") or "") == "pending":
+                        client.patch_task(task_id, {"status": "accepted"})
+                except Exception as exc:  # noqa: BLE001
+                    self.log(
+                        f"company-inbox comment saved but accept failed task={task_id} reason={exc}",
+                        kind="company_inbox_state_update_failed",
+                    )
         finally:
             try:
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
 
-        comment_id = comment.get("id") if isinstance(comment, dict) else None
         self.log(
-            f"company-inbox reply wrote comment task={task_id} comment={comment_id} "
+            f"company-inbox reply persisted task={task_id} writeback={writeback_id} "
             f"final={requested_status in TERMINAL_REPLY_STATUSES}",
             kind="company_inbox_reply_written",
         )
-        return f"task-comment:{task_id}:{comment_id or 'ok'}"
+        return writeback_id
 
     def close(self) -> None:
         self._close_client()

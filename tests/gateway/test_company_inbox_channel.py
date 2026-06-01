@@ -38,6 +38,7 @@ class FakeClient:
         self.alerts: list[dict] = []
         self.comments: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
+        self.completes: list[tuple[str, dict]] = []
         self.tasks: dict[str, dict] = {}
         self.update_responses: list[dict] = []
         self.update_calls: list[dict] = []
@@ -76,6 +77,18 @@ class FakeClient:
         self.patches.append((task_id, body))
         task = self.tasks.setdefault(task_id, {"id": task_id})
         task.update(body)
+        return task
+
+    def complete_task(self, task_id, body):
+        self.completes.append((task_id, body))
+        task = self.tasks.setdefault(task_id, {"id": task_id})
+        task.update(
+            {
+                "status": body.get("status"),
+                "result": body.get("result"),
+                "approval_status": "pending" if body.get("approval_required") else "none",
+            }
+        )
         return task
 
     def list_task_updates(self, *, after_event_id=0, limit=50):
@@ -282,22 +295,23 @@ class InjectionTests(unittest.TestCase):
         ):
             message_id = ch.send(response, {"task_id": "task-1", "root_id": "root-1"})
 
-        self.assertEqual(message_id, "task-comment:task-1:99")
-        self.assertEqual(send_client.comments[0][1]["message"], "Published.")
+        self.assertEqual(message_id, "task-complete:task-1")
+        self.assertEqual(send_client.comments, [])
+        self.assertEqual(send_client.patches, [])
         self.assertEqual(
-            send_client.patches,
+            send_client.completes,
             [
-                ("task-1", {"status": "accepted"}),
-                ("task-1", {"status": "in_progress"}),
                 (
                     "task-1",
                     {
                         "status": "done",
+                        "comment": "Published.",
                         "result": {
                             "url": "https://example.test/post",
                             "title": "Post",
                             "summary": "One line.",
                         },
+                        "approval_required": False,
                     },
                 ),
             ],
@@ -317,9 +331,31 @@ class InjectionTests(unittest.TestCase):
                 {"task_id": "task-1"},
             )
 
-        self.assertEqual(send_client.comments[0][1]["message"], "Closed.")
-        self.assertEqual(send_client.patches[-1][1]["status"], "done")
-        self.assertEqual(send_client.patches[-1][1]["result"], {"payload": {"summary": "ok"}})
+        self.assertEqual(send_client.comments, [])
+        self.assertEqual(send_client.patches, [])
+        self.assertEqual(send_client.completes[-1][1]["status"], "done")
+        self.assertEqual(send_client.completes[-1][1]["comment"], "Closed.")
+        self.assertEqual(
+            send_client.completes[-1][1]["result"],
+            {"payload": {"summary": "ok"}},
+        )
+
+    def test_send_final_envelope_passes_approval_required_to_complete(self):
+        send_client = FakeClient()
+        ch = _make_channel()
+
+        with (
+            patch.object(company_inbox_mod.company_conf, "load", return_value=SimpleNamespace()),
+            patch.object(company_inbox_mod, "CompanyClient", return_value=send_client),
+        ):
+            ch.send(
+                '{"company_task":{"status":"done","comment":"Draft ready.",'
+                '"result":{"draft":"Post body","approval_required":true}}}',
+                {"task_id": "task-1"},
+            )
+
+        self.assertEqual(send_client.completes[-1][1]["approval_required"], True)
+        self.assertEqual(send_client.completes[-1][1]["result"], {"draft": "Post body"})
 
     def test_send_task_update_notification_does_not_write_back(self):
         send_client = FakeClient()
@@ -337,6 +373,7 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(message_id, "task-update-ack:42")
         self.assertEqual(send_client.comments, [])
         self.assertEqual(send_client.patches, [])
+        self.assertEqual(send_client.completes, [])
 
     def test_poll_updates_injects_participant_notification(self):
         captured, enqueue = _captured_enqueue()

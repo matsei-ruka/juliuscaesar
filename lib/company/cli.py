@@ -366,6 +366,8 @@ def _task_body(args: argparse.Namespace, *, include_budgets: bool) -> dict[str, 
     }
     if args.description:
         body["description"] = args.description
+    if getattr(args, "idempotency_key", None):
+        body["idempotency_key"] = args.idempotency_key
     if getattr(args, "parent_task_id", None):
         body["parent_task_id"] = args.parent_task_id
     if include_budgets:
@@ -419,6 +421,33 @@ def cmd_task_update(args: argparse.Namespace) -> int:
         result = client.patch_task(args.task_id, body)
     except CompanyError as exc:
         raise SystemExit(f"task update failed: status={exc.status} {exc.body or exc}") from exc
+    finally:
+        client.close()
+    _print_json(result)
+    return 0
+
+
+def cmd_task_complete(args: argparse.Namespace) -> int:
+    instance = _resolve_instance(args.instance_dir)
+    body: dict[str, Any] = {
+        "status": args.status,
+        "result": _load_json_arg(args.result, field="--result"),
+        "approval_required": bool(args.approval_required),
+    }
+    if args.comment:
+        body["comment"] = args.comment
+    if args.approval_title:
+        body["approval_title"] = args.approval_title
+    if args.approval_body:
+        body["approval_body"] = args.approval_body
+    approval_payload = _load_json_arg(args.approval_payload, field="--approval-payload")
+    if approval_payload:
+        body["approval_payload"] = approval_payload
+    client = _client_for(instance)
+    try:
+        result = client.complete_task(args.task_id, body)
+    except CompanyError as exc:
+        raise SystemExit(f"task complete failed: status={exc.status} {exc.body or exc}") from exc
     finally:
         client.close()
     _print_json(result)
@@ -547,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("--title", required=True)
     tc.add_argument("--description", default=None)
     tc.add_argument("--payload", default=None, help="inline JSON object or @path")
+    tc.add_argument("--idempotency-key", default=None, help="retry-safe key, unique per company")
     tc.add_argument("--parent-task-id", default=None, help="optional parent task id")
     tc.add_argument("--max-nodes", type=int, default=None)
     tc.add_argument("--max-depth", type=int, default=None)
@@ -558,11 +588,22 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--title", required=True)
     ts.add_argument("--description", default=None)
     ts.add_argument("--payload", default=None, help="inline JSON object or @path")
+    ts.add_argument("--idempotency-key", default=None, help="retry-safe key, unique per company")
 
     tu = task_sub.add_parser("update", help="patch task status/result")
     tu.add_argument("task_id")
     tu.add_argument("--status", choices=["pending", "accepted", "in_progress", "blocked", "done", "failed", "rejected"])
     tu.add_argument("--result", default=None, help="inline JSON object or @path")
+
+    tdone = task_sub.add_parser("complete", help="atomically close task with result/comment")
+    tdone.add_argument("task_id")
+    tdone.add_argument("--status", default="done", choices=["done", "failed", "rejected"])
+    tdone.add_argument("--comment", default=None)
+    tdone.add_argument("--result", default=None, help="inline JSON object or @path")
+    tdone.add_argument("--approval-required", action="store_true")
+    tdone.add_argument("--approval-title", default=None)
+    tdone.add_argument("--approval-body", default=None)
+    tdone.add_argument("--approval-payload", default=None, help="inline JSON object or @path")
 
     tco = task_sub.add_parser("comment", help="add an interim task comment")
     tco.add_argument("task_id")
@@ -594,6 +635,7 @@ HANDLERS = {
         "create": cmd_task_create,
         "spawn": cmd_task_spawn,
         "update": cmd_task_update,
+        "complete": cmd_task_complete,
         "comment": cmd_task_comment,
         "comments": cmd_task_comments,
     }[args.task_cmd](args),

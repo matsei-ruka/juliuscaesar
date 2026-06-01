@@ -191,6 +191,9 @@ class CompanyClient:
     def patch_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return self._patch(f"/api/tasks/{task_id}", body)
 
+    def complete_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self._post(f"/api/tasks/{task_id}/complete", body)
+
     def comment_task(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """Add an interim comment to a task."""
         return self._post(f"/api/tasks/{task_id}/comments", body)
