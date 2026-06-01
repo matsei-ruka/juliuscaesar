@@ -301,6 +301,32 @@ The G2 SDK has no documented OS-level push API to wake a closed app. The bridge 
 2. The operator's interaction pattern is: glance at glasses, speak, wait, read. The app is foregrounded during the wait. There is no "answer arrives an hour later while phone is in pocket" requirement.
 3. If the WebSocket drops mid-wait, the bridge keeps the agent reply in its retry buffer (`reply_id`-keyed) for `reply_window_seconds`. On reconnect, the unacked reply is pushed immediately and the operator sees it as soon as the app reopens.
 
+### Recovery flow — pulling buffered replies after the app was closed
+
+Operator-driven recovery, no OS push required. Two redundant paths, either works.
+
+**Path 1 — from the glasses (preferred for hands-free operation):**
+
+1. Operator gestures on the temple to bring up the Even Hub menu on the display.
+2. Selects the JC Glasses app entry.
+3. Even Hub foregrounds the app on the phone.
+4. App reconnects to the bridge WebSocket on launch (existing retry logic).
+5. Bridge replays every unacked `reply` frame in the retry buffer for that auth identity.
+6. Replies render on the display in original arrival order. App emits `ack` per reply; bridge drops them from the buffer.
+
+Elapsed gesture-to-render: 2–4 s in the good case (single double-press resumes last-used app, reply already on screen by the time the operator looks up), 4–8 s in the worst case (navigate the menu).
+
+**Path 2 — from the phone:**
+
+Operator opens the Even Hub app manually on the phone. Same reconnect + buffer-flush as Path 1. Used when the glasses are off or out of reach.
+
+**Gesture count depends on Even Hub's "resume last app" behavior — verify on physical G2 during implementation:**
+
+- If supported (likely): one double-press on the temple → app foregrounds → reply renders.
+- If not: temple gesture → scroll menu → click. Three gestures.
+
+Either way, no data loss while the operator was away. The retry buffer holds replies for `reply_window_seconds` (default 600 s, configurable). Replies older than the window are discarded with an `error { code: "reply_window_expired" }` posted on reconnect so the operator knows something was dropped.
+
 ### Open decision (see below)
 
 If real OS-level push becomes a requirement, two paths exist:
