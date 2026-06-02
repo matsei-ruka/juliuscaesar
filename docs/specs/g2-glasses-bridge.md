@@ -164,9 +164,10 @@ bridge/jc-glasses/
 ```yaml
 bridge:
   bind: "0.0.0.0:8443"
+  public_host: "jc-g2bridge.jc.omnisage.org"
   tls:
-    cert: /etc/letsencrypt/live/<host>/fullchain.pem
-    key: /etc/letsencrypt/live/<host>/privkey.pem
+    cert: /etc/letsencrypt/live/jc-g2bridge.jc.omnisage.org/fullchain.pem
+    key: /etc/letsencrypt/live/jc-g2bridge.jc.omnisage.org/privkey.pem
   shared_secret_env: JC_GLASSES_BRIDGE_SECRET
 
 asr:
@@ -194,7 +195,7 @@ agents:
   discovery: telegram_bots          # always; documented for future alternative sources
   discovery_cache_seconds: 60
   include_pattern: null              # optional regex; null = include all bots
-  exclude_pattern: null              # optional regex; e.g., '^(BotFather|spam_.*)$'
+  exclude_pattern: '^(BotFather|SpamBot|StickerBot|GIF|imdb|gif|vid|pic|youtube|wiki)$'  # default exclude for non-agent bots; extend as needed
   first_launch_behavior: prompt_menu # 'prompt_menu' = open menu when no last selection;
                                      # 'first_alphabetical' = auto-select first bot
 ```
@@ -379,7 +380,7 @@ If real OS-level push becomes a requirement, two paths exist:
 
 - **Systemd unit** at `bridge/jc-glasses/systemd/jc-glasses-bridge.service`. `Restart=on-failure`, `RestartSec=5`. `EnvironmentFile=/etc/jc-glasses-bridge/env`.
 - **Host:** **decided — same host as the JC gateways.** Single box with a public IPv4. No additional infrastructure to provision. Bridge is a peer process to the gateways; if the host goes down, all paths go down together, which is the existing failure mode.
-- **DNS + TLS.** WSS requires a real cert; WebView will not trust IP-pinned self-signed. Operator provisions a subdomain (e.g., `g2.<operator-domain>`) with an A record pointing at the public IP. `certbot --standalone` or a sidecar Caddy issues a Let's Encrypt cert. Renewal runs in cron. **This is the only DNS task on the operator.**
+- **DNS + TLS.** Subdomain `jc-g2bridge.jc.omnisage.org` → A record → public IP of the JC host. `certbot --standalone` (or sidecar Caddy) issues a Let's Encrypt cert. Renewal runs in cron. DNS task: one A record in the `omnisage.org` zone, one-time.
 - **Inbound port.** WSS on TCP 8443 (configurable). Firewall opens 8443/tcp inbound on the public IP. ACME (port 80) needed during cert issuance/renewal — close after if undesired.
 - **Health:** `bridge run` exposes a small HTTP `/healthz` on localhost (separate port from the WSS) that returns `200` if Telethon is connected and the WS server is accepting. The existing `jc watchdog` can be extended later to watch this.
 - **Observability:** structured JSON logs to stdout → journald. Operator runs `journalctl -u jc-glasses-bridge -f` to tail.
@@ -413,20 +414,27 @@ If real OS-level push becomes a requirement, two paths exist:
 ### Resolved (operator sign-off 2026-06-02)
 
 1. **Hosting.** Single host, same box as the JC gateways. Public IPv4 on that host.
-2. **TLS / cert.** Let's Encrypt on a subdomain that the operator provisions and points at the public IP. WSS-only. Cert renewal via cron / certbot.
+2. **TLS / cert.** Let's Encrypt on `jc-g2bridge.jc.omnisage.org` — A record points at the public IP of the JC host. WSS-only. Cert issued and renewed by `certbot` (cron). DNS provider holds the `omnisage.org` zone.
 3. **Agent model.** Single-active-agent per session, menu-driven selection from the operator's Telegram bot list (Telethon `iter_dialogs` filtered to `User.bot==True`). **No prefix parsing.** No hardcoded "default agent" — the persisted last-selected agent is what restores on launch.
 4. **"Tell everyone" broadcast.** **Deferred** past v1. Add later as a special menu entry once single-agent flow is validated on real hardware.
 5. **Continuity within a mic session.** Superseded by menu-driven selection — irrelevant now.
 6. **Background OS push.** **Not required.** Foreground-only model accepted. Recovery flow (`Notification model → Recovery flow`) covers reopening the app from the glasses.
 7. **App distribution.** Sideload only. The Even Hub app has the bridge URL and shared secret baked in at build time; nothing useful in publishing to the public store.
 
-### Still open (need answers before / during implementation)
+### Also resolved 2026-06-02
 
-A. **Subdomain choice + DNS provider.** Operator decides which DNS provider holds the record and what hostname (`g2.<x>`). One DNS A record + one ACME HTTP-01 challenge run.
-B. **First-launch behavior.** `prompt_menu` (default in this spec) or `first_alphabetical`? Spec defaults to prompt — slower but more predictable.
-C. **Per-persona `[glasses]` handling.** Each JC persona (Harold, Rachel) gets a follow-up issue to teach its STYLE.md / RULES.md how to format for the 3×50 display when it sees the tag. Not v1-blocking — agents render fine without it, just less compact.
-D. **Menu gesture.** Right-temple double-press is the spec proposal. May change after testing on the physical G2 — some gestures are reserved by Even Hub OS.
-E. **Bot include / exclude regex defaults.** Likely want a default exclude for `^BotFather$` and similar non-agent bots, or leave clean and let the operator add as needed.
+8. **Subdomain.** `jc-g2bridge.jc.omnisage.org`. Operator owns the zone.
+9. **First-launch behavior.** `prompt_menu` (open the agent menu on first launch). After first pick, persist `last_selected_agent_id` in the SDK KV store; every subsequent launch restores that agent automatically. Operator switches agents at any time via the menu gesture.
+10. **Default bot exclude regex.** Enabled by default to keep the menu clean:
+    ```yaml
+    exclude_pattern: '^(BotFather|SpamBot|StickerBot|GIF|imdb|gif|vid|pic|youtube|wiki)$'
+    ```
+    Operator may extend.
+
+### Still open / non-blocking
+
+C. **Per-persona `[glasses]` handling.** Follow-up PR per persona (Harold, Rachel) once v1 is on hardware. Adds a STYLE.md / RULES.md rule: if input starts with `[glasses]`, switch to ultra-compact format (≤2 labels, ≤200 chars, no MarkdownV2, no emoji). v1 ships and works without this; replies just paginate more.
+D. **Menu gesture.** Determined during implementation by trial on physical G2. Spec proposal (right-temple double-press) is provisional. Out of scope for the spec — implementer picks the gesture that doesn't conflict with Even Hub OS reservations.
 
 ## Out of scope (future work, not blocking v1)
 
