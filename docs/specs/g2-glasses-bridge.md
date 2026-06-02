@@ -339,7 +339,7 @@ Each agent instance gets a short rule after the bridge ships:
 
 > If the incoming message starts with `[glasses]`, output must be:
 > - Plain text only — no MarkdownV2, no bold, no bullets, no emoji
-> - Concise — max ~200 characters preferred, never more than 3 short labeled fields
+> - Concise — synthetic, no padding, no hedging; no hard character limit
 > - Language unchanged (English in → English out, Italian in → Italian out)
 >
 > Normal triage and model routing apply — do not skip or alter them.
@@ -458,7 +458,7 @@ If real OS-level push becomes a requirement, two paths exist:
 
 ### Still open / non-blocking
 
-C. **Per-persona `[glasses]` formatting rule.** Follow-up PR per persona (Harold, Rachel) once v1 is on hardware. Adds to STYLE.md / RULES.md: if input starts with `[glasses]`, output plain text only (no MarkdownV2), ≤200 chars preferred, max 3 short labeled fields. Triage and model routing (incl. Opus for complex tasks) remain active — tag is formatting-only. v1 ships and works without this; replies just paginate more on the display.
+C. **Per-persona `[glasses]` formatting rule.** Follow-up PR per persona (Harold, Rachel) once v1 is on hardware. Adds to STYLE.md / RULES.md: if input starts with `[glasses]`, output plain text only (no MarkdownV2), synthetic and concise (no hard char limit), no padding or ornamentation. Triage and model routing (incl. Opus for complex tasks) remain active — tag is formatting-only. v1 ships and works without this; replies just paginate more on the display.
 D. **Menu gesture.** Determined during implementation by trial on physical G2. Spec proposal (right-temple double-press) is provisional. Out of scope for the spec — implementer picks the gesture that doesn't conflict with Even Hub OS reservations.
 
 ## Out of scope (future work, not blocking v1)
