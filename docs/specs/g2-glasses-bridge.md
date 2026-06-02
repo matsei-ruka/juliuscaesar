@@ -124,12 +124,28 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 - Open and hold a single WebSocket to the bridge. Reconnect with exponential backoff on drop.
 - **Mic toggle = single `CLICK_EVENT` on the left temple** (`eventSource = TOUCH_EVENT_FROM_GLASSES_L`). First click: call `audioControl(true)`, send `mic_on` frame, status → `LISTEN`. Second click: call `audioControl(false)`, send `mic_off` frame, status → `THINK`. No long-press / press-and-hold (not exposed as an SDK event — confirmed against Even Hub `Input & Events` doc, only `CLICK_EVENT`, `DOUBLE_CLICK_EVENT`, `SCROLL_TOP_EVENT`, `SCROLL_BOTTOM_EVENT` are documented).
 - **Silence safety net.** If the bridge sees ≥ 3 s of silence after mic_on without a corresponding mic_off, it auto-closes the utterance (sends `mic_off` to the app to flip status, then proceeds with encode + send). Prevents stuck-open mic if the user forgets the second click.
-- While mic is on, stream `audioEvent.audioPcm` chunks (Uint8Array) as binary WebSocket frames. No buffering on the app side beyond what the SDK delivers.
-- On reply frames from the bridge, render text via `TextContainerProperty` + `textContainerUpgrade` (per Even Hub Display docs: max 2,000 chars per update, ~400–500 chars fill the screen at default font). Long replies paginate at the screen-fill size; swipe up / swipe down (`SCROLL_TOP_EVENT` / `SCROLL_BOTTOM_EVENT`) = next/prev page. Final page size is tuned on hardware during integration.
+- While mic is on, stream `audioEvent.audioPcm` chunks (Uint8Array) **as binary WebSocket frames** — call `ws.send(audioPcm)` directly with the Uint8Array, no base64, no JSON wrapper. Binary WS confirmed working on physical G2 by the reference implementation `nickustinov/stt-even-g2`, which sends PCM frames the same way to a remote STT WebSocket. No buffering on the app side beyond what the SDK delivers.
+- On reply frames from the bridge, render text via `TextContainerProperty` + `textContainerUpgrade`. Use the **SDK-typedef form** (single object argument):
+
+  ```ts
+  await bridge.textContainerUpgrade(new TextContainerUpgrade({
+    containerID: 2,
+    containerName: 'reply',
+    contentOffset: 0,
+    contentLength: 2000,
+    content: replyText,
+  }))
+  ```
+
+  Confirmed against `even-realities/evenhub-templates/asr` (official scaffold). The Even Hub guide doc shows a five-positional-argument form which contradicts the SDK typedef — typedef form wins.
+
+  Display limits per Even Hub Display docs: `contentLength` up to 2,000 chars per update; ~400–500 chars fill the screen at default font; practical reference implementations cap visible tail at ~240–480 chars. Long replies paginate; swipe up / swipe down (`SCROLL_TOP_EVENT` / `SCROLL_BOTTOM_EVENT`) = next/prev page. Final page size is tuned on hardware during integration.
+- **Debounce display writes at ~120 ms.** The BLE render queue is slow; the official `evenhub-templates/asr` scaffold debounces at 120 ms to prevent backlog. Apply the same in the agent menu and reply renderer.
+- **SDK quirk — `CLICK_EVENT = 0` arrives as `undefined`.** Protobuf `fromJson` omits zero-value fields. When `event.sysEvent?.eventType` (or `textEvent`/`listEvent`) is `undefined` AND a non-audio event envelope is present, treat it as a `CLICK_EVENT`. Both `evenhub-templates/asr` and `nickustinov/stt-even-g2` document and handle this. Implementer must too.
 - Render a one-line status indicator (top of display) for: `IDLE`, `LISTEN`, `THINK`, `READ` (length of last reply in pages), `OFFLINE` (WS down).
 - **Agent selection menu.** On menu intent (gesture = double-press right temple, verify on hardware), send `list_agents` to the bridge, render the returned list as a scrollable selector (one bot per row, showing display name). Tap selects. Send `select_agent` with the chosen Telegram chat_id. Wait for `agent_selected` confirmation, then return to `IDLE` with the new agent active. The active agent's name is shown in the status bar.
 - **Single-active-agent model.** All utterances in the current session route to the selected agent until the user opens the menu and picks another. No per-utterance prefix parsing.
-- **Persistence in SDK Key-Value Store:** bridge URL, `last_selected_agent_id`. On launch, app sends `select_agent` with the persisted id to restore the previous session immediately. If absent (first launch), app opens the menu automatically.
+- **Persistence via SDK local storage**: `bridge.setLocalStorage('last_selected_agent_id', '<int-as-string>')` and `bridge.getLocalStorage('last_selected_agent_id')`. Values are strings only — serialize ints to decimal strings. On launch, app reads and sends `select_agent` with the persisted id to restore the previous session immediately. If absent (first launch), app opens the menu automatically.
 - No transcription on device.
 
 **Out of scope for v1:**
@@ -449,6 +465,9 @@ If real OS-level push becomes a requirement, two paths exist:
 15. **Display capacity claim corrected.** `textContainerUpgrade` accepts max 2,000 chars; ~400–500 chars fill a full-screen container at default font (Even Hub Display docs). Spec previously said "~3 lines × ~50 chars" — unverifiable and likely under-reporting capacity. Implementer tunes page size on hardware.
 16. **No per-persona formatting rule.** Voice notes arrive at the persona as normal voice input — no caption-based formatting tweak, no `[glasses]` prefix rule. Long replies paginate on the display.
 17. **Goal section rewritten** to reflect the resolved architecture (bridge does not transcribe, JC voice channel handles ASR + triage + brain unchanged).
+18. **Binary WebSocket frames confirmed (item 1).** Reference impl `nickustinov/stt-even-g2` sends `event.audioEvent.audioPcm` (Uint8Array) over `ws.send(...)` directly to a remote STT WebSocket on physical G2 hardware. Binary WS path works. Spec stays on binary frames as primary; no base64-JSON fallback in v1. If a future G2 firmware ever breaks this, add the fallback then.
+19. **`textContainerUpgrade` signature decided (item 7).** Use the SDK typedef form: `bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID, containerName, contentOffset, contentLength, content }))`. Confirmed by the official `even-realities/evenhub-templates/asr` scaffold. The Even Hub guide doc's five-positional-argument form is wrong or stale and is ignored.
+20. **SDK quirks adopted into spec.** (a) Protobuf normalizes `CLICK_EVENT = 0` to `undefined` on `fromJson`; the app must treat undefined-event-type with a non-audio event envelope as a click. (b) BLE render queue is slow; debounce display writes at ~120 ms. Both confirmed by official asr template and stt-even-g2 reference impl.
 
 ### Still open / non-blocking
 
@@ -467,6 +486,8 @@ D. **Menu gesture.** Determined during implementation by trial on physical G2. S
 
 - Even Realities developer docs: https://hub.evenrealities.com/docs
 - Even Hub SDK: https://www.npmjs.com/package/@evenrealities/even_hub_sdk
+- **Official Even Hub starter templates (canonical scaffolds): https://github.com/even-realities/evenhub-templates** — `asr/` template is the closest reference. Confirms `textContainerUpgrade(new TextContainerUpgrade({...}))` form, 120 ms BLE render debounce, `CLICK_EVENT=0`-as-undefined quirk handling, and the recommended event-routing pattern.
+- **Reference STT implementation on G2 hardware: https://github.com/nickustinov/stt-even-g2** — production-ish bridge sending `audioPcm` Uint8Array as **binary WebSocket frames** to Soniox. Direct confirmation that binary WS works on physical G2. Also uses single-click toggle for mic, matching this spec's decision #13.
 - Even Hub simulator: https://github.com/BxNxM/even-dev
 - Even Demo App (G1, useful for BLE protocol reference): https://github.com/even-realities/EvenDemoApp
 - Telethon docs: https://docs.telethon.dev
