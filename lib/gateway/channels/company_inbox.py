@@ -468,7 +468,7 @@ class CompanyInboxChannel:
             enqueue(
                 source=self.name,
                 source_message_id=f"task-closed:{task_id}",
-                user_id=None,
+                user_id=self._resolve_user_id(),
                 conversation_id=conversation_id,
                 content=f"Task {task_id} closed.",
                 meta={"task_id": task_id, "root_id": root_id, "kind": "task_closed"},
@@ -487,9 +487,7 @@ class CompanyInboxChannel:
             content = f"Task {task_id} assigned (no title/description)."
 
         created_by = task.get("created_by")
-        user_id: str | None = None
-        if isinstance(created_by, dict) and created_by.get("id") is not None:
-            user_id = str(created_by["id"]) or None
+        user_id = self._resolve_user_id(task=task)
 
         meta: dict[str, Any] = {
             "task_id": task_id,
@@ -556,7 +554,7 @@ class CompanyInboxChannel:
         enqueue(
             source=self.name,
             source_message_id=f"task-update:{event_id}",
-            user_id=None,
+            user_id=self._resolve_user_id(task=task, event=event),
             conversation_id=conversation_id,
             content="\n".join(lines),
             meta={
@@ -705,6 +703,39 @@ class CompanyInboxChannel:
         intentional and surfaced via health().
         """
         return self._cfg_agent_id()
+
+    def _resolve_user_id(
+        self,
+        *,
+        task: dict[str, Any] | None = None,
+        event: dict[str, Any] | None = None,
+    ) -> str:
+        """Return a non-empty user_id for a synthesised wakeup event.
+
+        Fallback chain (first non-empty wins):
+          1. event.created_by.id  — actor who emitted the update event
+          2. task.created_by.id   — actor who created/assigned the task
+          3. task.owner_agent_id  — agent owning the task (usually self)
+          4. self._agent_id()     — this channel's own UUID, last resort
+
+        Returning an empty/None user_id lets the downstream dispatcher
+        DLQ the wakeup (rejected_reason: missing user_id), so the owning
+        agent never wakes and the task lapses at its deadline. This is
+        the agent-side guard against that failure mode.
+        """
+        for source in (event, task):
+            if isinstance(source, dict):
+                actor = source.get("created_by")
+                if isinstance(actor, dict):
+                    value = actor.get("id")
+                    if value:
+                        return str(value)
+        if isinstance(task, dict):
+            owner = task.get("owner_agent_id")
+            if owner:
+                return str(owner)
+        agent_id = self._agent_id()
+        return agent_id or "system:company-inbox"
 
     def _load_client(self) -> None:
         self._company_cfg = company_conf.load(self.instance_dir)
