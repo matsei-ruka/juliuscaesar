@@ -506,7 +506,12 @@ Your reply is only the text the user reads.
                 except OSError:
                     pass
             if proc.returncode != 0:
-                raise AdapterFailure(self.name, proc.returncode, _read_tail(stderr_path))
+                stderr_tail = _read_tail(stderr_path)
+                if not stderr_tail.strip():
+                    # Some adapters (e.g. claude -p) write auth errors to stdout
+                    # rather than stderr. Fall back so the classifier sees them.
+                    stderr_tail = _read_tail(stdout_path)
+                raise AdapterFailure(self.name, proc.returncode, stderr_tail)
         try:
             stderr_path.unlink()
         except OSError:
