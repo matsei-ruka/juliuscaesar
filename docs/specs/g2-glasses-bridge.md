@@ -12,11 +12,13 @@ Let a Luca-class operator talk to **any JC agent** (Harold, Rachel, future perso
 
 The glasses become a thin client to the operator's existing JC agent fleet:
 
-1. Operator speaks into the G2 mic, optionally prefixed with an agent name ("tell Harold ...", "Rachel, check ...").
-2. Audio streams as raw PCM to a self-hosted Python bridge.
-3. Bridge transcribes server-side and routes the message to the addressed agent's Telegram conversation, **as the operator's own Telegram user account**, using Telethon (MTProto user API — not bot API).
-4. Agent replies in its usual conversation; the bridge mirrors the reply back to the glasses display over the same WebSocket and renders it.
-5. No 20-second deadline. If the agent takes 90s, the glasses display the answer when it arrives.
+1. Operator picks the active agent once from a menu on the glasses (Harold / Rachel / future personas). Selection persists across launches.
+2. Operator speaks into the G2 mic.
+3. Audio streams as raw PCM (16 kHz mono s16le) to a self-hosted Python bridge over WebSocket.
+4. Bridge encodes the utterance to OGG/Opus in memory and forwards it as a Telegram **voice note** to the selected agent's bot DM, **as the operator's own Telegram user account**, using Telethon (MTProto user API — not bot API). Caption: `[sent from even G2]`.
+5. JC's existing voice channel transcribes (Dashscope `qwen2.5-omni-7b`), triages, brains, and replies — exactly as it does for any other voice message. **No JC changes.**
+6. Agent replies in its usual conversation; the bridge mirrors the reply back to the glasses display over the same WebSocket and renders it.
+7. No 20-second deadline. If the agent takes 90 s, the glasses display the answer when it arrives.
 
 The bridge is the only new piece. The existing JC gateway, persona instances, voice pipeline, and Telegram conversations are unchanged.
 
@@ -41,7 +43,7 @@ Source: `hub.evenrealities.com/docs`, `@evenrealities/even_hub_sdk` (npm), and S
 | Capability | Status | Detail |
 |---|---|---|
 | Raw mic audio | **Confirmed** | `audioControl(true)` enables mic. PCM streams via `audioEvent.audioPcm` as `Uint8Array`. Format: **16 kHz mono 16-bit signed little-endian**. Requires `g2-microphone` permission in `app.json`. |
-| Text on display | **Confirmed** | `TextContainerProperty` + `textContainerUpgrade` render text with flicker-free partial updates. Display: 576×288 px per eye, 4-bit grayscale. Practical text capacity ≈ 3 lines × ~50 chars. |
+| Text on display | **Confirmed** | `TextContainerProperty` + `textContainerUpgrade` render text with flicker-free partial updates. Display: 576×288 px per eye, 4-bit greyscale. `textContainerUpgrade` accepts up to **2,000 chars** per update; **~400–500 chars fill a full-screen container** at default font (per Even Hub Display docs). Implementer picks the page size that's readable on hardware — typical voice replies are short enough not to need pagination at all. |
 | Touch input | **Confirmed** | Click, double-click, scroll on left/right temple + R1 ring. Use for scroll-through-paginated-reply and dismiss. |
 | Outbound networking | **Confirmed** | `fetch()`, `XMLHttpRequest`, WebSocket from the app WebView. Two gates: (a) domains whitelisted in `app.json`, (b) standard CORS from server side. Binary frames over WebSocket are supported. |
 | OS-level push notification (app closed) | **Not in SDK** | No documented push API to wake the app or post to a system notification tray. **Worked around** by holding a persistent WebSocket from the app to the bridge while the app is foregrounded; for background, see "Open decisions" below. |
@@ -123,7 +125,7 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 - **Mic toggle = single `CLICK_EVENT` on the left temple** (`eventSource = TOUCH_EVENT_FROM_GLASSES_L`). First click: call `audioControl(true)`, send `mic_on` frame, status → `LISTEN`. Second click: call `audioControl(false)`, send `mic_off` frame, status → `THINK`. No long-press / press-and-hold (not exposed as an SDK event — confirmed against Even Hub `Input & Events` doc, only `CLICK_EVENT`, `DOUBLE_CLICK_EVENT`, `SCROLL_TOP_EVENT`, `SCROLL_BOTTOM_EVENT` are documented).
 - **Silence safety net.** If the bridge sees ≥ 3 s of silence after mic_on without a corresponding mic_off, it auto-closes the utterance (sends `mic_off` to the app to flip status, then proceeds with encode + send). Prevents stuck-open mic if the user forgets the second click.
 - While mic is on, stream `audioEvent.audioPcm` chunks (Uint8Array) as binary WebSocket frames. No buffering on the app side beyond what the SDK delivers.
-- On reply frames from the bridge, render text via `TextContainerProperty` + `textContainerUpgrade`. Long replies paginate to fit ~3 lines × 50 chars. Touch swipe = next page.
+- On reply frames from the bridge, render text via `TextContainerProperty` + `textContainerUpgrade` (per Even Hub Display docs: max 2,000 chars per update, ~400–500 chars fill the screen at default font). Long replies paginate at the screen-fill size; swipe up / swipe down (`SCROLL_TOP_EVENT` / `SCROLL_BOTTOM_EVENT`) = next/prev page. Final page size is tuned on hardware during integration.
 - Render a one-line status indicator (top of display) for: `IDLE`, `LISTEN`, `THINK`, `READ` (length of last reply in pages), `OFFLINE` (WS down).
 - **Agent selection menu.** On menu intent (gesture = double-press right temple, verify on hardware), send `list_agents` to the bridge, render the returned list as a scrollable selector (one bot per row, showing display name). Tap selects. Send `select_agent` with the chosen Telegram chat_id. Wait for `agent_selected` confirmation, then return to `IDLE` with the new agent active. The active agent's name is shown in the status bar.
 - **Single-active-agent model.** All utterances in the current session route to the selected agent until the user opens the menu and picks another. No per-utterance prefix parsing.
@@ -177,10 +179,12 @@ jc-glasses-bridge/                       # separate repo
 ```yaml
 bridge:
   bind: "0.0.0.0:8443"
-  public_host: "jc-g2bridge.jc.omnisage.org"
+  public_host: "jcglasses.omnisage.org"
   tls:
-    cert: /etc/letsencrypt/live/jc-g2bridge.jc.omnisage.org/fullchain.pem
-    key: /etc/letsencrypt/live/jc-g2bridge.jc.omnisage.org/privkey.pem
+    # Reuses operator's existing *.omnisage.org wildcard cert on the host.
+    # No new certbot job needed for this subdomain.
+    cert: /etc/ssl/omnisage.org/fullchain.pem    # adjust to actual wildcard cert path
+    key:  /etc/ssl/omnisage.org/privkey.pem
   shared_secret_env: JC_GLASSES_BRIDGE_SECRET
 
 encoder:
@@ -329,35 +333,9 @@ The bridge attaches `[sent from even G2]` as a **Telegram caption** on the voice
 - Zero JC changes required to ship v1.
 - The caption is visible in the operator's Telegram thread. This replaces the earlier "source tag prepended to transcript" design.
 
-### Per-persona instruction (future — no JC changes)
-
-Each agent instance can later get a formatting rule in its own STYLE.md / RULES.md — outside the JC framework, no framework PR needed:
-
-> If the incoming voice message has caption `[sent from even G2]`, output must be:
-> - Plain text only — no MarkdownV2, no bold, no bullets, no emoji
-> - Concise — synthetic, no padding, no hedging; no hard character limit
-> - Language unchanged (English in → English out, Italian in → Italian out)
->
-> Normal triage and model routing apply — do not skip or alter them.
-
-This rule is optional and non-blocking. v1 ships without it; replies just paginate more on the display.
-
-### Per-persona instruction (what gets added to STYLE.md / RULES.md)
-
-Each agent instance gets a short rule after the bridge ships:
-
-> If the incoming message starts with `[glasses]`, output must be:
-> - Plain text only — no MarkdownV2, no bold, no bullets, no emoji
-> - Concise — synthetic, no padding, no hedging; no hard character limit
-> - Language unchanged (English in → English out, Italian in → Italian out)
->
-> Normal triage and model routing apply — do not skip or alter them.
-
-This rule lives in the persona's STYLE.md or RULES.md, not in this spec. The bridge ships and works without it; replies just paginate more on the display until the rule is added.
-
 ### Out of scope for this spec
 
-- Adding the `[glasses]` rule to any persona's instructions. That's an instance-level change made after the bridge ships.
+- Per-persona formatting rules keyed on the caption. Operator decision 2026-06-02: no per-persona rule. The voice note arrives as a normal voice message; the persona answers in its normal voice. Display pagination handles long replies.
 
 ## Notification model — replacing "OS push"
 
@@ -414,7 +392,7 @@ If real OS-level push becomes a requirement, two paths exist:
 
 - **Systemd unit** at `bridge/jc-glasses/systemd/jc-glasses-bridge.service`. `Restart=on-failure`, `RestartSec=5`. `EnvironmentFile=/etc/jc-glasses-bridge/env`.
 - **Host:** **decided — same host as the JC gateways.** Single box with a public IPv4. No additional infrastructure to provision. Bridge is a peer process to the gateways; if the host goes down, all paths go down together, which is the existing failure mode.
-- **DNS + TLS.** Subdomain `jc-g2bridge.jc.omnisage.org` → A record → public IP of the JC host. `certbot --standalone` (or sidecar Caddy) issues a Let's Encrypt cert. Renewal runs in cron. DNS task: one A record in the `omnisage.org` zone, one-time.
+- **DNS + TLS.** Subdomain `jcglasses.omnisage.org` → A record → public IP of the JC host. Reuses the operator's existing `*.omnisage.org` wildcard TLS cert already on the host — no new certbot job. DNS task: one A record in the `omnisage.org` zone, one-time. Cert renewal is owned by whatever already maintains the wildcard cert.
 - **Inbound port.** WSS on TCP 8443 (configurable). Firewall opens 8443/tcp inbound on the public IP. ACME (port 80) needed during cert issuance/renewal — close after if undesired.
 - **Health:** `bridge run` exposes a small HTTP `/healthz` on localhost (separate port from the WSS) that returns `200` if Telethon is connected and the WS server is accepting. The existing `jc watchdog` can be extended later to watch this.
 - **Observability:** structured JSON logs to stdout → journald. Operator runs `journalctl -u jc-glasses-bridge -f` to tail.
@@ -448,7 +426,7 @@ If real OS-level push becomes a requirement, two paths exist:
 ### Resolved (operator sign-off 2026-06-02)
 
 1. **Hosting.** Single host, same box as the JC gateways. Public IPv4 on that host.
-2. **TLS / cert.** Let's Encrypt on `jc-g2bridge.jc.omnisage.org` — A record points at the public IP of the JC host. WSS-only. Cert issued and renewed by `certbot` (cron). DNS provider holds the `omnisage.org` zone.
+2. **TLS / cert.** `jcglasses.omnisage.org` reuses the operator's existing `*.omnisage.org` wildcard cert already on the host. No new certbot job. WSS-only. A record points at the public IP of the JC host. DNS provider holds the `omnisage.org` zone.
 3. **Agent model.** Single-active-agent per session, menu-driven selection from the operator's Telegram bot list (Telethon `iter_dialogs` filtered to `User.bot==True`). **No prefix parsing.** No hardcoded "default agent" — the persisted last-selected agent is what restores on launch.
 4. **"Tell everyone" broadcast.** **Deferred** past v1. Add later as a special menu entry once single-agent flow is validated on real hardware.
 5. **Continuity within a mic session.** Superseded by menu-driven selection — irrelevant now.
@@ -457,7 +435,7 @@ If real OS-level push becomes a requirement, two paths exist:
 
 ### Also resolved 2026-06-02
 
-8. **Subdomain.** `jc-g2bridge.jc.omnisage.org`. Operator owns the zone.
+8. **Subdomain.** `jcglasses.omnisage.org`. Operator owns the zone. Wildcard `*.omnisage.org` TLS cert already on the host — no new cert provisioning needed.
 9. **First-launch behavior.** `prompt_menu` (open the agent menu on first launch). After first pick, persist `last_selected_agent_id` in the SDK KV store; every subsequent launch restores that agent automatically. Operator switches agents at any time via the menu gesture.
 10. **Default bot exclude regex.** Enabled by default to keep the menu clean:
     ```yaml
@@ -467,11 +445,14 @@ If real OS-level push becomes a requirement, two paths exist:
 11. **ASR location = JC, zero JC changes.** Bridge forwards audio as a Telegram voice note (caption `[sent from even G2]`) via Telethon. JC's existing voice channel receives a standard voice message — no new code needed. Benchmarked live 2026-06-02: Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI Whisper ~2.5 s, both multilingual. Voice notes archived in Telegram thread.
 12. **Repo split.** Bridge ships in a **separate repo** (`jc-glasses-bridge`) co-locating the Python bridge and the Even Hub TS app. JC monorepo holds the spec (this file) only. Reasoning: bridge is transport for one input device, not part of agent runtime; TS app doesn't fit Python stack; independent release cadence; zero JC code touched.
 13. **Mic trigger = single `CLICK_EVENT` on left temple, toggle semantics.** First click starts, second click ends the utterance. No press-and-hold (not exposed as an SDK event — verified against Even Hub `Input & Events` docs which expose only `CLICK_EVENT`, `DOUBLE_CLICK_EVENT`, `SCROLL_TOP_EVENT`, `SCROLL_BOTTOM_EVENT`). Bridge runs a 3 s silence safety net to auto-close the utterance if the user forgets the second click.
+14. **Subdomain = `jcglasses.omnisage.org`, reuse existing wildcard cert.** No new certbot job. Wildcard `*.omnisage.org` cert is already provisioned on the host. Cert/key paths in config are placeholders; operator points them at the actual wildcard cert files.
+15. **Display capacity claim corrected.** `textContainerUpgrade` accepts max 2,000 chars; ~400–500 chars fill a full-screen container at default font (Even Hub Display docs). Spec previously said "~3 lines × ~50 chars" — unverifiable and likely under-reporting capacity. Implementer tunes page size on hardware.
+16. **No per-persona formatting rule.** Voice notes arrive at the persona as normal voice input — no caption-based formatting tweak, no `[glasses]` prefix rule. Long replies paginate on the display.
+17. **Goal section rewritten** to reflect the resolved architecture (bridge does not transcribe, JC voice channel handles ASR + triage + brain unchanged).
 
 ### Still open / non-blocking
 
-C. **Per-persona formatting rule for glasses voice.** Follow-up per persona (Harold, Rachel) once v1 is on hardware. Adds to each instance's STYLE.md / RULES.md: if the incoming voice message has caption `[sent from even G2]`, output plain text only (no MarkdownV2), synthetic and concise (no hard char limit), no padding or ornamentation. Triage and model routing (incl. Opus for complex tasks) remain active. Zero JC framework changes — instance-level config only. v1 ships and works without this; replies just paginate more on the display.
-D. **Menu gesture.** Determined during implementation by trial on physical G2. Spec proposal (right-temple double-press) is provisional. Out of scope for the spec — implementer picks the gesture that doesn't conflict with Even Hub OS reservations.
+D. **Menu gesture.** Determined during implementation by trial on physical G2. Spec proposal (right-temple double-press = `DOUBLE_CLICK_EVENT` with `eventSource = TOUCH_EVENT_FROM_GLASSES_R`) is provisional. Implementer picks the gesture that doesn't conflict with Even Hub OS reservations.
 
 ## Out of scope (future work, not blocking v1)
 
