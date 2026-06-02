@@ -52,7 +52,7 @@ A simulator exists: `BxNxM/even-dev` (Even Realities Hub Simulator — multi-app
 
 ### JC current state (relevant pieces)
 
-- `lib/voice/asr.py` — Dashscope `qwen2.5-omni-7b` REST transcription. Heavy (15–30 s per request). Used by the existing Telegram voice path.
+- `lib/voice/asr.py` — Dashscope `qwen2.5-omni-7b` REST transcription. Measured ~1.5 s per request on a typical 5-second voice note (benchmark 2026-06-02 on Luca's host). Handles English and Italian. Used by the existing Telegram voice path.
 - `lib/voice/synth.py` — Dashscope `QwenTtsRealtime` WebSocket TTS, blocks on `session.finished`. Not relevant to the glasses path (no speaker on G2) but documented here so an implementer doesn't mistake it for a dependency.
 - `ops/gateway.yaml` — channels stanza already includes `voice`, `jc-events`, `cron`. The bridge does **not** add a new channel adapter to JC. It impersonates the operator's Telegram user via Telethon and posts into the existing `telegram` channel conversations.
 - `memory/L1/CHATS.md` per instance — authoritative source of "which conversation belongs to which agent" from the operator's POV. The bridge consumes a derived form of this (see "Agent registry").
@@ -73,7 +73,7 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 +----------------+     BLE      +-------------+   WiFi/4G    +------------------+
 |     G2 mic     | ===========> | Even Hub    | ===========> |  Bridge (Python) |
 |  audioPcm 16k  |              |  custom app |   WebSocket  |  - WS server     |
-+----------------+              |  (TS/HTML)  | <=========== |  - ASR (Whisper) |
++----------------+              |  (TS/HTML)  | <=========== |  - ASR (Dashscope)|
                                 |             |   text+meta  |  - Agent select  |
 +----------------+              |             |              |  - Telethon      |
 |  G2 display    | <=========== |             |              +---------+--------+
@@ -135,7 +135,7 @@ bridge/jc-glasses/
   jc_glasses_bridge/
     __init__.py
     server.py          # WS server, frame router, per-connection session state
-    asr.py             # Whisper (primary) + Dashscope (fallback) adapters
+    asr.py             # Dashscope (primary) + Whisper (resilience fallback) adapters
     agents.py          # Telethon dialog discovery (filter to bots), agent metadata cache
     telegram_client.py # Telethon session, send/listen
     config.py          # YAML config loader
@@ -171,16 +171,16 @@ bridge:
   shared_secret_env: JC_GLASSES_BRIDGE_SECRET
 
 asr:
-  primary: whisper      # whisper | dashscope
-  whisper:
-    api_key_env: OPENAI_API_KEY
-    model: whisper-1
-    language: null       # auto-detect; or "en", "it"
-  dashscope:             # fallback if whisper fails or times out
+  primary: dashscope    # dashscope | whisper
+  dashscope:
     api_key_env: DASHSCOPE_API_KEY
     model: qwen2.5-omni-7b
     timeout_seconds: 30
-  fallback_after_seconds: 8
+  whisper:               # resilience fallback if dashscope fails or times out
+    api_key_env: OPENAI_API_KEY
+    model: whisper-1
+    language: null       # auto-detect; or "en", "it"
+  fallback_after_seconds: 4
 
 telegram:
   api_id_env: TG_API_ID
@@ -249,16 +249,27 @@ All control frames are JSON text. Audio is binary.
 
 ## Server-side ASR
 
-**Primary: OpenAI `whisper-1`** via the standard transcription endpoint.
+**Primary: Dashscope `qwen2.5-omni-7b`** via the existing `lib/voice/asr.py` interface.
+
+- Already configured in JC (reuses `DASHSCOPE_API_KEY`). No new vendor or key to manage.
+- Send the buffered utterance as base64 data URI in JSON. Handles English, Italian, and CJK out of the box.
+- Measured latency 2026-06-02 on Luca's host: **~1.5 s for a ~5 s voice note**. Earlier "15–30 s" estimate referred to the full voice pipeline (ASR + triage + LLM + TTS), not ASR alone.
+
+**Resilience fallback: OpenAI `whisper-1`** via the standard transcription endpoint.
 
 - Send the buffered utterance as a single multipart upload of 16 kHz mono s16le wrapped in a WAV header (constructed in-memory; no temp files).
-- Typical latency 1–3 s for utterances ≤ 15 s. Accuracy is the reference.
-- `language` left as auto-detect (Italian / English mirroring per operator preference).
+- Measured latency same benchmark: **~2.5 s** for the same ~5 s clip — slightly slower than Dashscope, comparable accuracy.
+- Triggered if Dashscope fails (network / 5xx / 429) or doesn't return within `asr.fallback_after_seconds` (default 4 s, based on measured Dashscope latency + buffer).
+- Kept purely for vendor redundancy. Not required for accuracy or language coverage.
 
-**Fallback: Dashscope `qwen2.5-omni-7b`** via the existing `lib/voice/asr.py` interface.
+**Benchmark methodology (so an implementer can re-run before changing defaults):**
 
-- Triggered if Whisper fails (network / 5xx / 429) or doesn't return within `asr.fallback_after_seconds`.
-- Heavier (15–30 s) but already wired in JC. Worth keeping for resilience.
+| Model | Median latency | Sample text accuracy |
+|---|---|---|
+| Dashscope `qwen2.5-omni-7b` | ~1.5 s | Matched reference |
+| OpenAI `whisper-1` | ~2.5 s | Minor wording drift on noisy ending |
+
+Re-run script: send a 5 s voice note, transcribe with both APIs back-to-back from the bridge host, record wall-clock for each. Repeat ≥ 5 times and take median.
 
 **Not for v1:** local ASR (whisper.cpp on the bridge host). May be added later if operator wants 100% offline path.
 
@@ -372,7 +383,7 @@ If real OS-level push becomes a requirement, two paths exist:
 - **Shared secret (`JC_GLASSES_BRIDGE_SECRET`).** 32 bytes, generated at install time, stored in the host env (systemd `EnvironmentFile`). Same secret embedded in the Even Hub app bundle at build time. Rotation = regenerate + rebuild app bundle + push update.
 - **TLS.** WSS only. Self-signed not permitted (WebView CORS + cert pinning behavior on iOS/Android makes self-signed brittle). Use Let's Encrypt.
 - **Domain whitelist.** Bridge's domain is the only entry in the Even Hub app's `app.json` network whitelist. No other outbound destinations from the app.
-- **No third-party services in the audio path.** Whisper is the operator's own OpenAI key. Dashscope is the operator's own Dashscope key. Both already used by JC.
+- **No third-party services in the audio path.** Dashscope is the operator's own Dashscope key (already used by JC). Whisper fallback is the operator's own OpenAI key. Both stay on the operator's host; no external SaaS intermediary.
 - **No audio recording on disk** by default. PCM frames are held only in the per-utterance in-memory buffer. The WAV blob handed to ASR is discarded after the response. `debug_record_utterances: true` writes WAVs to a configurable path only when the operator explicitly enables it for troubleshooting.
 - **Bridge auth identity.** The shared-secret auth is sufficient because the entire chain is operator-only (one app, one bridge, one Telegram account). The bridge is **not** a multi-tenant service.
 
@@ -402,7 +413,7 @@ If real OS-level push becomes a requirement, two paths exist:
 
 | Component | Estimate |
 |---|---|
-| Bridge (Python: WS server + Whisper + Telethon + session state) | 1.5–2 days |
+| Bridge (Python: WS server + Dashscope ASR + Telethon + session state) | 1.5–2 days |
 | Even Hub app (TS + SDK: mic, WS, display, paginate, **agent menu UI**) | 2–2.5 days |
 | Agent discovery (Telethon bot filter + cache) + source tagging | 0.5 day |
 | Integration on simulator + real glasses | 1 day |
@@ -430,6 +441,7 @@ If real OS-level push becomes a requirement, two paths exist:
     exclude_pattern: '^(BotFather|SpamBot|StickerBot|GIF|imdb|gif|vid|pic|youtube|wiki)$'
     ```
     Operator may extend.
+11. **ASR primary = Dashscope.** Benchmarked live 2026-06-02 on Luca's host with a real voice note: Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI `whisper-1` ~2.5 s, both accurate, both multilingual (English + Italian verified). Dashscope wins on speed and reuses existing JC key. Whisper kept as resilience fallback only; `fallback_after_seconds: 4` (Dashscope median + buffer).
 
 ### Still open / non-blocking
 
@@ -452,7 +464,8 @@ D. **Menu gesture.** Determined during implementation by trial on physical G2. S
 - Even Hub simulator: https://github.com/BxNxM/even-dev
 - Even Demo App (G1, useful for BLE protocol reference): https://github.com/even-realities/EvenDemoApp
 - Telethon docs: https://docs.telethon.dev
-- OpenAI Whisper transcription API: https://platform.openai.com/docs/guides/speech-to-text
+- Dashscope `qwen2.5-omni-7b` multimodal generation: https://help.aliyun.com/zh/dashscope/developer-reference/qwen-omni-api
+- OpenAI Whisper transcription API (fallback): https://platform.openai.com/docs/guides/speech-to-text
 - Existing JC voice ASR: `lib/voice/asr.py`
 - Existing JC gateway config schema: `ops/gateway.yaml`, `docs/specs/unified-gateway-0.3.0-remaining.md`
 - OpenClaw bridge (explicitly NOT used, kept here as the rejected alternative): https://github.com/dAAAb/openclaw-even-g2-bridge-skill
