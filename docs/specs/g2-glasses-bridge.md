@@ -120,7 +120,8 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 **Responsibilities:**
 
 - Open and hold a single WebSocket to the bridge. Reconnect with exponential backoff on drop.
-- On mic-on intent (touch event = press-and-hold left temple, see "Input model" below), call `audioControl(true)`. On mic-off, call `audioControl(false)`.
+- **Mic toggle = single `CLICK_EVENT` on the left temple** (`eventSource = TOUCH_EVENT_FROM_GLASSES_L`). First click: call `audioControl(true)`, send `mic_on` frame, status → `LISTEN`. Second click: call `audioControl(false)`, send `mic_off` frame, status → `THINK`. No long-press / press-and-hold (not exposed as an SDK event — confirmed against Even Hub `Input & Events` doc, only `CLICK_EVENT`, `DOUBLE_CLICK_EVENT`, `SCROLL_TOP_EVENT`, `SCROLL_BOTTOM_EVENT` are documented).
+- **Silence safety net.** If the bridge sees ≥ 3 s of silence after mic_on without a corresponding mic_off, it auto-closes the utterance (sends `mic_off` to the app to flip status, then proceeds with encode + send). Prevents stuck-open mic if the user forgets the second click.
 - While mic is on, stream `audioEvent.audioPcm` chunks (Uint8Array) as binary WebSocket frames. No buffering on the app side beyond what the SDK delivers.
 - On reply frames from the bridge, render text via `TextContainerProperty` + `textContainerUpgrade`. Long replies paginate to fit ~3 lines × 50 chars. Touch swipe = next page.
 - Render a one-line status indicator (top of display) for: `IDLE`, `LISTEN`, `THINK`, `READ` (length of last reply in pages), `OFFLINE` (WS down).
@@ -226,9 +227,9 @@ All control frames are JSON text. Audio is binary.
 | `auth` | JSON text | `{ "type": "auth", "ts": <unix>, "hmac": "<hex>", "app_version": "..." }` | First frame after connect. `hmac` = `HMAC-SHA256(secret, str(ts))`. Reject if `\|now - ts\| > 60 s`. |
 | `list_agents` | JSON text | `{ "type": "list_agents" }` | App opens the agent menu. Bridge replies with `agent_list`. |
 | `select_agent` | JSON text | `{ "type": "select_agent", "agent_id": <int> }` | App picks an agent. `agent_id` is the Telegram chat_id from `agent_list`. Bridge replies `agent_selected` or `agent_select_failed`. App may also send this on connect to restore the persisted selection. |
-| `mic_on` | JSON text | `{ "type": "mic_on", "utterance_id": "<uuid>" }` | Press-and-hold start. |
+| `mic_on` | JSON text | `{ "type": "mic_on", "utterance_id": "<uuid>" }` | First `CLICK_EVENT` on left temple — start of utterance. |
 | `audio` | binary | raw PCM s16le 16 kHz mono, chunks as delivered by SDK | While mic is on. |
-| `mic_off` | JSON text | `{ "type": "mic_off", "utterance_id": "<uuid>" }` | Press release. End of utterance. |
+| `mic_off` | JSON text | `{ "type": "mic_off", "utterance_id": "<uuid>" }` | Second `CLICK_EVENT` on left temple — end of utterance. May also be sent by the bridge to the app if its 3 s silence safety net fires. |
 | `ack` | JSON text | `{ "type": "ack", "reply_id": "<uuid>" }` | App acknowledges a `reply` frame (so bridge can drop it from retry buffer). |
 | `cancel` | JSON text | `{ "type": "cancel", "utterance_id": "<uuid>" }` | App cancels a pending utterance (touch dismiss before reply arrives). Bridge stops waiting for that reply. |
 | `pong` | JSON text | `{ "type": "pong" }` | Reply to bridge ping. |
@@ -465,6 +466,7 @@ If real OS-level push becomes a requirement, two paths exist:
     Operator may extend.
 11. **ASR location = JC, zero JC changes.** Bridge forwards audio as a Telegram voice note (caption `[sent from even G2]`) via Telethon. JC's existing voice channel receives a standard voice message — no new code needed. Benchmarked live 2026-06-02: Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI Whisper ~2.5 s, both multilingual. Voice notes archived in Telegram thread.
 12. **Repo split.** Bridge ships in a **separate repo** (`jc-glasses-bridge`) co-locating the Python bridge and the Even Hub TS app. JC monorepo holds the spec (this file) only. Reasoning: bridge is transport for one input device, not part of agent runtime; TS app doesn't fit Python stack; independent release cadence; zero JC code touched.
+13. **Mic trigger = single `CLICK_EVENT` on left temple, toggle semantics.** First click starts, second click ends the utterance. No press-and-hold (not exposed as an SDK event — verified against Even Hub `Input & Events` docs which expose only `CLICK_EVENT`, `DOUBLE_CLICK_EVENT`, `SCROLL_TOP_EVENT`, `SCROLL_BOTTOM_EVENT`). Bridge runs a 3 s silence safety net to auto-close the utterance if the user forgets the second click.
 
 ### Still open / non-blocking
 
