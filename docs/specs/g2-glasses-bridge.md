@@ -27,7 +27,9 @@ The bridge is the only new piece. The existing JC gateway, persona instances, vo
 - Do not use a Telegram **bot** account for routing. Operator wants the glasses to speak as *himself* into the existing 1:1 agent conversations (chat 28547271 ↔ Harold, etc.), not as a third party. This is non-negotiable.
 - Do not transcribe on the glasses. Server-side ASR only. Glasses send raw PCM; the bridge owns transcription quality.
 - Do not modify the JC gateway, persona brains, or Telegram channel adapter for this feature. The bridge is fully external to JC — it talks to JC the same way a phone does.
-- Do not introduce a new agent-addressing syntax inside the JC framework. The bridge resolves agent name → Telegram chat ID locally and sends to that chat. JC sees normal Telegram messages.
+- Do not introduce a new agent-addressing syntax inside the JC framework. The bridge resolves the active agent → Telegram chat ID locally and sends to that chat. JC sees normal Telegram messages.
+- Do not parse the transcript for an agent name. Agent selection is **menu-driven on the glasses** (operator picks once, until they pick another) — not "Harold, do X" inline.
+- Do not maintain a static agent registry in config. The agent list is **discovered live from the operator's Telegram bot dialogs** via Telethon.
 - Do not require Docker. Native Python + a single Even Hub app bundle. systemd unit for the bridge.
 
 ## Background
@@ -72,7 +74,7 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 |     G2 mic     | ===========> | Even Hub    | ===========> |  Bridge (Python) |
 |  audioPcm 16k  |              |  custom app |   WebSocket  |  - WS server     |
 +----------------+              |  (TS/HTML)  | <=========== |  - ASR (Whisper) |
-                                |             |   text+meta  |  - Router        |
+                                |             |   text+meta  |  - Agent select  |
 +----------------+              |             |              |  - Telethon      |
 |  G2 display    | <=========== |             |              +---------+--------+
 |  text/scroll   |              +-------------+                        |
@@ -111,7 +113,10 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 - While mic is on, stream `audioEvent.audioPcm` chunks (Uint8Array) as binary WebSocket frames. No buffering on the app side beyond what the SDK delivers.
 - On reply frames from the bridge, render text via `TextContainerProperty` + `textContainerUpgrade`. Long replies paginate to fit ~3 lines × 50 chars. Touch swipe = next page.
 - Render a one-line status indicator (top of display) for: `IDLE`, `LISTEN`, `THINK`, `READ` (length of last reply in pages), `OFFLINE` (WS down).
-- No transcription on device. No persistence beyond the SDK Key-Value Store for: bridge URL, last-used agent name (for "no name, send to last" behavior).
+- **Agent selection menu.** On menu intent (gesture = double-press right temple, verify on hardware), send `list_agents` to the bridge, render the returned list as a scrollable selector (one bot per row, showing display name). Tap selects. Send `select_agent` with the chosen Telegram chat_id. Wait for `agent_selected` confirmation, then return to `IDLE` with the new agent active. The active agent's name is shown in the status bar.
+- **Single-active-agent model.** All utterances in the current session route to the selected agent until the user opens the menu and picks another. No per-utterance prefix parsing.
+- **Persistence in SDK Key-Value Store:** bridge URL, `last_selected_agent_id`. On launch, app sends `select_agent` with the persisted id to restore the previous session immediately. If absent (first launch), app opens the menu automatically.
+- No transcription on device.
 
 **Out of scope for v1:**
 
@@ -129,9 +134,9 @@ bridge/jc-glasses/
   pyproject.toml
   jc_glasses_bridge/
     __init__.py
-    server.py          # WS server, frame router
+    server.py          # WS server, frame router, per-connection session state
     asr.py             # Whisper (primary) + Dashscope (fallback) adapters
-    router.py          # parse agent name, lookup chat ID
+    agents.py          # Telethon dialog discovery (filter to bots), agent metadata cache
     telegram_client.py # Telethon session, send/listen
     config.py          # YAML config loader
     frames.py          # Pydantic frame schemas
@@ -143,13 +148,16 @@ bridge/jc-glasses/
 **Responsibilities:**
 
 - Run a WebSocket server (default `wss://`). Authenticate the app via a shared secret in the first frame (HMAC of timestamp + bridge token). Reject otherwise.
+- Maintain **per-WebSocket session state**: `current_agent_id` (Telegram chat_id of the selected bot) and `last_utterance_id`. State lives in memory; it is restored on reconnect when the app re-sends `select_agent` from its KV store.
+- **Agent discovery.** On `list_agents` request, iterate Telethon `client.iter_dialogs()`, filter to `User` entities with `entity.bot == True`, return a list of `{ id, name, username, last_message_ts }`. Cache for 60 s to avoid hammering Telegram on rapid menu re-opens. Optional `agents.include_pattern` / `agents.exclude_pattern` filters by username regex in config.
+- **Agent selection.** On `select_agent`, verify the requested `agent_id` is in the discovered bot set; store it as the session's `current_agent_id`; reply `agent_selected` with the resolved name. On invalid id reply `agent_select_failed`.
 - Buffer PCM frames per utterance. End-of-utterance = mic-off frame OR 800 ms of silence (VAD optional in v1; mic-off frame is sufficient).
 - Submit the utterance audio to the ASR adapter. Return transcript + confidence.
-- Pass transcript to the router. Router parses optional agent prefix and resolves to a Telegram chat ID via the agent registry. If no agent name is found, route to `default_agent` from config.
+- **Route the transcript** to the session's `current_agent_id`. If `current_agent_id` is unset, reply `error { code: "no_agent_selected" }` and do not send anything to Telegram.
 - Build the outbound message: `[glasses] <transcript>` (the source tag is literal; see "Source tagging" below) and send via Telethon to the resolved chat.
 - Subscribe (Telethon `events.NewMessage`) to incoming messages on the same chat. When a reply arrives within the response window (default 600 s; configurable), encode the reply as a `reply` frame and push it down the WebSocket.
 - Heartbeat every 15 s on idle WebSocket so phone OS doesn't kill it.
-- Structured logging to stdout (systemd captures). One log line per: `frame_in`, `utterance_start`, `utterance_end`, `asr_done`, `route_decided`, `telegram_sent`, `reply_in`, `reply_pushed`, `error`. JSON format. No PII in logs beyond chat IDs (no transcript bodies unless `debug_log_transcripts: true`).
+- Structured logging to stdout (systemd captures). One log line per: `frame_in`, `utterance_start`, `utterance_end`, `asr_done`, `agent_selected`, `telegram_sent`, `reply_in`, `reply_pushed`, `error`. JSON format. No PII in logs beyond chat IDs (no transcript bodies unless `debug_log_transcripts: true`).
 
 **Config (`config.yaml`):**
 
@@ -180,26 +188,23 @@ telegram:
   # Phone + OTP + 2FA prompted ONLY on first run via `bridge auth` CLI subcommand.
   # Session file is sufficient for all subsequent runs.
 
-router:
-  default_agent: harold
+agents:
   source_tag: "[glasses]"
   reply_window_seconds: 600
-  agents:
-    harold:
-      chat_id: 28547271
-      aliases: ["harold", "finch"]
-    rachel:
-      chat_id: <RACHEL_CHAT_ID>   # filled at install time
-      aliases: ["rachel", "zane"]
-    # future agents append here
+  discovery: telegram_bots          # always; documented for future alternative sources
+  discovery_cache_seconds: 60
+  include_pattern: null              # optional regex; null = include all bots
+  exclude_pattern: null              # optional regex; e.g., '^(BotFather|spam_.*)$'
+  first_launch_behavior: prompt_menu # 'prompt_menu' = open menu when no last selection;
+                                     # 'first_alphabetical' = auto-select first bot
 ```
 
 **CLI (`bridge` subcommands):**
 
 - `bridge auth` — one-time Telethon login. Prompts for phone, OTP, 2FA. Writes `session_path`.
 - `bridge run` — start the WS server. Used by systemd.
-- `bridge agents` — list configured agents and their resolved chat IDs (sanity check).
-- `bridge test-send <agent> <text>` — send a synthetic message as if from the glasses, observe reply (useful for end-to-end testing without glasses).
+- `bridge agents` — print the discovered bot list (id, name, username, last message ts). Sanity check after auth.
+- `bridge test-send <agent_id> <text>` — send a synthetic message to the given Telegram bot as if from the glasses; observe reply (useful for end-to-end testing without glasses).
 
 ## Wire protocol — Bridge ⇄ Even Hub app
 
@@ -212,6 +217,8 @@ All control frames are JSON text. Audio is binary.
 | Type | Encoding | Schema | When |
 |---|---|---|---|
 | `auth` | JSON text | `{ "type": "auth", "ts": <unix>, "hmac": "<hex>", "app_version": "..." }` | First frame after connect. `hmac` = `HMAC-SHA256(secret, str(ts))`. Reject if `\|now - ts\| > 60 s`. |
+| `list_agents` | JSON text | `{ "type": "list_agents" }` | App opens the agent menu. Bridge replies with `agent_list`. |
+| `select_agent` | JSON text | `{ "type": "select_agent", "agent_id": <int> }` | App picks an agent. `agent_id` is the Telegram chat_id from `agent_list`. Bridge replies `agent_selected` or `agent_select_failed`. App may also send this on connect to restore the persisted selection. |
 | `mic_on` | JSON text | `{ "type": "mic_on", "utterance_id": "<uuid>" }` | Press-and-hold start. |
 | `audio` | binary | raw PCM s16le 16 kHz mono, chunks as delivered by SDK | While mic is on. |
 | `mic_off` | JSON text | `{ "type": "mic_off", "utterance_id": "<uuid>" }` | Press release. End of utterance. |
@@ -225,10 +232,13 @@ All control frames are JSON text. Audio is binary.
 |---|---|---|---|
 | `auth_ok` | JSON text | `{ "type": "auth_ok" }` | Auth accepted. |
 | `auth_fail` | JSON text | `{ "type": "auth_fail", "reason": "..." }` | Then close. |
-| `status` | JSON text | `{ "type": "status", "phase": "asr"\|"routing"\|"sent"\|"waiting", "utterance_id": "<uuid>" }` | Progress signals so the app can show `LISTEN → THINK → READ`. |
-| `transcript` | JSON text | `{ "type": "transcript", "utterance_id": "<uuid>", "text": "...", "agent": "harold" }` | After ASR + routing; lets the app show "to Harold: ..." for ~1 s. |
-| `reply` | JSON text | `{ "type": "reply", "reply_id": "<uuid>", "utterance_id": "<uuid>"\|null, "agent": "harold", "text": "...", "pages": <int> }` | Agent answer arrived; render. `utterance_id` may be null if the reply is unsolicited (agent-initiated). |
-| `error` | JSON text | `{ "type": "error", "utterance_id": "<uuid>"\|null, "code": "...", "message": "..." }` | ASR failure, no agent matched, Telegram send failed, reply window timed out. |
+| `agent_list` | JSON text | `{ "type": "agent_list", "agents": [{ "id": <int>, "name": "Harold Finch", "username": "harold_finch_bot", "last_message_ts": <int>\|null }, ...] }` | Reply to `list_agents`. Sorted by `last_message_ts` desc (most recently used first), with never-messaged bots last alphabetically. |
+| `agent_selected` | JSON text | `{ "type": "agent_selected", "agent_id": <int>, "name": "Harold Finch" }` | Confirms `select_agent`. App updates status bar with the agent name. |
+| `agent_select_failed` | JSON text | `{ "type": "agent_select_failed", "agent_id": <int>, "reason": "not_a_bot"\|"not_found"\|"excluded_by_filter" }` | Selection rejected. App reopens the menu. |
+| `status` | JSON text | `{ "type": "status", "phase": "asr"\|"sent"\|"waiting", "utterance_id": "<uuid>" }` | Progress signals so the app can show `LISTEN → THINK → READ`. |
+| `transcript` | JSON text | `{ "type": "transcript", "utterance_id": "<uuid>", "text": "...", "agent_id": <int>, "agent_name": "Harold Finch" }` | After ASR; shows "to Harold: ..." briefly. |
+| `reply` | JSON text | `{ "type": "reply", "reply_id": "<uuid>", "utterance_id": "<uuid>"\|null, "agent_id": <int>, "agent_name": "Harold Finch", "text": "...", "pages": <int> }` | Agent answer arrived; render. `utterance_id` may be null if the reply is unsolicited (agent-initiated). |
+| `error` | JSON text | `{ "type": "error", "utterance_id": "<uuid>"\|null, "code": "no_agent_selected"\|"asr_failed"\|"telegram_send_failed"\|"reply_window_expired"\|..., "message": "..." }` | Errors. App may auto-open the menu on `no_agent_selected`. |
 | `ping` | JSON text | `{ "type": "ping" }` | Every 15 s on idle. |
 
 ### Reconnection
@@ -251,27 +261,49 @@ All control frames are JSON text. Audio is binary.
 
 **Not for v1:** local ASR (whisper.cpp on the bridge host). May be added later if operator wants 100% offline path.
 
-## Multi-agent routing
+## Agent selection — menu-driven, single-active
 
-The router takes a transcript and produces `(agent_slug, message_text)`.
+The bridge does **not** parse the transcript for an agent name. The active agent is a per-session state set explicitly by the operator from a menu on the glasses.
 
-### Resolution order
+### Discovery — list source is Telegram
 
-1. **Explicit prefix.** Regex on the first ~6 tokens for one of:
-   - `^(?:tell|ask|send (?:to|message to))\s+(<alias>)[,:\s]+(.*)$`
-   - `^(<alias>)[,:\s]+(.*)$` (e.g., "Harold, what's the read on...")
-   Where `<alias>` is any alias listed in `router.agents.*.aliases`. Case-insensitive.
-2. **Conversation continuity.** If no prefix and the previous utterance from the same `mic_on` session was routed to agent X, route to X.
-3. **Default agent.** `router.default_agent`.
+The "agents" the operator can pick from = the **Telegram bots in the operator's own dialog list**. Implementation in Telethon:
 
-### Multi-recipient broadcast
+```python
+async for dialog in client.iter_dialogs():
+    entity = dialog.entity
+    if isinstance(entity, User) and entity.bot:
+        yield {
+          "id": entity.id,                 # Telegram chat_id
+          "name": entity.first_name or entity.username,
+          "username": entity.username,
+          "last_message_ts": int(dialog.date.timestamp()) if dialog.date else None,
+        }
+```
 
-If the operator says `"tell everyone <msg>"`, send the message to **every** configured agent. Replies stream back in arrival order; the app paginates them as separate cards (each card prefixed with agent name).
+Filter further with optional `agents.include_pattern` / `agents.exclude_pattern` regexes on the username (e.g., to exclude `BotFather`, `SpamBot`, etc.).
+
+The list is **always live**. Adding a new agent = the operator starts a new chat with that bot in Telegram. It appears in the menu on next `list_agents`.
+
+### Selection model
+
+- **Single active agent per session.** The operator picks once; every subsequent utterance goes to that agent until they pick another.
+- **Trigger to open the menu:** dedicated gesture on the glasses (double-press right temple — verify and adjust during implementation). The app sends `list_agents`, renders the returned `agent_list`, lets the operator scroll-and-tap to pick one, sends `select_agent`, waits for `agent_selected`, returns to `IDLE`.
+- **Persistence across launches.** App stores the last `agent_id` in the SDK Key-Value Store. On launch + auth, it sends `select_agent` with that id so the previous session resumes immediately. If no persisted id and `agents.first_launch_behavior: prompt_menu` (default), the app auto-opens the menu. If `first_alphabetical`, the app auto-selects the alphabetically first bot from the discovered list.
+
+### What the status bar shows
+
+`<agent name> · <phase>` — e.g., `Harold · IDLE`, `Rachel · THINK`, `Harold · READ 2/4`. Makes the active agent always visible, no ambiguity about who the operator is talking to.
 
 ### Negative cases — explicit errors back to glasses
 
-- Prefix names an alias that does not resolve → `error { code: "unknown_agent", message: "no agent matches '<alias>'" }`.
-- No agent configured at all → `error { code: "no_agents_configured" }`.
+- `select_agent` for an id that is not a bot or not in the operator's dialogs → `agent_select_failed { reason: "not_a_bot" \| "not_found" }`. App reopens the menu.
+- Utterance arrives with no `current_agent_id` set on the session → `error { code: "no_agent_selected" }`. App auto-opens the menu.
+- `list_agents` returns an empty list (no bots in the operator's Telegram) → `agent_list { agents: [] }`. App shows "No agents available — DM a bot in Telegram first".
+
+### Why no broadcast in v1
+
+Confirmed v1 = single-active-agent. Concurrent multi-agent ("tell everyone") is deferred until single-agent flow is validated on real hardware. When added, it becomes a special menu entry "All agents" that broadcasts and renders replies as a stacked card stream.
 
 ## Source tagging
 
@@ -346,42 +378,55 @@ If real OS-level push becomes a requirement, two paths exist:
 ## Operational
 
 - **Systemd unit** at `bridge/jc-glasses/systemd/jc-glasses-bridge.service`. `Restart=on-failure`, `RestartSec=5`. `EnvironmentFile=/etc/jc-glasses-bridge/env`.
-- **Host:** runs alongside the existing JC instance gateways on the operator's home server. No co-location requirement with any specific persona instance — the bridge is a peer process.
+- **Host:** **decided — same host as the JC gateways.** Single box with a public IPv4. No additional infrastructure to provision. Bridge is a peer process to the gateways; if the host goes down, all paths go down together, which is the existing failure mode.
+- **DNS + TLS.** WSS requires a real cert; WebView will not trust IP-pinned self-signed. Operator provisions a subdomain (e.g., `g2.<operator-domain>`) with an A record pointing at the public IP. `certbot --standalone` or a sidecar Caddy issues a Let's Encrypt cert. Renewal runs in cron. **This is the only DNS task on the operator.**
+- **Inbound port.** WSS on TCP 8443 (configurable). Firewall opens 8443/tcp inbound on the public IP. ACME (port 80) needed during cert issuance/renewal — close after if undesired.
 - **Health:** `bridge run` exposes a small HTTP `/healthz` on localhost (separate port from the WSS) that returns `200` if Telethon is connected and the WS server is accepting. The existing `jc watchdog` can be extended later to watch this.
 - **Observability:** structured JSON logs to stdout → journald. Operator runs `journalctl -u jc-glasses-bridge -f` to tail.
 
 ## Testing
 
-- **Unit:** `frames.py` schema round-trips, router prefix parsing, agent alias resolution, source-tag prefixing.
-- **Integration (no glasses):** `bridge test-send harold "ping"` exercises ASR-skip + router + Telethon send + reply listener. CI-friendly with a mock Telethon client.
-- **Simulator:** Even Hub `even-dev` simulator (`BxNxM/even-dev`) runs the Even Hub app bundle against a mock G2. Replay a canned PCM file as `audio` frames. Validates the full app → bridge → Telegram → reply → app loop without physical hardware.
-- **Real glasses:** manual sign-off on:
-   - Press-hold → speak → release → see transcript echo → see Harold reply.
-   - Speak `"Rachel, what's on the calendar?"` → reply renders from Rachel.
+- **Unit:** `frames.py` schema round-trips, agent discovery filter (mocked Telethon dialogs with mix of bots / users / channels), include/exclude regex, session state transitions, source-tag prefixing.
+- **Integration (no glasses):** `bridge test-send <agent_id> "ping"` exercises ASR-skip + Telethon send + reply listener. CI-friendly with a mock Telethon client.
+- **Simulator:** Even Hub `even-dev` simulator (`BxNxM/even-dev`) runs the Even Hub app bundle against a mock G2. Replay a canned PCM file as `audio` frames. Validates the full menu → select → speak → reply loop without physical hardware.
+- **Real glasses (manual sign-off):**
+   - First-launch with no persisted agent → menu opens automatically → pick Harold → speak → reply renders.
+   - Quit and relaunch → previous Harold selection restored → speak → reply.
+   - Open menu (double-press right temple) → switch to Rachel → speak → Rachel replies.
    - Drop WiFi mid-reply → reconnect → reply arrives via retry buffer.
-   - 90-second reply (force Harold to delay) → app stays on `THINK` → reply renders when ready.
+   - 90-second reply (force the active agent to delay) → app stays on `THINK` → reply renders when ready.
+   - Send utterance with no agent ever selected (unlikely via UI, force via WS test) → `error no_agent_selected` → app opens menu.
 
 ## Build estimate (refresher)
 
 | Component | Estimate |
 |---|---|
-| Bridge (Python: WS server + Whisper + Telethon + router) | 1.5–2 days |
-| Even Hub app (TS + SDK: mic, WS, display, paginate) | 1.5–2 days |
-| Multi-agent routing + source tagging | 0.5 day |
+| Bridge (Python: WS server + Whisper + Telethon + session state) | 1.5–2 days |
+| Even Hub app (TS + SDK: mic, WS, display, paginate, **agent menu UI**) | 2–2.5 days |
+| Agent discovery (Telethon bot filter + cache) + source tagging | 0.5 day |
 | Integration on simulator + real glasses | 1 day |
-| Hardening (auth, TLS, systemd, logs, retry buffer) | 0.5–1 day |
-| **Total** | **5–6.5 days** |
+| Hardening (auth, TLS via certbot, systemd, logs, retry buffer) | 0.5–1 day |
+| **Total** | **5.5–7 days** |
 
-## Open decisions (owner sign-off needed before implementation starts)
+## Decisions log + open items
 
-1. **Hosting.** Bridge runs on the same host as the JC gateways, or a separate host? Default: same host. Same-host avoids one more box to maintain; security profile is identical (operator-only).
-2. **Domain + TLS cert.** Which subdomain hosts the WSS endpoint? Default: `g2.<operator-domain>` with Let's Encrypt.
-3. **Default agent.** `default_agent: harold` is proposed. Operator may prefer `rachel` if executive/scheduling tasks dominate.
-4. **"Tell everyone" broadcast.** Ship in v1 (per spec above) or defer? Defer keeps the v1 surface smaller.
-5. **Continuity within a mic session.** Should "no prefix" route to the last-addressed agent, or always to default? Spec proposes "last in same mic session", reset between sessions.
-6. **Background OS push.** Required for v1, or accept "foreground only"? Spec assumes foreground only.
-7. **Per-persona `[glasses]` handling.** Out of this spec, but implementer should open a follow-up issue per active persona instance to update STYLE.md / RULES.md to format for the 3×50 display.
-8. **Even Hub app distribution.** Even Hub has an app store (launched 2026-04-03). Publish there, or sideload via simulator-style developer install? Operator-only install is fine for v1.
+### Resolved (operator sign-off 2026-06-02)
+
+1. **Hosting.** Single host, same box as the JC gateways. Public IPv4 on that host.
+2. **TLS / cert.** Let's Encrypt on a subdomain that the operator provisions and points at the public IP. WSS-only. Cert renewal via cron / certbot.
+3. **Agent model.** Single-active-agent per session, menu-driven selection from the operator's Telegram bot list (Telethon `iter_dialogs` filtered to `User.bot==True`). **No prefix parsing.** No hardcoded "default agent" — the persisted last-selected agent is what restores on launch.
+4. **"Tell everyone" broadcast.** **Deferred** past v1. Add later as a special menu entry once single-agent flow is validated on real hardware.
+5. **Continuity within a mic session.** Superseded by menu-driven selection — irrelevant now.
+6. **Background OS push.** **Not required.** Foreground-only model accepted. Recovery flow (`Notification model → Recovery flow`) covers reopening the app from the glasses.
+7. **App distribution.** Sideload only. The Even Hub app has the bridge URL and shared secret baked in at build time; nothing useful in publishing to the public store.
+
+### Still open (need answers before / during implementation)
+
+A. **Subdomain choice + DNS provider.** Operator decides which DNS provider holds the record and what hostname (`g2.<x>`). One DNS A record + one ACME HTTP-01 challenge run.
+B. **First-launch behavior.** `prompt_menu` (default in this spec) or `first_alphabetical`? Spec defaults to prompt — slower but more predictable.
+C. **Per-persona `[glasses]` handling.** Each JC persona (Harold, Rachel) gets a follow-up issue to teach its STYLE.md / RULES.md how to format for the 3×50 display when it sees the tag. Not v1-blocking — agents render fine without it, just less compact.
+D. **Menu gesture.** Right-temple double-press is the spec proposal. May change after testing on the physical G2 — some gestures are reserved by Even Hub OS.
+E. **Bot include / exclude regex defaults.** Likely want a default exclude for `^BotFather$` and similar non-agent bots, or leave clean and let the operator add as needed.
 
 ## Out of scope (future work, not blocking v1)
 
