@@ -437,6 +437,181 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(ch._updates_cursor, 12)
 
 
+class UserIdFallbackTests(unittest.TestCase):
+    """Guard against the DLQ failure mode where the channel emits
+    user_id=None and the downstream dispatcher drops the wakeup
+    (rejected_reason: missing user_id) so the owning agent never wakes.
+
+    Per agent-side hotfix: every enqueue() call from this channel must
+    carry a non-empty user_id, resolved through the fallback chain
+    1) event/task created_by.id  →  2) task owner_agent_id  →
+    3) self._agent_id() last-resort.
+    """
+
+    def test_inject_falls_back_to_owner_when_created_by_missing(self):
+        captured, enqueue = _captured_enqueue()
+        ch = _make_channel(
+            client=FakeClient(
+                [{"items": [_task("t-no-creator", owner_agent_id="agent-1", status="pending")]}]
+            )
+        )
+        ch._poll_once(enqueue)
+        self.assertEqual(captured[0]["user_id"], "agent-1")
+
+    def test_inject_falls_back_to_self_agent_id_when_owner_missing(self):
+        captured, enqueue = _captured_enqueue()
+        ch = _make_channel(
+            client=FakeClient([{"items": [_task("t-bare", status="pending")]}]),
+            agent_id="self-agent-uuid",
+        )
+        ch._poll_once(enqueue)
+        self.assertEqual(captured[0]["user_id"], "self-agent-uuid")
+        # Belt-and-suspenders — must never be empty/None for any code path.
+        self.assertTrue(captured[0]["user_id"])
+
+    def test_inject_ignores_created_by_without_id(self):
+        captured, enqueue = _captured_enqueue()
+        ch = _make_channel(
+            client=FakeClient(
+                [
+                    {
+                        "items": [
+                            _task(
+                                "t-system",
+                                created_by={"kind": "system"},
+                                owner_agent_id="agent-1",
+                                status="pending",
+                            )
+                        ]
+                    }
+                ]
+            )
+        )
+        ch._poll_once(enqueue)
+        self.assertEqual(captured[0]["user_id"], "agent-1")
+
+    def test_inject_update_user_id_resolved_from_event_then_task(self):
+        captured, enqueue = _captured_enqueue()
+        client = FakeClient([{"items": []}])
+        client.update_responses = [
+            {
+                "items": [
+                    {
+                        "event": {
+                            "id": 21,
+                            "event_type": "status_changed",
+                            "created_by": {"kind": "user", "id": "actor-21"},
+                            "payload": {},
+                        },
+                        "task": {
+                            "id": "t-21",
+                            "root_id": "r-21",
+                            "owner_agent_id": "agent-1",
+                            "status": "done",
+                        },
+                    }
+                ],
+                "next_cursor": 21,
+            }
+        ]
+        ch = _make_channel(client=client)
+        ch._updates_cursor = 20
+        ch._poll_once(enqueue)
+        self.assertEqual(captured[0]["user_id"], "actor-21")
+
+    def test_inject_update_falls_back_to_task_owner_when_event_anonymous(self):
+        captured, enqueue = _captured_enqueue()
+        client = FakeClient([{"items": []}])
+        client.update_responses = [
+            {
+                "items": [
+                    {
+                        "event": {"id": 22, "event_type": "status_changed", "payload": {}},
+                        "task": {
+                            "id": "t-22",
+                            "root_id": "r-22",
+                            "owner_agent_id": "agent-1",
+                            "status": "done",
+                        },
+                    }
+                ],
+                "next_cursor": 22,
+            }
+        ]
+        ch = _make_channel(client=client)
+        ch._updates_cursor = 21
+        ch._poll_once(enqueue)
+        self.assertEqual(captured[0]["user_id"], "agent-1")
+
+    def test_inject_update_last_resort_is_self_agent_id(self):
+        captured, enqueue = _captured_enqueue()
+        client = FakeClient([{"items": []}])
+        client.update_responses = [
+            {
+                "items": [
+                    {
+                        "event": {"id": 23, "event_type": "status_changed", "payload": {}},
+                        "task": {"id": "t-23", "root_id": "r-23", "status": "done"},
+                    }
+                ],
+                "next_cursor": 23,
+            }
+        ]
+        ch = _make_channel(client=client, agent_id="self-agent-uuid")
+        ch._updates_cursor = 22
+        ch._poll_once(enqueue)
+        self.assertEqual(captured[0]["user_id"], "self-agent-uuid")
+
+    def test_task_closed_carries_self_agent_id(self):
+        captured, enqueue = _captured_enqueue()
+        ch = _make_channel(
+            ChannelConfig(enabled=True, emit_task_closed=True),
+            client=FakeClient(
+                [
+                    {"items": [_task("t-c", status="pending")]},
+                    {"items": []},
+                ]
+            ),
+            agent_id="self-agent-uuid",
+        )
+        ch._poll_once(enqueue)
+        ch._poll_once(enqueue)
+        closes = [c for c in captured if c["meta"]["kind"] == "task_closed"]
+        self.assertEqual(len(closes), 1)
+        self.assertEqual(closes[0]["user_id"], "self-agent-uuid")
+
+    def test_resolve_user_id_unit(self):
+        ch = _make_channel(agent_id="self-agent-uuid")
+        # 1. event created_by wins over task created_by.
+        self.assertEqual(
+            ch._resolve_user_id(
+                task={"created_by": {"id": "task-creator"}, "owner_agent_id": "owner"},
+                event={"created_by": {"id": "event-actor"}},
+            ),
+            "event-actor",
+        )
+        # 2. task created_by wins over owner.
+        self.assertEqual(
+            ch._resolve_user_id(
+                task={"created_by": {"id": "task-creator"}, "owner_agent_id": "owner"},
+            ),
+            "task-creator",
+        )
+        # 3. owner wins when no created_by has an id.
+        self.assertEqual(
+            ch._resolve_user_id(
+                task={"created_by": {"kind": "system"}, "owner_agent_id": "owner"},
+            ),
+            "owner",
+        )
+        # 4. self._agent_id() is the last resort.
+        self.assertEqual(ch._resolve_user_id(), "self-agent-uuid")
+        self.assertEqual(ch._resolve_user_id(task={}), "self-agent-uuid")
+        # 5. None of the resolved values can be empty in any combination.
+        self.assertTrue(ch._resolve_user_id())
+        self.assertTrue(ch._resolve_user_id(task={"created_by": None}))
+
+
 class ErrorHandlingTests(unittest.TestCase):
     def test_transient_backoff_grows_then_recovers(self):
         ch = _make_channel(ChannelConfig(enabled=True, poll_interval_seconds=10))
