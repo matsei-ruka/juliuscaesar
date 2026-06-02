@@ -351,6 +351,46 @@ class TelegramVoiceIngestionTests(unittest.TestCase):
             self.assertNotIn("was_voice", captured[0]["meta"])
             self.assertNotIn("audio_path", captured[0]["meta"])
 
+    def test_voice_with_caption_combines_transcript_and_caption(self):
+        """Regression: voice + caption must transcribe the voice, not drop it."""
+        update = {
+            "update_id": 101,
+            "message": {
+                "message_id": 19,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "voice": {"file_id": "AwACA-voice", "mime_type": "audio/ogg", "duration": 3},
+                "caption": "[sent from even G2]",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = self._drive_channel(instance, [update], transcript="check the params")
+            self.assertEqual(len(captured), 1)
+            kwargs = captured[0]
+            self.assertIn("check the params", kwargs["content"])
+            self.assertIn("[sent from even G2]", kwargs["content"])
+            self.assertTrue(kwargs["meta"]["was_voice"])
+            self.assertIn("audio_path", kwargs["meta"])
+
+    def test_voice_with_empty_transcript_keeps_caption(self):
+        """If ASR returns empty but a caption exists, fall back to caption."""
+        update = {
+            "update_id": 102,
+            "message": {
+                "message_id": 20,
+                "chat": {"id": 28547271},
+                "from": {"id": 28547271, "username": "luca"},
+                "voice": {"file_id": "AwACA-voice", "mime_type": "audio/ogg", "duration": 1},
+                "caption": "marker only",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            captured = self._drive_channel(instance, [update], transcript="")
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["content"], "marker only")
+
 
 class TelegramAudioVideoIngestionTests(unittest.TestCase):
     """`audio` (music) and `video_note` (round videos) follow the voice path."""
