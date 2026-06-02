@@ -58,7 +58,7 @@ _REGEX_RULES: list[tuple[ClassificationKind, re.Pattern[str], float]] = [
     (
         "session_expired",
         re.compile(
-            r"(please run.*?/login|authentication failed|401\s*unauthorized|session has expired|invalid api key)",
+            r"(please run.*?/login|authentication failed|401\s*unauthorized|session has expired|invalid api key|invalid authentication credentials|failed to authenticate)",
             re.IGNORECASE,
         ),
         0.95,
