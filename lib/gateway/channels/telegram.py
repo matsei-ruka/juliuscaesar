@@ -1306,40 +1306,50 @@ class TelegramChannel:
                         else:
                             kind = None
                         audio_path: Path | None = None
-                        if not text.strip() and attachment is not None:
+                        if attachment is not None:
+                            caption = text.strip()
                             try:
                                 audio_path = self._ingest_audio_attachment(
                                     attachment, kind, update_id
                                 )
-                                text = _transcribe_audio(
+                                transcript = _transcribe_audio(
                                     audio_path,
                                     instance_dir=self.instance_dir,
-                                )
+                                ).strip()
                             except Exception as exc:  # noqa: BLE001
                                 self.log(
                                     f"telegram {kind} ingestion failed update_id={update_id}: {exc}"
                                 )
                                 continue
-                            if not text.strip():
+                            if transcript:
+                                self.log(
+                                    f"telegram {kind} transcribed update_id={update_id} chars={len(transcript)}"
+                                )
+                                text = f"{caption}\n\n[{kind}: {transcript}]" if caption else transcript
+                            elif caption:
+                                self.log(
+                                    f"telegram {kind} transcription empty update_id={update_id}; keeping caption"
+                                )
+                                text = caption
+                            else:
                                 self.log(
                                     f"telegram {kind} transcription empty update_id={update_id}"
                                 )
                                 continue
-                            self.log(
-                                f"telegram {kind} transcribed update_id={update_id} chars={len(text)}"
-                            )
                         video_path_ingested: Path | None = None
                         video_transcript: str = ""
                         video_visual: str = ""
-                        if not text.strip() and video is not None:
+                        if video is not None:
+                            caption = text.strip()
                             if self._video_enabled():
+                                fused = ""
                                 try:
                                     raw_path = self._ingest_video_attachment(video, update_id)
                                     video_path_ingested = raw_path
                                     vt, vv = ingest_video(raw_path, instance_dir=self.instance_dir)
                                     video_transcript = vt
                                     video_visual = vv
-                                    text = fused_video_event_text(vt, vv)
+                                    fused = fused_video_event_text(vt, vv).strip()
                                 except ValueError as exc:
                                     self.log(
                                         f"telegram video rejected update_id={update_id}: {exc}"
@@ -1364,11 +1374,11 @@ class TelegramChannel:
                                     self.log(
                                         f"telegram video ingestion failed update_id={update_id}: {exc}"
                                     )
-                                    text = "[video]"
-                                if not text.strip():
-                                    text = "[video]"
+                                if not fused:
+                                    fused = "[video]"
+                                text = f"{caption}\n\n[video: {fused}]" if caption else fused
                             else:
-                                text = "[video]"
+                                text = f"{caption}\n\n[video]" if caption else "[video]"
                         photo = message.get("photo") if isinstance(message.get("photo"), list) else None
                         document = (
                             message.get("document")
