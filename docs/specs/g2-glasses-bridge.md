@@ -102,7 +102,7 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 
 1. **Even Hub app** — small custom TypeScript/HTML bundle running in the Even Hub WebView on the operator's phone. Captures mic, streams PCM frames over WebSocket, receives reply frames, renders text.
 2. **Bridge** — Python daemon on the operator's server. Speaks WebSocket south (to the app) and Telethon-MTProto north (to Telegram). **Does NOT transcribe.** Encodes the buffered PCM into an Opus voice note and forwards it via Telethon to the selected agent's Telegram bot DM.
-3. **JC fleet** — owns the audio path. The existing voice channel (`lib/voice/asr.py` → triage → brain) handles transcription, model routing (Haiku / Sonnet / Opus), and reply. JC gateway gains one small enhancement (see "JC-side change") to mark glasses-origin voice notes with the `[glasses]` tag.
+3. **JC fleet** — **completely unchanged.** The existing voice channel (`lib/voice/asr.py` → triage → brain) handles transcription, model routing (Haiku / Sonnet / Opus), and reply. The bridge sends a voice note with a text caption `[sent from even G2]`; the agent receives a standard Telegram voice message. No JC code changes required.
 
 ### Why ASR lives on JC (operator decision 2026-06-02)
 
@@ -165,7 +165,7 @@ jc-glasses-bridge/                       # separate repo
 - **Agent selection.** On `select_agent`, verify the requested `agent_id` is in the discovered bot set; store it as the session's `current_agent_id`; reply `agent_selected` with the resolved name. On invalid id reply `agent_select_failed`.
 - Buffer PCM frames per utterance. End-of-utterance = mic-off frame OR 800 ms of silence (VAD optional in v1; mic-off frame is sufficient).
 - **Encode utterance.** PCM s16le 16 kHz mono → OGG container with Opus codec via `ffmpeg -f s16le -ar 16000 -ac 1 -i - -c:a libopus -b:a 24k -f ogg pipe:1`. In-memory; no temp files. Resulting blob ≤ ~50 KB for a 5 s utterance.
-- **Forward as Telegram voice note.** Send via Telethon `client.send_file(chat_id, voice_blob, voice_note=True, attributes=[DocumentAttributeAudio(voice=True, duration=<s>)])` to the session's `current_agent_id`. The bridge does **not** transcribe; ASR happens on the JC side.
+- **Forward as Telegram voice note.** Send via Telethon `client.send_file(chat_id, voice_blob, voice_note=True, caption="[sent from even G2]", attributes=[DocumentAttributeAudio(voice=True, duration=<s>)])` to the session's `current_agent_id`. Caption is informational — visible to the operator in their Telegram thread, not parsed by JC. The bridge does **not** transcribe; ASR happens in JC as it does for every other voice message.
 - If `current_agent_id` is unset, reply `error { code: "no_agent_selected" }` and do not send anything to Telegram.
 - Subscribe (Telethon `events.NewMessage`) to incoming messages on the same chat. When a reply arrives within the response window (default 600 s; configurable), encode the reply as a `reply` frame and push it down the WebSocket. Replies are text — TTS is out of scope (no speaker on G2).
 - Heartbeat every 15 s on idle WebSocket so phone OS doesn't kill it.
@@ -196,8 +196,7 @@ telegram:
   # Session file is sufficient for all subsequent runs.
 
 agents:
-  # No source_tag here — tagging is owned by JC (voice channel detects
-  # operator self-DM voice notes and prepends [glasses] there).
+  voice_caption: "[sent from even G2]"  # caption on the Telegram voice note; informational only
   reply_window_seconds: 600
   discovery: telegram_bots          # always; documented for future alternative sources
   discovery_cache_seconds: 60
@@ -263,19 +262,11 @@ All control frames are JSON text. Audio is binary.
 - Measured ASR latency on Luca's host (2026-06-02 benchmark): Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI `whisper-1` ~2.5 s. Both multilingual. Bridge-side ASR offered no latency or accuracy benefit.
 - The "15–30 s" Dashscope figure earlier in this spec referred to the full voice pipeline (ASR + triage + LLM + TTS), not ASR alone.
 
-### JC-side change required (small)
+### No JC changes required
 
-JC gateway must tag any voice note that originates from the operator's own Telegram user-id-in-own-bot-DM with the `[glasses]` source prefix before handing it to triage. Rationale: the operator never sends voice notes from their own account to their own bots — only the bridge does, via Telethon impersonating the operator. Detection is therefore deterministic:
+JC voice channel receives the voice note as a standard Telegram voice message and processes it identically to any other voice input. The caption `[sent from even G2]` is visible in the operator's Telegram thread for audit/searchability but is not parsed by JC.
 
-```python
-# inside JC's voice ingress (Telegram channel)
-if message.sender_id == OPERATOR_USER_ID and chat.type == "private":
-    incoming_source_tag = "[glasses]"
-```
-
-The tag is then prepended to the transcript when it reaches the brain, exactly matching the original Option-A behavior. Per-persona STYLE.md rules act on the tag identically.
-
-**This is a separate, small JC PR.** It does not block the bridge implementation — the bridge ships and works without the tag; replies just won't be formatted for the 3×50 display until the tag wiring lands.
+Per-persona `[glasses]` formatting rule (see "Source tagging" → "Per-persona instruction") is a future STYLE.md / RULES.md addition per instance — also requires no JC framework changes.
 
 ### Out of scope on the bridge
 
@@ -329,19 +320,26 @@ Confirmed v1 = single-active-agent. Concurrent multi-agent ("tell everyone") is 
 
 ## Source tagging
 
-The bridge sends a Telegram voice note, **not** prefixed text. The `[glasses]` source tag is applied inside JC: the voice channel detects "voice note from operator's own user-id in operator's own bot DM" and prepends `[glasses]` to the transcript before triage. See "ASR — handled by JC, not the bridge → JC-side change required" above for the detection logic.
-
-The end-state effect on the brain is identical to prefixing the text directly — the transcript reaching the brain reads:
-
-```
-[glasses] read on the Iran insurance corridor today
-```
+The bridge attaches `[sent from even G2]` as a **Telegram caption** on the voice note. This is an informational label — the operator sees it in their Telegram thread for searchability and audit. JC does not parse it; JC's voice channel receives a standard voice message and processes it as-is.
 
 ### Rationale
 
-- JC triage and model routing remain untouched. A glasses voice note still routes through triage → selects model (Haiku/Sonnet/Opus) based on content complexity. If the operator asks a heavy analysis question via glasses, Opus fires. The tag does not suppress or shortcut any routing.
-- `[glasses]` is a **formatting signal only**. Personas detect the tag and switch to a tighter output style: shorter replies, no MarkdownV2 ornamentation (bold, bullets, headers don't render on the 4-bit display), prioritize signal over background context.
-- Tag is deterministic. The only voice notes from the operator's own user-id in their own bot DM are those forwarded by the bridge — operators don't normally DM their own bots with voice.
+- JC triage and model routing remain untouched. A glasses voice note routes through triage → selects model (Haiku/Sonnet/Opus) based on content complexity identically to a voice note sent from the Telegram app. If the operator asks a heavy analysis question via glasses, Opus fires.
+- Zero JC changes required to ship v1.
+- The caption is visible in the operator's Telegram thread. This replaces the earlier "source tag prepended to transcript" design.
+
+### Per-persona instruction (future — no JC changes)
+
+Each agent instance can later get a formatting rule in its own STYLE.md / RULES.md — outside the JC framework, no framework PR needed:
+
+> If the incoming voice message has caption `[sent from even G2]`, output must be:
+> - Plain text only — no MarkdownV2, no bold, no bullets, no emoji
+> - Concise — synthetic, no padding, no hedging; no hard character limit
+> - Language unchanged (English in → English out, Italian in → Italian out)
+>
+> Normal triage and model routing apply — do not skip or alter them.
+
+This rule is optional and non-blocking. v1 ships without it; replies just paginate more on the display.
 
 ### Per-persona instruction (what gets added to STYLE.md / RULES.md)
 
@@ -440,10 +438,9 @@ If real OS-level push becomes a requirement, two paths exist:
 | Bridge (Python: WS server + ffmpeg PCM→Opus + Telethon voice-note send + session state) | 1–1.5 days |
 | Even Hub app (TS + SDK: mic, WS, display, paginate, **agent menu UI**) | 2–2.5 days |
 | Agent discovery (Telethon bot filter + cache) | 0.5 day |
-| JC-side `[glasses]` tag wiring in voice channel | 0.25 day |
 | Integration on simulator + real glasses | 1 day |
 | Hardening (auth, TLS via certbot, systemd, logs, retry buffer) | 0.5–1 day |
-| **Total** | **5.25–6.75 days** |
+| **Total** | **5–6.5 days** |
 
 ## Decisions log + open items
 
@@ -466,12 +463,12 @@ If real OS-level push becomes a requirement, two paths exist:
     exclude_pattern: '^(BotFather|SpamBot|StickerBot|GIF|imdb|gif|vid|pic|youtube|wiki)$'
     ```
     Operator may extend.
-11. **ASR location = JC, not the bridge.** Bridge forwards audio as a Telegram voice note via Telethon. JC's existing voice channel (`lib/voice/asr.py`, Dashscope `qwen2.5-omni-7b`) transcribes. Benchmarked live 2026-06-02 on Luca's host: Dashscope ~1.5 s, OpenAI Whisper ~2.5 s, both multilingual, comparable accuracy — no bridge-side ASR advantage. Voice notes archived in the operator's Telegram thread as a bonus. JC voice channel needs a tiny addition: detect "voice from operator user-id in own bot DM" and prepend `[glasses]`.
-12. **Repo split.** Bridge ships in a **separate repo** (`jc-glasses-bridge`) co-locating the Python bridge and the Even Hub TS app. JC monorepo holds the spec (this file) and the small voice-channel `[glasses]` tag wiring. Reasoning: bridge is transport for one input device, not part of agent runtime; TS app doesn't fit Python stack; independent release cadence.
+11. **ASR location = JC, zero JC changes.** Bridge forwards audio as a Telegram voice note (caption `[sent from even G2]`) via Telethon. JC's existing voice channel receives a standard voice message — no new code needed. Benchmarked live 2026-06-02: Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI Whisper ~2.5 s, both multilingual. Voice notes archived in Telegram thread.
+12. **Repo split.** Bridge ships in a **separate repo** (`jc-glasses-bridge`) co-locating the Python bridge and the Even Hub TS app. JC monorepo holds the spec (this file) only. Reasoning: bridge is transport for one input device, not part of agent runtime; TS app doesn't fit Python stack; independent release cadence; zero JC code touched.
 
 ### Still open / non-blocking
 
-C. **Per-persona `[glasses]` formatting rule.** Follow-up PR per persona (Harold, Rachel) once v1 is on hardware. Adds to STYLE.md / RULES.md: if input starts with `[glasses]`, output plain text only (no MarkdownV2), synthetic and concise (no hard char limit), no padding or ornamentation. Triage and model routing (incl. Opus for complex tasks) remain active — tag is formatting-only. v1 ships and works without this; replies just paginate more on the display.
+C. **Per-persona formatting rule for glasses voice.** Follow-up per persona (Harold, Rachel) once v1 is on hardware. Adds to each instance's STYLE.md / RULES.md: if the incoming voice message has caption `[sent from even G2]`, output plain text only (no MarkdownV2), synthetic and concise (no hard char limit), no padding or ornamentation. Triage and model routing (incl. Opus for complex tasks) remain active. Zero JC framework changes — instance-level config only. v1 ships and works without this; replies just paginate more on the display.
 D. **Menu gesture.** Determined during implementation by trial on physical G2. Spec proposal (right-temple double-press) is provisional. Out of scope for the spec — implementer picks the gesture that doesn't conflict with Even Hub OS reservations.
 
 ## Out of scope (future work, not blocking v1)
