@@ -329,13 +329,26 @@ Example:
 
 ### Rationale
 
-- JC personas can detect the tag in incoming text and adjust formatting: shorter replies, no MarkdownV2 ornamentation that doesn't render on the 4-bit display, prioritize "what to do next" over background.
-- Optional per-persona handling. Harold may treat `[glasses]` as a signal to switch into a tighter format (e.g., max 3 short labeled fields). Implementation of this is **inside the persona's STYLE.md / RULES.md**, not in this spec.
+- JC triage and model routing remain untouched. A glasses message still routes through triage → selects model (Haiku/Sonnet/Opus) based on content complexity. If the operator asks a heavy analysis question via glasses, Opus fires. The tag does not suppress or shortcut any routing.
+- `[glasses]` is a **formatting signal only**. Personas detect the tag and switch to a tighter output style: shorter replies, no MarkdownV2 ornamentation (bold, bullets, headers don't render on the 4-bit display), prioritize signal over background context.
 - Tag is deterministic and trivial to grep/strip downstream if needed.
+
+### Per-persona instruction (what gets added to STYLE.md / RULES.md)
+
+Each agent instance gets a short rule after the bridge ships:
+
+> If the incoming message starts with `[glasses]`, output must be:
+> - Plain text only — no MarkdownV2, no bold, no bullets, no emoji
+> - Concise — max ~200 characters preferred, never more than 3 short labeled fields
+> - Language unchanged (English in → English out, Italian in → Italian out)
+>
+> Normal triage and model routing apply — do not skip or alter them.
+
+This rule lives in the persona's STYLE.md or RULES.md, not in this spec. The bridge ships and works without it; replies just paginate more on the display until the rule is added.
 
 ### Out of scope for this spec
 
-- Modifying any persona's instructions to *act* on the tag. That's an instance-level change the operator makes after the bridge ships.
+- Adding the `[glasses]` rule to any persona's instructions. That's an instance-level change made after the bridge ships.
 
 ## Notification model — replacing "OS push"
 
@@ -445,7 +458,7 @@ If real OS-level push becomes a requirement, two paths exist:
 
 ### Still open / non-blocking
 
-C. **Per-persona `[glasses]` handling.** Follow-up PR per persona (Harold, Rachel) once v1 is on hardware. Adds a STYLE.md / RULES.md rule: if input starts with `[glasses]`, switch to ultra-compact format (≤2 labels, ≤200 chars, no MarkdownV2, no emoji). v1 ships and works without this; replies just paginate more.
+C. **Per-persona `[glasses]` formatting rule.** Follow-up PR per persona (Harold, Rachel) once v1 is on hardware. Adds to STYLE.md / RULES.md: if input starts with `[glasses]`, output plain text only (no MarkdownV2), ≤200 chars preferred, max 3 short labeled fields. Triage and model routing (incl. Opus for complex tasks) remain active — tag is formatting-only. v1 ships and works without this; replies just paginate more on the display.
 D. **Menu gesture.** Determined during implementation by trial on physical G2. Spec proposal (right-temple double-press) is provisional. Out of scope for the spec — implementer picks the gesture that doesn't conflict with Even Hub OS reservations.
 
 ## Out of scope (future work, not blocking v1)
