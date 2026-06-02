@@ -25,7 +25,7 @@ The bridge is the only new piece. The existing JC gateway, persona instances, vo
 - Do not reuse, repackage, or fork the OpenClaw Even-G2 bridge (`dAAAb/openclaw-even-g2-bridge-skill`). Its 22-second hard deadline and single-agent routing model are explicit anti-requirements here.
 - Do not use the G2 stock "Even AI" app or its OpenAI-compatible chat-completions configuration. We build our own Even Hub app so we control mic capture, display rendering, and the wire protocol end to end.
 - Do not use a Telegram **bot** account for routing. Operator wants the glasses to speak as *himself* into the existing 1:1 agent conversations (chat 28547271 ↔ Harold, etc.), not as a third party. This is non-negotiable.
-- Do not transcribe on the glasses. Server-side ASR only. Glasses send raw PCM; the bridge owns transcription quality.
+- Do not transcribe on the glasses. Glasses send raw PCM; the bridge encodes to OGG/Opus and forwards as a Telegram voice note; JC's existing voice channel transcribes (Dashscope `qwen2.5-omni-7b`).
 - Do not modify the JC gateway, persona brains, or Telegram channel adapter for this feature. The bridge is fully external to JC — it talks to JC the same way a phone does.
 - Do not introduce a new agent-addressing syntax inside the JC framework. The bridge resolves the active agent → Telegram chat ID locally and sends to that chat. JC sees normal Telegram messages.
 - Do not parse the transcript for an agent name. Agent selection is **menu-driven on the glasses** (operator picks once, until they pick another) — not "Harold, do X" inline.
@@ -70,35 +70,46 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 ## Architecture
 
 ```
-+----------------+     BLE      +-------------+   WiFi/4G    +------------------+
-|     G2 mic     | ===========> | Even Hub    | ===========> |  Bridge (Python) |
-|  audioPcm 16k  |              |  custom app |   WebSocket  |  - WS server     |
-+----------------+              |  (TS/HTML)  | <=========== |  - ASR (Dashscope)|
-                                |             |   text+meta  |  - Agent select  |
-+----------------+              |             |              |  - Telethon      |
-|  G2 display    | <=========== |             |              +---------+--------+
-|  text/scroll   |              +-------------+                        |
-+----------------+                                                     | Telegram MTProto
-                                                                       | (as operator user)
-                                                                       v
-                                                       +----------------------------------+
-                                                       | Telegram (operator's account)    |
-                                                       |  • DM with Harold (chat 28547271)|
-                                                       |  • DM with Rachel (chat ...)     |
-                                                       |  • DM with <future agents>       |
-                                                       +-----------------+----------------+
++----------------+     BLE      +-------------+   WiFi/4G    +-------------------+
+|     G2 mic     | ===========> | Even Hub    | ===========> |  Bridge (Python)  |
+|  audioPcm 16k  |              |  custom app |   WebSocket  |  - WS server      |
++----------------+              |  (TS/HTML)  | <=========== |  - PCM→OGG/Opus   |
+                                |             |   text+meta  |  - Agent select   |
++----------------+              |             |              |  - Telethon       |
+|  G2 display    | <=========== |             |              +----------+--------+
+|  text/scroll   |              +-------------+                         |
++----------------+                                                      | Telegram MTProto
+                                                                        | (as operator user)
+                                                                        | sendVoiceMessage(.ogg)
+                                                                        v
+                                                       +-----------------------------------+
+                                                       | Telegram (operator's account)     |
+                                                       |  • DM with Harold (chat 28547271) |
+                                                       |  • DM with Rachel (chat ...)      |
+                                                       |  • DM with <future agents>        |
+                                                       +-----------------+-----------------+
                                                                          |
                                                                          v
-                                                       Existing JC gateways receive the
-                                                       message, triage, brain, reply as
-                                                       today. No JC changes.
+                                                       Existing JC gateway receives the
+                                                       voice message, runs ASR via
+                                                       lib/voice/asr.py, tags it as
+                                                       [glasses] (operator self-send
+                                                       convention), triages, brains,
+                                                       replies as today.
 ```
 
 ### Three actors
 
 1. **Even Hub app** — small custom TypeScript/HTML bundle running in the Even Hub WebView on the operator's phone. Captures mic, streams PCM frames over WebSocket, receives reply frames, renders text.
-2. **Bridge** — Python daemon on the operator's server. Speaks WebSocket south (to the app) and Telethon-MTProto north (to Telegram). Runs the ASR and the agent router.
-3. **JC fleet** — unchanged. Each persona instance reads the Telegram message addressed to its conversation and answers as it always does. The bridge then mirrors that answer back to the glasses.
+2. **Bridge** — Python daemon on the operator's server. Speaks WebSocket south (to the app) and Telethon-MTProto north (to Telegram). **Does NOT transcribe.** Encodes the buffered PCM into an Opus voice note and forwards it via Telethon to the selected agent's Telegram bot DM.
+3. **JC fleet** — owns the audio path. The existing voice channel (`lib/voice/asr.py` → triage → brain) handles transcription, model routing (Haiku / Sonnet / Opus), and reply. JC gateway gains one small enhancement (see "JC-side change") to mark glasses-origin voice notes with the `[glasses]` tag.
+
+### Why ASR lives on JC (operator decision 2026-06-02)
+
+- Bridge stays thin. No `DASHSCOPE_API_KEY` on the bridge host, no ASR adapter to maintain, no drift versus JC's evolving ASR.
+- JC's voice pipeline is already proven and currently configured. Same code path used by every other voice channel.
+- Voice notes are archived in the operator's Telegram thread: searchable later, audit trail, no separate retention to manage.
+- Latency cost is negligible: voice-note upload to Telegram adds ~200 ms; ASR happens in JC the same way it always does. Measured ASR step alone is ~1.5 s.
 
 ## Components
 
@@ -126,21 +137,22 @@ The third-party "OpenClaw" route was also rejected explicitly by the operator on
 
 ### Component B — Bridge (`bridge/jc-glasses/`)
 
-**Tech:** Python 3.11+, `websockets` (async WS server), `telethon` (Telegram MTProto client), `httpx` (ASR HTTP), `pydantic` (frame validation), `pyyaml` (config).
+**Tech:** Python 3.11+, `websockets` (async WS server), `telethon` (Telegram MTProto client), `pydantic` (frame validation), `pyyaml` (config), `ffmpeg` (PCM→Opus encoding; system binary, called via `subprocess`).
 **Layout (target — implementer may adjust):**
 
 ```
-bridge/jc-glasses/
+jc-glasses-bridge/                       # separate repo
   pyproject.toml
   jc_glasses_bridge/
     __init__.py
     server.py          # WS server, frame router, per-connection session state
-    asr.py             # Dashscope (primary) + Whisper (resilience fallback) adapters
+    encoder.py         # PCM s16le 16 kHz mono → OGG/Opus voice-note via ffmpeg
     agents.py          # Telethon dialog discovery (filter to bots), agent metadata cache
-    telegram_client.py # Telethon session, send/listen
+    telegram_client.py # Telethon session, send voice notes, listen for text/voice replies
     config.py          # YAML config loader
     frames.py          # Pydantic frame schemas
     main.py            # entrypoint
+  apps/jc-glasses/     # Even Hub TS app bundle (sideloaded)
   config.example.yaml
   systemd/jc-glasses-bridge.service
 ```
@@ -152,12 +164,12 @@ bridge/jc-glasses/
 - **Agent discovery.** On `list_agents` request, iterate Telethon `client.iter_dialogs()`, filter to `User` entities with `entity.bot == True`, return a list of `{ id, name, username, last_message_ts }`. Cache for 60 s to avoid hammering Telegram on rapid menu re-opens. Optional `agents.include_pattern` / `agents.exclude_pattern` filters by username regex in config.
 - **Agent selection.** On `select_agent`, verify the requested `agent_id` is in the discovered bot set; store it as the session's `current_agent_id`; reply `agent_selected` with the resolved name. On invalid id reply `agent_select_failed`.
 - Buffer PCM frames per utterance. End-of-utterance = mic-off frame OR 800 ms of silence (VAD optional in v1; mic-off frame is sufficient).
-- Submit the utterance audio to the ASR adapter. Return transcript + confidence.
-- **Route the transcript** to the session's `current_agent_id`. If `current_agent_id` is unset, reply `error { code: "no_agent_selected" }` and do not send anything to Telegram.
-- Build the outbound message: `[glasses] <transcript>` (the source tag is literal; see "Source tagging" below) and send via Telethon to the resolved chat.
-- Subscribe (Telethon `events.NewMessage`) to incoming messages on the same chat. When a reply arrives within the response window (default 600 s; configurable), encode the reply as a `reply` frame and push it down the WebSocket.
+- **Encode utterance.** PCM s16le 16 kHz mono → OGG container with Opus codec via `ffmpeg -f s16le -ar 16000 -ac 1 -i - -c:a libopus -b:a 24k -f ogg pipe:1`. In-memory; no temp files. Resulting blob ≤ ~50 KB for a 5 s utterance.
+- **Forward as Telegram voice note.** Send via Telethon `client.send_file(chat_id, voice_blob, voice_note=True, attributes=[DocumentAttributeAudio(voice=True, duration=<s>)])` to the session's `current_agent_id`. The bridge does **not** transcribe; ASR happens on the JC side.
+- If `current_agent_id` is unset, reply `error { code: "no_agent_selected" }` and do not send anything to Telegram.
+- Subscribe (Telethon `events.NewMessage`) to incoming messages on the same chat. When a reply arrives within the response window (default 600 s; configurable), encode the reply as a `reply` frame and push it down the WebSocket. Replies are text — TTS is out of scope (no speaker on G2).
 - Heartbeat every 15 s on idle WebSocket so phone OS doesn't kill it.
-- Structured logging to stdout (systemd captures). One log line per: `frame_in`, `utterance_start`, `utterance_end`, `asr_done`, `agent_selected`, `telegram_sent`, `reply_in`, `reply_pushed`, `error`. JSON format. No PII in logs beyond chat IDs (no transcript bodies unless `debug_log_transcripts: true`).
+- Structured logging to stdout (systemd captures). One log line per: `frame_in`, `utterance_start`, `utterance_end`, `voice_encoded`, `agent_selected`, `telegram_sent`, `reply_in`, `reply_pushed`, `error`. JSON format. No PII in logs beyond chat IDs (no audio bytes ever logged).
 
 **Config (`config.yaml`):**
 
@@ -170,17 +182,11 @@ bridge:
     key: /etc/letsencrypt/live/jc-g2bridge.jc.omnisage.org/privkey.pem
   shared_secret_env: JC_GLASSES_BRIDGE_SECRET
 
-asr:
-  primary: dashscope    # dashscope | whisper
-  dashscope:
-    api_key_env: DASHSCOPE_API_KEY
-    model: qwen2.5-omni-7b
-    timeout_seconds: 30
-  whisper:               # resilience fallback if dashscope fails or times out
-    api_key_env: OPENAI_API_KEY
-    model: whisper-1
-    language: null       # auto-detect; or "en", "it"
-  fallback_after_seconds: 4
+encoder:
+  # PCM → OGG/Opus voice note. Bridge does NOT transcribe; JC does.
+  ffmpeg_bin: ffmpeg          # absolute path if not on PATH
+  opus_bitrate_kbps: 24       # Telegram voice-note conventional bitrate
+  max_utterance_seconds: 60   # safety cap; reject longer mic holds
 
 telegram:
   api_id_env: TG_API_ID
@@ -190,7 +196,8 @@ telegram:
   # Session file is sufficient for all subsequent runs.
 
 agents:
-  source_tag: "[glasses]"
+  # No source_tag here — tagging is owned by JC (voice channel detects
+  # operator self-DM voice notes and prepends [glasses] there).
   reply_window_seconds: 600
   discovery: telegram_bots          # always; documented for future alternative sources
   discovery_cache_seconds: 60
@@ -205,7 +212,7 @@ agents:
 - `bridge auth` — one-time Telethon login. Prompts for phone, OTP, 2FA. Writes `session_path`.
 - `bridge run` — start the WS server. Used by systemd.
 - `bridge agents` — print the discovered bot list (id, name, username, last message ts). Sanity check after auth.
-- `bridge test-send <agent_id> <text>` — send a synthetic message to the given Telegram bot as if from the glasses; observe reply (useful for end-to-end testing without glasses).
+- `bridge test-send <agent_id> <wav_path>` — encode the given WAV (16 kHz mono) to an Opus voice note and forward to the given Telegram bot as if from the glasses; observe reply. Useful for end-to-end testing without glasses.
 
 ## Wire protocol — Bridge ⇄ Even Hub app
 
@@ -236,10 +243,9 @@ All control frames are JSON text. Audio is binary.
 | `agent_list` | JSON text | `{ "type": "agent_list", "agents": [{ "id": <int>, "name": "Harold Finch", "username": "harold_finch_bot", "last_message_ts": <int>\|null }, ...] }` | Reply to `list_agents`. Sorted by `last_message_ts` desc (most recently used first), with never-messaged bots last alphabetically. |
 | `agent_selected` | JSON text | `{ "type": "agent_selected", "agent_id": <int>, "name": "Harold Finch" }` | Confirms `select_agent`. App updates status bar with the agent name. |
 | `agent_select_failed` | JSON text | `{ "type": "agent_select_failed", "agent_id": <int>, "reason": "not_a_bot"\|"not_found"\|"excluded_by_filter" }` | Selection rejected. App reopens the menu. |
-| `status` | JSON text | `{ "type": "status", "phase": "asr"\|"sent"\|"waiting", "utterance_id": "<uuid>" }` | Progress signals so the app can show `LISTEN → THINK → READ`. |
-| `transcript` | JSON text | `{ "type": "transcript", "utterance_id": "<uuid>", "text": "...", "agent_id": <int>, "agent_name": "Harold Finch" }` | After ASR; shows "to Harold: ..." briefly. |
+| `status` | JSON text | `{ "type": "status", "phase": "encoding"\|"sent"\|"waiting", "utterance_id": "<uuid>" }` | Progress signals so the app can show `LISTEN → THINK → READ`. `encoding` = PCM→Opus on the bridge; `sent` = voice note dispatched to Telegram; `waiting` = waiting for the agent's reply. |
 | `reply` | JSON text | `{ "type": "reply", "reply_id": "<uuid>", "utterance_id": "<uuid>"\|null, "agent_id": <int>, "agent_name": "Harold Finch", "text": "...", "pages": <int> }` | Agent answer arrived; render. `utterance_id` may be null if the reply is unsolicited (agent-initiated). |
-| `error` | JSON text | `{ "type": "error", "utterance_id": "<uuid>"\|null, "code": "no_agent_selected"\|"asr_failed"\|"telegram_send_failed"\|"reply_window_expired"\|..., "message": "..." }` | Errors. App may auto-open the menu on `no_agent_selected`. |
+| `error` | JSON text | `{ "type": "error", "utterance_id": "<uuid>"\|null, "code": "no_agent_selected"\|"encode_failed"\|"telegram_send_failed"\|"reply_window_expired"\|..., "message": "..." }` | Errors. App may auto-open the menu on `no_agent_selected`. |
 | `ping` | JSON text | `{ "type": "ping" }` | Every 15 s on idle. |
 
 ### Reconnection
@@ -247,31 +253,35 @@ All control frames are JSON text. Audio is binary.
 - On WS drop, app retries with exponential backoff (1 s, 2 s, 4 s, 8 s, capped at 30 s).
 - The bridge maintains a small retry buffer of unacknowledged `reply` frames keyed by `reply_id`. On reconnect (same auth identity), it replays unacked replies.
 
-## Server-side ASR
+## ASR — handled by JC, not the bridge
 
-**Primary: Dashscope `qwen2.5-omni-7b`** via the existing `lib/voice/asr.py` interface.
+**The bridge does not transcribe.** It encodes the buffered PCM into an OGG/Opus voice note and forwards it via Telethon to the selected agent's Telegram bot DM. The existing JC voice channel (`lib/voice/asr.py`, Dashscope `qwen2.5-omni-7b`) handles ASR, triage, and reply generation.
 
-- Already configured in JC (reuses `DASHSCOPE_API_KEY`). No new vendor or key to manage.
-- Send the buffered utterance as base64 data URI in JSON. Handles English, Italian, and CJK out of the box.
-- Measured latency 2026-06-02 on Luca's host: **~1.5 s for a ~5 s voice note**. Earlier "15–30 s" estimate referred to the full voice pipeline (ASR + triage + LLM + TTS), not ASR alone.
+### Why
 
-**Resilience fallback: OpenAI `whisper-1`** via the standard transcription endpoint.
+- Operator decision 2026-06-02: keep ASR on the JC side. Single source of truth for transcription, no key on the bridge, no drift, voice notes archived in Telegram.
+- Measured ASR latency on Luca's host (2026-06-02 benchmark): Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI `whisper-1` ~2.5 s. Both multilingual. Bridge-side ASR offered no latency or accuracy benefit.
+- The "15–30 s" Dashscope figure earlier in this spec referred to the full voice pipeline (ASR + triage + LLM + TTS), not ASR alone.
 
-- Send the buffered utterance as a single multipart upload of 16 kHz mono s16le wrapped in a WAV header (constructed in-memory; no temp files).
-- Measured latency same benchmark: **~2.5 s** for the same ~5 s clip — slightly slower than Dashscope, comparable accuracy.
-- Triggered if Dashscope fails (network / 5xx / 429) or doesn't return within `asr.fallback_after_seconds` (default 4 s, based on measured Dashscope latency + buffer).
-- Kept purely for vendor redundancy. Not required for accuracy or language coverage.
+### JC-side change required (small)
 
-**Benchmark methodology (so an implementer can re-run before changing defaults):**
+JC gateway must tag any voice note that originates from the operator's own Telegram user-id-in-own-bot-DM with the `[glasses]` source prefix before handing it to triage. Rationale: the operator never sends voice notes from their own account to their own bots — only the bridge does, via Telethon impersonating the operator. Detection is therefore deterministic:
 
-| Model | Median latency | Sample text accuracy |
-|---|---|---|
-| Dashscope `qwen2.5-omni-7b` | ~1.5 s | Matched reference |
-| OpenAI `whisper-1` | ~2.5 s | Minor wording drift on noisy ending |
+```python
+# inside JC's voice ingress (Telegram channel)
+if message.sender_id == OPERATOR_USER_ID and chat.type == "private":
+    incoming_source_tag = "[glasses]"
+```
 
-Re-run script: send a 5 s voice note, transcribe with both APIs back-to-back from the bridge host, record wall-clock for each. Repeat ≥ 5 times and take median.
+The tag is then prepended to the transcript when it reaches the brain, exactly matching the original Option-A behavior. Per-persona STYLE.md rules act on the tag identically.
 
-**Not for v1:** local ASR (whisper.cpp on the bridge host). May be added later if operator wants 100% offline path.
+**This is a separate, small JC PR.** It does not block the bridge implementation — the bridge ships and works without the tag; replies just won't be formatted for the 3×50 display until the tag wiring lands.
+
+### Out of scope on the bridge
+
+- ASR (any flavor).
+- TTS (no speaker on G2).
+- Triage / model routing.
 
 ## Agent selection — menu-driven, single-active
 
@@ -319,9 +329,9 @@ Confirmed v1 = single-active-agent. Concurrent multi-agent ("tell everyone") is 
 
 ## Source tagging
 
-Every message sent to JC agents from the bridge is prefixed with the literal token `[glasses]` followed by a space, then the transcript.
+The bridge sends a Telegram voice note, **not** prefixed text. The `[glasses]` source tag is applied inside JC: the voice channel detects "voice note from operator's own user-id in operator's own bot DM" and prepends `[glasses]` to the transcript before triage. See "ASR — handled by JC, not the bridge → JC-side change required" above for the detection logic.
 
-Example:
+The end-state effect on the brain is identical to prefixing the text directly — the transcript reaching the brain reads:
 
 ```
 [glasses] read on the Iran insurance corridor today
@@ -329,9 +339,9 @@ Example:
 
 ### Rationale
 
-- JC triage and model routing remain untouched. A glasses message still routes through triage → selects model (Haiku/Sonnet/Opus) based on content complexity. If the operator asks a heavy analysis question via glasses, Opus fires. The tag does not suppress or shortcut any routing.
+- JC triage and model routing remain untouched. A glasses voice note still routes through triage → selects model (Haiku/Sonnet/Opus) based on content complexity. If the operator asks a heavy analysis question via glasses, Opus fires. The tag does not suppress or shortcut any routing.
 - `[glasses]` is a **formatting signal only**. Personas detect the tag and switch to a tighter output style: shorter replies, no MarkdownV2 ornamentation (bold, bullets, headers don't render on the 4-bit display), prioritize signal over background context.
-- Tag is deterministic and trivial to grep/strip downstream if needed.
+- Tag is deterministic. The only voice notes from the operator's own user-id in their own bot DM are those forwarded by the bridge — operators don't normally DM their own bots with voice.
 
 ### Per-persona instruction (what gets added to STYLE.md / RULES.md)
 
@@ -396,7 +406,8 @@ If real OS-level push becomes a requirement, two paths exist:
 - **Shared secret (`JC_GLASSES_BRIDGE_SECRET`).** 32 bytes, generated at install time, stored in the host env (systemd `EnvironmentFile`). Same secret embedded in the Even Hub app bundle at build time. Rotation = regenerate + rebuild app bundle + push update.
 - **TLS.** WSS only. Self-signed not permitted (WebView CORS + cert pinning behavior on iOS/Android makes self-signed brittle). Use Let's Encrypt.
 - **Domain whitelist.** Bridge's domain is the only entry in the Even Hub app's `app.json` network whitelist. No other outbound destinations from the app.
-- **No third-party services in the audio path.** Dashscope is the operator's own Dashscope key (already used by JC). Whisper fallback is the operator's own OpenAI key. Both stay on the operator's host; no external SaaS intermediary.
+- **No ASR keys on the bridge.** Bridge does not transcribe — no `DASHSCOPE_API_KEY`, no `OPENAI_API_KEY`. ASR happens inside JC, which already holds its own Dashscope key.
+- **No third-party services in the audio path.** Voice notes travel: bridge → operator's own Telegram account → JC's own Telegram bot → JC's own ASR. End-to-end inside infrastructure the operator already controls.
 - **No audio recording on disk** by default. PCM frames are held only in the per-utterance in-memory buffer. The WAV blob handed to ASR is discarded after the response. `debug_record_utterances: true` writes WAVs to a configurable path only when the operator explicitly enables it for troubleshooting.
 - **Bridge auth identity.** The shared-secret auth is sufficient because the entire chain is operator-only (one app, one bridge, one Telegram account). The bridge is **not** a multi-tenant service.
 
@@ -411,8 +422,8 @@ If real OS-level push becomes a requirement, two paths exist:
 
 ## Testing
 
-- **Unit:** `frames.py` schema round-trips, agent discovery filter (mocked Telethon dialogs with mix of bots / users / channels), include/exclude regex, session state transitions, source-tag prefixing.
-- **Integration (no glasses):** `bridge test-send <agent_id> "ping"` exercises ASR-skip + Telethon send + reply listener. CI-friendly with a mock Telethon client.
+- **Unit:** `frames.py` schema round-trips, agent discovery filter (mocked Telethon dialogs with mix of bots / users / channels), include/exclude regex, session state transitions, PCM→Opus encoding (verify output is a valid OGG container Telegram will accept as a voice note).
+- **Integration (no glasses):** `bridge test-send <agent_id> <wav_path>` encodes the canned WAV to Opus, sends it as a Telegram voice note via Telethon, and listens for the agent's reply. CI-friendly with a mock Telethon client.
 - **Simulator:** Even Hub `even-dev` simulator (`BxNxM/even-dev`) runs the Even Hub app bundle against a mock G2. Replay a canned PCM file as `audio` frames. Validates the full menu → select → speak → reply loop without physical hardware.
 - **Real glasses (manual sign-off):**
    - First-launch with no persisted agent → menu opens automatically → pick Harold → speak → reply renders.
@@ -426,12 +437,13 @@ If real OS-level push becomes a requirement, two paths exist:
 
 | Component | Estimate |
 |---|---|
-| Bridge (Python: WS server + Dashscope ASR + Telethon + session state) | 1.5–2 days |
+| Bridge (Python: WS server + ffmpeg PCM→Opus + Telethon voice-note send + session state) | 1–1.5 days |
 | Even Hub app (TS + SDK: mic, WS, display, paginate, **agent menu UI**) | 2–2.5 days |
-| Agent discovery (Telethon bot filter + cache) + source tagging | 0.5 day |
+| Agent discovery (Telethon bot filter + cache) | 0.5 day |
+| JC-side `[glasses]` tag wiring in voice channel | 0.25 day |
 | Integration on simulator + real glasses | 1 day |
 | Hardening (auth, TLS via certbot, systemd, logs, retry buffer) | 0.5–1 day |
-| **Total** | **5.5–7 days** |
+| **Total** | **5.25–6.75 days** |
 
 ## Decisions log + open items
 
@@ -454,7 +466,8 @@ If real OS-level push becomes a requirement, two paths exist:
     exclude_pattern: '^(BotFather|SpamBot|StickerBot|GIF|imdb|gif|vid|pic|youtube|wiki)$'
     ```
     Operator may extend.
-11. **ASR primary = Dashscope.** Benchmarked live 2026-06-02 on Luca's host with a real voice note: Dashscope `qwen2.5-omni-7b` ~1.5 s, OpenAI `whisper-1` ~2.5 s, both accurate, both multilingual (English + Italian verified). Dashscope wins on speed and reuses existing JC key. Whisper kept as resilience fallback only; `fallback_after_seconds: 4` (Dashscope median + buffer).
+11. **ASR location = JC, not the bridge.** Bridge forwards audio as a Telegram voice note via Telethon. JC's existing voice channel (`lib/voice/asr.py`, Dashscope `qwen2.5-omni-7b`) transcribes. Benchmarked live 2026-06-02 on Luca's host: Dashscope ~1.5 s, OpenAI Whisper ~2.5 s, both multilingual, comparable accuracy — no bridge-side ASR advantage. Voice notes archived in the operator's Telegram thread as a bonus. JC voice channel needs a tiny addition: detect "voice from operator user-id in own bot DM" and prepend `[glasses]`.
+12. **Repo split.** Bridge ships in a **separate repo** (`jc-glasses-bridge`) co-locating the Python bridge and the Even Hub TS app. JC monorepo holds the spec (this file) and the small voice-channel `[glasses]` tag wiring. Reasoning: bridge is transport for one input device, not part of agent runtime; TS app doesn't fit Python stack; independent release cadence.
 
 ### Still open / non-blocking
 
@@ -477,8 +490,8 @@ D. **Menu gesture.** Determined during implementation by trial on physical G2. S
 - Even Hub simulator: https://github.com/BxNxM/even-dev
 - Even Demo App (G1, useful for BLE protocol reference): https://github.com/even-realities/EvenDemoApp
 - Telethon docs: https://docs.telethon.dev
-- Dashscope `qwen2.5-omni-7b` multimodal generation: https://help.aliyun.com/zh/dashscope/developer-reference/qwen-omni-api
-- OpenAI Whisper transcription API (fallback): https://platform.openai.com/docs/guides/speech-to-text
+- Telethon `send_file` with voice notes: https://docs.telethon.dev/en/stable/modules/client.html#telethon.client.uploads.UploadMethods.send_file
+- Dashscope `qwen2.5-omni-7b` multimodal generation (used inside JC, not bridge): https://help.aliyun.com/zh/dashscope/developer-reference/qwen-omni-api
 - Existing JC voice ASR: `lib/voice/asr.py`
 - Existing JC gateway config schema: `ops/gateway.yaml`, `docs/specs/unified-gateway-0.3.0-remaining.md`
 - OpenClaw bridge (explicitly NOT used, kept here as the rejected alternative): https://github.com/dAAAb/openclaw-even-g2-bridge-skill
