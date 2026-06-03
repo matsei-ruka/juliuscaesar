@@ -220,6 +220,7 @@ def call_adapter(
     *,
     timeout_seconds: int | None = None,
     push_marker_path: Path | None = None,
+    origin_chat_id: str | None = None,
 ) -> str:
     adapter = ADAPTERS_DIR / f"{tool}.sh"
     if not adapter.exists():
@@ -230,6 +231,16 @@ def call_adapter(
     env["JC_EVENT_SOURCE"] = "cron"
     if push_marker_path is not None:
         env["JC_PUSH_MARKER_PATH"] = str(push_marker_path)
+    # Export ORIGIN_CHAT_ID so any send_telegram.py call inside the task
+    # script inherits the resolved destination without per-call --chat-id
+    # boilerplate. Only set on single-destination tasks (multi-fanout
+    # tasks have no single "origin" — the per-send loop continues to
+    # drive routing via TELEGRAM_CHAT_ID_OVERRIDE). Pop on absence to
+    # prevent leak from a parent shell that already exported it.
+    if origin_chat_id:
+        env["ORIGIN_CHAT_ID"] = str(origin_chat_id)
+    else:
+        env.pop("ORIGIN_CHAT_ID", None)
     proc = subprocess.Popen(
         [str(adapter), model or ""],
         stdin=subprocess.PIPE,
@@ -554,6 +565,20 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         except OSError:
             pass
 
+        # Resolve destinations BEFORE the adapter spawn so we can export
+        # ORIGIN_CHAT_ID into the brain env for single-destination tasks.
+        # Multi-fanout tasks leave it unset (see call_adapter docstring).
+        try:
+            dest_list = resolve_destinations(task, defaults, destinations)
+        except ValueError as e:
+            log_line(f"task {task_name}: destination resolution failed — {e}", log_path)
+            return 1
+        origin_chat_id = (
+            dest_list[0]["chat_id"]
+            if len(dest_list) == 1 and dest_list[0].get("channel") == "telegram"
+            else None
+        )
+
         output = call_adapter(
             tool,
             model,
@@ -562,6 +587,7 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
             log_path,
             timeout_seconds=timeout_seconds,
             push_marker_path=push_marker_path,
+            origin_chat_id=origin_chat_id,
         )
 
         # Capture session ID for next run.
@@ -612,14 +638,10 @@ def run_task(instance_dir: Path, task_name: str, dry_run: bool = False) -> int:
         tag = f"[{task_name} · {ts.strftime('%H:%M')}]"
         body = f"{tag}\n\n{output.strip()}"
 
-        # Resolve destinations. If none configured, fall back to legacy
-        # env-var behavior (send_telegram uses TELEGRAM_CHAT_ID from .env).
-        try:
-            dest_list = resolve_destinations(task, defaults, destinations)
-        except ValueError as e:
-            log_line(f"task {task_name}: destination resolution failed — {e}", log_path)
-            return 1
-
+        # dest_list was resolved above (before call_adapter) so the brain
+        # env got ORIGIN_CHAT_ID. If empty, fall back to legacy env-var
+        # behavior (send_telegram uses TELEGRAM_CHAT_ID from .env, with
+        # deprecation warning per docs/specs/origin-chat-id.md).
         sent_log = state / "sent.log"
 
         if not dest_list:
