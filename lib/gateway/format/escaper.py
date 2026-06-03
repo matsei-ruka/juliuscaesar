@@ -193,4 +193,14 @@ def to_markdown_v2(text: str) -> str:
         idx = int(match.group(1))
         return spans[idx] if 0 <= idx < len(spans) else match.group(0)
 
-    return placeholder_re.sub(_restore, text)
+    # Loop until stable: a stashed span can itself contain placeholders
+    # (e.g. bold wrapping inline-code → bold's stored content embeds the
+    # inline-code placeholder). Iterate until no placeholders remain.
+    # Bounded by len(spans) since each iteration resolves at least one
+    # outer layer.
+    for _ in range(len(spans) + 1):
+        new_text = placeholder_re.sub(_restore, text)
+        if new_text == text:
+            break
+        text = new_text
+    return text
