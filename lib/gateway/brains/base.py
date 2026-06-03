@@ -363,6 +363,16 @@ Your reply is only the text the user reads.
         except OSError:
             pass
         env["JC_PUSH_MARKER_PATH"] = str(push_marker_path)
+        # Export ORIGIN_CHAT_ID so any send_telegram.py call inside the
+        # brain session routes back to the originating chat without the
+        # caller needing --chat-id / TELEGRAM_CHAT_ID_OVERRIDE. Pop on
+        # absence to prevent a previous invocation's value from leaking
+        # into an event that carries no chat_id metadata.
+        chat_id = self._meta(event).get("chat_id")
+        if chat_id:
+            env["ORIGIN_CHAT_ID"] = str(chat_id)
+        else:
+            env.pop("ORIGIN_CHAT_ID", None)
         if resume_session:
             env["JC_RESUME_SESSION"] = resume_session
             env["WORKER_RESUME_SESSION"] = resume_session

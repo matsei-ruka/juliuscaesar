@@ -17,8 +17,15 @@ Instance resolution (in order):
 Precedence for chat_id (highest first):
   1. --chat-id CLI flag
   2. $TELEGRAM_CHAT_ID_OVERRIDE env var
-  3. $TELEGRAM_CHAT_ID env var
-  4. TELEGRAM_CHAT_ID in instance `.env`
+  3. $ORIGIN_CHAT_ID env var (exported by the gateway brain adapter or
+     by the heartbeat runner for single-destination tasks; see
+     docs/specs/origin-chat-id.md)
+  4. $TELEGRAM_CHAT_ID env var          (DEPRECATED — removed next release)
+  5. TELEGRAM_CHAT_ID in instance `.env` (DEPRECATED — removed next release)
+
+When the resolved chat_id comes from one of the two deprecated sources
+a one-shot warning is emitted on stderr so callers surface in logs
+before the silent fallback is removed.
 
 Precedence for bot token (highest first):
   1. --bot-token CLI flag
@@ -165,6 +172,62 @@ def send(
     return str(msg_id)
 
 
+def _load_known_chats(instance: Path) -> list[str]:
+    """Return raw non-empty lines from instance/memory/L1/CHATS.md.
+
+    Returns [] if the file doesn't exist. Used only for the verbose
+    no-chat-id error message; failures are swallowed since the file
+    is best-effort context, not required.
+    """
+    path = instance / "memory" / "L1" / "CHATS.md"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [ln for ln in (l.rstrip() for l in text.splitlines()) if ln.strip()]
+
+
+def _format_no_chat_id_error(instance: Path, *, args) -> str:
+    """Verbose, actionable failure message for the precedence ladder miss."""
+    cli_state = args.chat_id if args.chat_id else "none"
+    override_state = os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE") or "unset"
+    origin_state = os.environ.get("ORIGIN_CHAT_ID") or "unset"
+    lines = [
+        "[send_telegram] ERROR: no chat_id resolved.",
+        f"  Checked: --chat-id ({cli_state}), TELEGRAM_CHAT_ID_OVERRIDE ({override_state}),",
+        f"           ORIGIN_CHAT_ID ({origin_state})",
+    ]
+    chats = _load_known_chats(instance)
+    if chats:
+        lines.append(f"  Known chats (from {instance}/memory/L1/CHATS.md):")
+        for ln in chats:
+            lines.append(f"    {ln}")
+    lines += [
+        "  Fix one of:",
+        "    - Inbound event reply: ensure the gateway brain adapter exported",
+        "      ORIGIN_CHAT_ID (bug in lib/gateway/brains/base.py if absent).",
+        "    - HB / cron task: add `destination:` to the task in tasks.yaml,",
+        "      or wrap the call with `TELEGRAM_CHAT_ID_OVERRIDE=<id>` for",
+        "      one-offs.",
+        "    - Manual one-off: pass --chat-id <id> explicitly.",
+    ]
+    return "\n".join(lines)
+
+
+def _emit_deprecated_telegram_chat_id_warning(source: str) -> None:
+    """One-shot stderr warning when chat_id resolved from the legacy fallback.
+
+    `source` is "$TELEGRAM_CHAT_ID env var" or "TELEGRAM_CHAT_ID in .env".
+    See "Migration notes" in docs/specs/origin-chat-id.md.
+    """
+    sys.stderr.write(
+        f"send_telegram: DEPRECATED — resolved chat_id from {source}. "
+        "This fallback will be removed in the next release. "
+        "Set ORIGIN_CHAT_ID in the caller, pass --chat-id, or export "
+        "TELEGRAM_CHAT_ID_OVERRIDE.\n"
+    )
+
+
 def _write_push_marker(instance: Path, *, chat_id: str, message_id: str, body: str) -> None:
     marker_raw = os.environ.get("JC_PUSH_MARKER_PATH")
     if not marker_raw:
@@ -220,17 +283,28 @@ def main() -> int:
     if not token:
         sys.exit(f"send_telegram: TELEGRAM_BOT_TOKEN not set (define in {env_path})")
 
-    chat_id = (
-        args.chat_id
-        or os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
-        or os.environ.get("TELEGRAM_CHAT_ID")
-        or env.get("TELEGRAM_CHAT_ID")
-    )
-    if not chat_id:
-        sys.exit(
-            f"send_telegram: TELEGRAM_CHAT_ID not set "
-            f"(define in {env_path}, pass --chat-id, or set TELEGRAM_CHAT_ID_OVERRIDE)"
+    # Precedence ladder per docs/specs/origin-chat-id.md. The two legacy
+    # TELEGRAM_CHAT_ID sources stay for one release with a deprecation
+    # warning so misrouting callers surface in logs before removal.
+    chat_id: str | None = None
+    if args.chat_id:
+        chat_id = args.chat_id
+    elif os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE"):
+        chat_id = os.environ["TELEGRAM_CHAT_ID_OVERRIDE"]
+    elif os.environ.get("ORIGIN_CHAT_ID"):
+        chat_id = os.environ["ORIGIN_CHAT_ID"]
+    elif os.environ.get("TELEGRAM_CHAT_ID"):
+        chat_id = os.environ["TELEGRAM_CHAT_ID"]
+        _emit_deprecated_telegram_chat_id_warning("$TELEGRAM_CHAT_ID env var")
+    elif env.get("TELEGRAM_CHAT_ID"):
+        chat_id = env["TELEGRAM_CHAT_ID"]
+        _emit_deprecated_telegram_chat_id_warning(
+            f"TELEGRAM_CHAT_ID in {env_path}"
         )
+
+    if not chat_id:
+        sys.stderr.write(_format_no_chat_id_error(instance, args=args) + "\n")
+        return 1
 
     body = sys.stdin.read()
     if not body.strip():
