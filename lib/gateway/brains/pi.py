@@ -206,13 +206,12 @@ class PiBrain(Brain):
         because no new file is created — diff was empty → returned None →
         footer showed empty session id even though DB had the correct UUID.
         """
-        t0 = parse_iso(started_at)
-        if t0 is None:
+        t0_epoch = parse_iso(started_at)
+        if t0_epoch is None:
             return None
         session_dir = _pi_session_dir(str(self.instance_dir))
         if not session_dir.is_dir():
             return None
-        t0_epoch = t0.timestamp()
         newest: Path | None = None
         newest_mtime = 0.0
         for p in session_dir.glob("*.jsonl"):
