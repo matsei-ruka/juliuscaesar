@@ -155,6 +155,46 @@ class StrikeTests(unittest.TestCase):
         self.assertEqual(to_markdown_v2("~~struck~~"), "~struck~")
 
 
+class NestedSpanTests(unittest.TestCase):
+    """Regression: stashed spans may themselves contain placeholders.
+
+    E.g. **`KEY`** stashes the inline-code first, then bold wraps the
+    placeholder. The final restore pass must recurse until no placeholders
+    remain or NUL tokens leak into the output and Telegram drops the message.
+    """
+
+    def test_bold_around_inline_code(self):
+        self.assertEqual(
+            to_markdown_v2("**`MINIMAX_API_KEY`**"),
+            "*`MINIMAX_API_KEY`*",
+        )
+
+    def test_bold_around_inline_code_with_period(self):
+        self.assertEqual(
+            to_markdown_v2("**`.env`** file"),
+            "*`.env`* file",
+        )
+
+    def test_bold_around_link(self):
+        self.assertEqual(
+            to_markdown_v2("**[docs](https://x.com)**"),
+            "*[docs](https://x.com)*",
+        )
+
+    def test_bold_around_code_in_sentence(self):
+        out = to_markdown_v2("set **`KEY`** in **`.env`** now.")
+        self.assertEqual(out, "set *`KEY`* in *`.env`* now\\.")
+
+    def test_no_nul_bytes_in_output(self):
+        # Any NUL leaking into the output indicates a non-recursive restore.
+        for s in [
+            "**`x`**",
+            "use **`KEY`** here",
+            "**[a](https://b.c)**",
+        ]:
+            self.assertNotIn("\x00", to_markdown_v2(s))
+
+
 class MixedContentTests(unittest.TestCase):
     def test_mix_bold_italic_code_link_period(self):
         out = to_markdown_v2(
