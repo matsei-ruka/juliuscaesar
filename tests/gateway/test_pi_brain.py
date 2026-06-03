@@ -30,7 +30,6 @@ from gateway.brains.pi import (  # noqa: E402
     PiBrain,
     _pi_session_dir,
     _session_has_image_url,
-    _snapshot_session_paths,
     _PI_SESSION_UUID_RE,
 )
 from gateway.config import BrainOverrideConfig, env_value  # noqa: E402
@@ -127,107 +126,97 @@ class PiSessionDirTests(unittest.TestCase):
                 )
 
 
-class PiSnapshotTests(unittest.TestCase):
-    def test_snapshot_empty_when_dir_missing(self) -> None:
-        result = _snapshot_session_paths(Path("/nonexistent/dir"))
-        self.assertEqual(result, frozenset())
-
-    def test_snapshot_captures_existing_files(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "a.jsonl").write_text("{}")
-            (root / "b.jsonl").write_text("{}")
-            (root / "sub").mkdir()
-            (root / "sub" / "c.jsonl").write_text("{}")
-            snap = _snapshot_session_paths(root)
-            self.assertEqual(len(snap), 3)
-
-
 class PiSessionCaptureTests(unittest.TestCase):
+    """Cover mtime-based session capture (set-diff approach was removed
+    because it failed on resume — see pi.py.capture_session_id docstring)."""
+
     UUID = "019e26ac-8834-7582-93d5-e2aec599fe45"
     SESSION_NAME = f"2026-05-14T13-28-21-813Z_{UUID}.jsonl"
+    STARTED_AT = "2026-05-14T13:28:00Z"
+    BEFORE_EPOCH = 1778765000.0  # ~5 min before STARTED_AT
+    AFTER_EPOCH = 1778765500.0  # ~4 min after STARTED_AT
 
-    def test_captures_session_created_by_invocation(self) -> None:
+    @staticmethod
+    def _set_mtime(path: Path, epoch: float) -> None:
+        os.utime(path, (epoch, epoch))
+
+    def test_captures_session_with_mtime_after_started_at(self) -> None:
         with _PiHome("/tmp/my-instance") as home:
-            # pre-existing session
-            home.write_session("2026-05-14T10-old-uuid-11111111-2222-3333-4444-555555555555.jsonl")
+            old = home.write_session(
+                "2026-05-14T10-old-uuid-11111111-2222-3333-4444-555555555555.jsonl"
+            )
+            self._set_mtime(old, self.BEFORE_EPOCH)
+            new = home.write_session(self.SESSION_NAME)
+            self._set_mtime(new, self.AFTER_EPOCH)
+
             brain = PiBrain(Path("/tmp/my-instance"))
-            brain._pre_state = brain.pre_invoke_snapshot()
-
-            # new session created by this invocation
-            home.write_session(self.SESSION_NAME)
-
-            captured = brain.capture_session_id("2026-05-14T13:28:00Z")
+            captured = brain.capture_session_id(self.STARTED_AT)
             self.assertEqual(captured, self.UUID)
 
-    def test_no_new_session_returns_none(self) -> None:
+    def test_no_file_with_mtime_after_started_at_returns_none(self) -> None:
         with _PiHome("/tmp/my-instance") as home:
-            home.write_session("2026-05-14T10-old-uuid-11111111-2222-3333-4444-555555555555.jsonl")
+            stale = home.write_session(
+                "2026-05-14T10-old-uuid-11111111-2222-3333-4444-555555555555.jsonl"
+            )
+            self._set_mtime(stale, self.BEFORE_EPOCH)
+
             brain = PiBrain(Path("/tmp/my-instance"))
-            brain._pre_state = brain.pre_invoke_snapshot()
-            # no new file
-            captured = brain.capture_session_id("2026-05-14T13:28:00Z")
+            captured = brain.capture_session_id(self.STARTED_AT)
             self.assertIsNone(captured)
 
-    def test_multiple_new_files_returns_none(self) -> None:
+    def test_multiple_new_files_returns_newest(self) -> None:
+        # Under mtime semantics the newest file wins (was None under the
+        # removed set-diff approach which couldn't disambiguate).
         with _PiHome("/tmp/my-instance") as home:
-            home.write_session("2026-05-14T10-old-uuid-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl")
+            older = home.write_session(
+                f"2026-05-14T13-28_{'1'*8}-2222-3333-4444-555555555555.jsonl"
+            )
+            self._set_mtime(older, self.AFTER_EPOCH)
+            newer_uuid = f"{'9'*8}-8888-7777-6666-555555555555"
+            newer = home.write_session(f"2026-05-14T13-29_{newer_uuid}.jsonl")
+            self._set_mtime(newer, self.AFTER_EPOCH + 60.0)
+
             brain = PiBrain(Path("/tmp/my-instance"))
-            brain._pre_state = brain.pre_invoke_snapshot()
-
-            # two new files appear (concurrent pi activity)
-            home.write_session(f"2026-05-14T13-28_{'1'*8}-2222-3333-4444-555555555555.jsonl")
-            home.write_session(f"2026-05-14T13-28_{'9'*8}-8888-7777-6666-555555555555.jsonl")
-
-            captured = brain.capture_session_id("2026-05-14T13:28:00Z")
-            self.assertIsNone(captured)
+            captured = brain.capture_session_id(self.STARTED_AT)
+            self.assertEqual(captured, newer_uuid)
 
     def test_filename_not_matching_pattern_returns_none(self) -> None:
         with _PiHome("/tmp/my-instance") as home:
-            home.write_session("old-session.jsonl")
+            bogus = home.write_session("not-a-valid-session-name.jsonl")
+            self._set_mtime(bogus, self.AFTER_EPOCH)
+
             brain = PiBrain(Path("/tmp/my-instance"))
-            brain._pre_state = brain.pre_invoke_snapshot()
-
-            # new file but wrong format
-            home.write_session("not-a-valid-session-name.jsonl")
-
-            captured = brain.capture_session_id("2026-05-14T13:28:00Z")
+            captured = brain.capture_session_id(self.STARTED_AT)
             self.assertIsNone(captured)
 
     def test_empty_sessions_dir_is_safe(self) -> None:
-        with _PiHome("/tmp/my-instance") as home:
+        with _PiHome("/tmp/my-instance"):
             brain = PiBrain(Path("/tmp/my-instance"))
-            brain._pre_state = brain.pre_invoke_snapshot()
-            captured = brain.capture_session_id("2026-05-14T13:28:00Z")
+            captured = brain.capture_session_id(self.STARTED_AT)
             self.assertIsNone(captured)
 
-    def test_pre_existing_sessions_are_ignored(self) -> None:
+    def test_missing_sessions_dir_is_safe(self) -> None:
         with _PiHome("/tmp/my-instance") as home:
-            for i in range(5):
-                home.write_session(
-                    f"2026-05-{i:02d}T10-{i:08d}-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
-                )
+            # Remove the slug dir created by _PiHome.__enter__.
+            home.sessions.rmdir()
             brain = PiBrain(Path("/tmp/my-instance"))
-            brain._pre_state = brain.pre_invoke_snapshot()
-
-            home.write_session(self.SESSION_NAME)
-
-            captured = brain.capture_session_id("2026-05-14T13:28:00Z")
-            self.assertEqual(captured, self.UUID)
+            captured = brain.capture_session_id(self.STARTED_AT)
+            self.assertIsNone(captured)
 
 
 class PiBrainExtraEnvTests(unittest.TestCase):
-    def test_jc_pi_no_tools_defaults_to_1(self) -> None:
+    def test_jc_pi_no_tools_defaults_to_0(self) -> None:
+        # Default is tools-on (parity with claude/codex). See PiBrain._no_tools.
         with tempfile.TemporaryDirectory() as tmp:
             brain = PiBrain(Path(tmp), override=BrainOverrideConfig())
             env = brain.extra_env()
-            self.assertEqual(env["JC_PI_NO_TOOLS"], "1")
-
-    def test_jc_pi_no_tools_respects_config(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            brain = PiBrain(Path(tmp), override=BrainOverrideConfig(no_tools=False))
-            env = brain.extra_env()
             self.assertEqual(env["JC_PI_NO_TOOLS"], "0")
+
+    def test_jc_pi_no_tools_respects_config_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            brain = PiBrain(Path(tmp), override=BrainOverrideConfig(no_tools=True))
+            env = brain.extra_env()
+            self.assertEqual(env["JC_PI_NO_TOOLS"], "1")
 
     def test_injects_api_keys_from_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,13 +264,14 @@ class PiBrainExtraArgsTests(unittest.TestCase):
 
 
 class PiBrainPromptTests(unittest.TestCase):
-    def test_prompt_contains_output_contract(self) -> None:
+    def test_prompt_includes_user_message(self) -> None:
+        # The output contract was moved from the prompt body to the adapter's
+        # --append-system-prompt (see pi.py comment near _find_session_file).
+        # The shell-adapter tests below cover the contract injection; here
+        # we only verify the user message is forwarded.
         with tempfile.TemporaryDirectory() as tmp:
             brain = PiBrain(Path(tmp), override=BrainOverrideConfig())
             prompt = brain.prompt_for_event(_event(content="test message"))
-            self.assertIn("[GATEWAY OUTPUT CONTRACT]", prompt)
-            self.assertIn('"push_message_sent"', prompt)
-            self.assertIn('"message"', prompt)
             self.assertIn("test message", prompt)
 
 
@@ -303,8 +293,12 @@ class PiShellAdapterTests(unittest.TestCase):
     ) -> tuple[list[str], str, int]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
+            # pi.sh hardcodes $HOME/.local/bin, $HOME/.npm-global/bin,
+            # $HOME/.bun/bin ahead of the caller's PATH. Drop the fake into
+            # an isolated HOME so it shadows any real pi on the host.
+            fake_home = root / "home"
+            fake_bin = fake_home / ".local" / "bin"
+            fake_bin.mkdir(parents=True)
             argv_file = root / "argv.txt"
             fake_pi = fake_bin / "pi"
             fake_pi.write_text(
@@ -317,6 +311,7 @@ class PiShellAdapterTests(unittest.TestCase):
             fake_pi.chmod(0o755)
 
             env = os.environ.copy()
+            env["HOME"] = str(fake_home)
             env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
             env["PI_ARGV_FILE"] = str(argv_file)
             if env_overrides:
@@ -349,15 +344,17 @@ class PiShellAdapterTests(unittest.TestCase):
         self.assertIn("--no-prompt-templates", argv)
         self.assertIn("--no-themes", argv)
 
-    def test_default_argv_includes_no_tools(self) -> None:
+    def test_default_argv_omits_no_tools_flag(self) -> None:
+        # JC_PI_SANDBOX defaults to "full" → tools enabled → no --no-tools.
         argv, stdout, rc = self._run_adapter()
-        self.assertIn("--no-tools", argv)
-
-    def test_jc_pi_no_tools_0_disables_no_tools_flag(self) -> None:
-        argv, stdout, rc = self._run_adapter(
-            env_overrides={"JC_PI_NO_TOOLS": "0"}
-        )
         self.assertNotIn("--no-tools", argv)
+        self.assertNotIn("--tools", argv)
+
+    def test_jc_pi_no_tools_1_adds_no_tools_flag(self) -> None:
+        argv, stdout, rc = self._run_adapter(
+            env_overrides={"JC_PI_NO_TOOLS": "1"}
+        )
+        self.assertIn("--no-tools", argv)
 
     def test_model_sonnet_resolves_to_anthropic_claude_sonnet(self) -> None:
         argv, stdout, rc = self._run_adapter(model="sonnet")

@@ -28,7 +28,11 @@ from gateway.triage.factory import build_backend  # noqa: E402
 
 
 def _runtime_with_triage(cfg: TriageConfig):
-    return types.SimpleNamespace(config=GatewayConfig(triage=cfg))
+    return types.SimpleNamespace(
+        config=GatewayConfig(triage=cfg),
+        _brain_failure=types.SimpleNamespace(is_failed=lambda _brain: False),
+        log=lambda *_args, **_kwargs: None,
+    )
 
 
 def _event(content: str = "bad request", meta: dict | None = None) -> Event:

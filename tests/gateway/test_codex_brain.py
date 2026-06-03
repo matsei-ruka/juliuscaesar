@@ -127,8 +127,12 @@ class CodexShellAdapterTests(unittest.TestCase):
     ) -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
+            # Adapter unconditionally prepends $HOME/.local/bin, $HOME/.npm-global/bin,
+            # $HOME/.bun/bin, /usr/local/bin, /usr/bin, /bin to PATH (see codex.sh).
+            # Drop the fake codex inside an isolated HOME so it beats the real binary.
+            fake_home = root / "home"
+            fake_bin = fake_home / ".local" / "bin"
+            fake_bin.mkdir(parents=True)
             argv_file = root / "argv.txt"
             fake_codex = fake_bin / "codex"
             fake_codex.write_text(
@@ -141,6 +145,7 @@ class CodexShellAdapterTests(unittest.TestCase):
             fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR)
 
             env = os.environ.copy()
+            env["HOME"] = str(fake_home)
             env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
             env["CODEX_ARGV_FILE"] = str(argv_file)
             if sandbox is None:
