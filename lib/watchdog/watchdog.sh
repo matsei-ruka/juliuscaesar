@@ -188,9 +188,11 @@ our_claude_pids() {
 #
 # Only runs when TELEGRAM_BOT_TOKEN is set — instances that don't use telegram
 # shouldn't trip this check.
+# Set TELEGRAM_PLUGIN_ENABLED=0 in ops/watchdog.conf to disable on gateway-mode
+# instances that use jc-gateway for Telegram instead of the bun plugin.
 
 telegram_plugin_expected() {
-    [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]
+    [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && [[ "${TELEGRAM_PLUGIN_ENABLED:-1}" != "0" ]]
 }
 
 telegram_plugin_process_alive() {
