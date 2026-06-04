@@ -289,10 +289,36 @@ def cmd_login(args: argparse.Namespace) -> int:
         print("QR sent to Telegram.")
         return 0
 
-    # Default: start sidecar interactively (QR rendered to terminal)
-    print("Starting sidecar in interactive mode. Scan the QR from WhatsApp → Linked Devices.")
-    print("Press Ctrl+C to stop after scanning.")
-    print()
+    # Default: start sidecar interactively, render each QR event as ASCII in the
+    # terminal. Baileys auto-refreshes the QR roughly every 60s — each new
+    # `{"type":"qr",...}` event triggers a fresh render so the user always sees
+    # a valid code without restarting the command.
+    try:
+        import qrcode  # type: ignore
+    except ImportError:
+        print("qrcode[pil] package required to render the QR in the terminal.")
+        print("Install: pip install qrcode[pil]")
+        return 1
+
+    def _render_qr(qr_str: str, attempt: int) -> None:
+        # ANSI clear-screen + cursor home; harmless on dumb terminals (they
+        # just show the escape sequence as text).
+        sys.stdout.write("\x1b[2J\x1b[H")
+        sys.stdout.flush()
+        print(f"WhatsApp login — account: {account_id}")
+        print(f"Instance: {instance}")
+        print(f"QR attempt #{attempt} (auto-refreshes ~60s; Ctrl+C to abort)")
+        print()
+        qr_obj = qrcode.QRCode(border=1)
+        qr_obj.add_data(qr_str)
+        qr_obj.make(fit=True)
+        # invert=True renders dark modules as spaces on light background — the
+        # standard pattern WhatsApp's scanner expects.
+        qr_obj.print_ascii(out=sys.stdout, invert=True)
+        print()
+        print("Open WhatsApp → Settings → Linked Devices → Link a Device, then scan.")
+
+    print("Starting sidecar… waiting for QR.")
     env = os.environ.copy()
     env.setdefault("NODE_ENV", "production")
 
@@ -305,15 +331,29 @@ def cmd_login(args: argparse.Namespace) -> int:
         env=env,
     )
 
+    qr_attempt = 0
+    last_qr: str | None = None
     try:
         for line in proc.stdout:
             line = line.strip()
-            print(f"[sidecar] {line}")
+            if not line:
+                continue
             try:
                 evt = json.loads(line)
             except json.JSONDecodeError:
+                # Non-JSON noise (sidecar log lines) — surface to stderr so it
+                # doesn't clobber the rendered QR.
+                print(f"[sidecar] {line}", file=sys.stderr)
                 continue
-            if evt.get("type") == "connection":
+            etype = evt.get("type")
+            if etype == "qr":
+                qr_str = str(evt.get("qr", ""))
+                if not qr_str or qr_str == last_qr:
+                    continue
+                last_qr = qr_str
+                qr_attempt += 1
+                _render_qr(qr_str, qr_attempt)
+            elif etype == "connection":
                 state = evt.get("state", "")
                 if state == "open":
                     print(f"\nConnected as {evt.get('self_jid', 'unknown')}!")
@@ -322,7 +362,16 @@ def cmd_login(args: argparse.Namespace) -> int:
                 elif state == "logged_out":
                     print("\nLogged out by WhatsApp. Try again.")
                     break
-            elif evt.get("type") == "error" and evt.get("fatal"):
+                elif state == "connecting":
+                    print("Connecting to WhatsApp servers…", file=sys.stderr)
+                elif state == "close":
+                    reason = evt.get("reason", "unknown")
+                    if evt.get("will_reconnect"):
+                        print(f"[sidecar] connection closed ({reason}) — reconnecting", file=sys.stderr)
+                    else:
+                        print(f"\nConnection closed without reconnect: {reason}")
+                        break
+            elif etype == "error" and evt.get("fatal"):
                 print(f"\nFatal error: {evt.get('reason')}")
                 break
     except KeyboardInterrupt:
