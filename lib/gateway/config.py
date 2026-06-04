@@ -299,6 +299,9 @@ DEFAULT_CONFIG = GatewayConfig(
             max_new_per_tick=5,
             inbox_status_filter=("pending", "accepted"),
         ),
+        "whatsapp": ChannelConfig(
+            enabled=False,
+        ),
     }
 )
 
