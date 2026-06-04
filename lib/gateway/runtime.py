@@ -1012,6 +1012,16 @@ class GatewayRuntime:
 
         if related is not None and 0 <= related < max_concurrent:
             if related in busy:
+                # When the busy related slot holds a backgrounded session, the new
+                # inbound is a fresh primary — route it to a free slot instead of
+                # queuing behind the background task indefinitely.
+                if free and self.config.actions.enabled and actions_registry.has_backgrounded_for_conversation(conv):
+                    picked = self._lru_free_slot(channel, conv, free)
+                    self.log(
+                        f"slot pick id={event.id} related={related} busy=yes backgrounded → free={picked}",
+                        kind="slot_pick",
+                    )
+                    return picked, False
                 self.log(
                     f"slot pick id={event.id} related={related} busy=yes → queue",
                     kind="slot_pick",
