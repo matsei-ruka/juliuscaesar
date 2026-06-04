@@ -56,7 +56,7 @@ def _pid_finding(
     pidfile: Path,
     *,
     label: str,
-    cmdline_marker: str,
+    cmdline_markers: "list[str]",
 ) -> Finding:
     if not pidfile.exists():
         return Finding("info", f"{label} pidfile absent ({pidfile})")
@@ -80,24 +80,29 @@ def _pid_finding(
     if cmdline is None:
         # Can't introspect (no /proc); trust the kill(0) signal.
         return Finding("ok", f"{label} running (pid {pid}, cmdline unverifiable)")
-    if cmdline_marker not in cmdline:
+    if not any(m in cmdline for m in cmdline_markers):
+        marker_repr = " or ".join(repr(m) for m in cmdline_markers)
         return Finding(
             "fail",
             f"{label} PID {pid} belongs to a different process "
-            f"(cmdline missing {cmdline_marker!r})",
+            f"(cmdline missing {marker_repr})",
         )
     return Finding("ok", f"{label} running (pid {pid})")
 
 
 def gateway_pid_finding(instance_dir: Path) -> Finding:
     pidfile = instance_dir / "state" / "gateway" / "jc-gateway.pid"
-    return _pid_finding(pidfile, label="gateway daemon", cmdline_marker="jc-gateway")
+    return _pid_finding(pidfile, label="gateway daemon", cmdline_markers=["jc-gateway"])
 
 
 def supervisor_pid_finding(instance_dir: Path) -> Finding:
     pidfile = instance_dir / "state" / "supervisor" / "jc-supervisor.pid"
+    # The watch worker runs via `exec python3 - <instance_dir> <interval>` so its
+    # cmdline won't contain "jc-supervisor" — accept the instance path as fallback.
     return _pid_finding(
-        pidfile, label="supervisor daemon", cmdline_marker="jc-supervisor"
+        pidfile,
+        label="supervisor daemon",
+        cmdline_markers=["jc-supervisor", str(instance_dir)],
     )
 
 
