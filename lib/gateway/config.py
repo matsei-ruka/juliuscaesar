@@ -15,7 +15,7 @@ from . import brain_spec as _brain_spec
 
 SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider", "pi")
 SUPPORTED_UNSAFE_FALLBACK_BRAINS = (*SUPPORTED_BRAINS, "openrouter")
-SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email", "company-inbox")
+SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email", "company-inbox", "whatsapp")
 SUPPORTED_TRIAGE_BACKENDS = (
     "none",
     "always",
@@ -858,6 +858,8 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 "inbox_status_filter",
                 "max_new_per_tick",
                 "emit_task_closed",
+                # whatsapp channel: nested per-account dicts validated lazily by the channel itself.
+                "accounts",
             }
             for raw_key, raw_value in channels_raw.items():
                 normalized = _normalize_channel_key(str(raw_key))

@@ -15,6 +15,7 @@ from .jc_events import JcEventsChannel
 from .slack import SlackSocketModeChannel
 from .telegram import TelegramChannel
 from .voice import VoiceChannel
+from .whatsapp import WhatsAppChannel
 
 
 _CHANNEL_FACTORIES = {
@@ -26,6 +27,7 @@ _CHANNEL_FACTORIES = {
     "cron": CronChannel,
     "email": EmailChannel,
     "company-inbox": CompanyInboxChannel,
+    "whatsapp": WhatsAppChannel,
 }
 
 
