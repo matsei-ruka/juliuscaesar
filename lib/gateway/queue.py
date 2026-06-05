@@ -278,6 +278,48 @@ def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> list
     return ids
 
 
+def renew_lease(
+    conn: sqlite3.Connection,
+    event_ids: int | Iterable[int],
+    *,
+    worker_id: str,
+    lease_seconds: int = 300,
+) -> int:
+    """Bump ``locked_until`` forward for events still owned by ``worker_id``.
+
+    Returns the number of rows whose lease was successfully extended. A return
+    of ``0`` means the worker has lost the lease (event already requeued by
+    ``requeue_expired`` and re-claimed elsewhere, or completed). Callers should
+    treat ``0`` as a signal to stop heartbeating and abandon any pending write.
+
+    The guard is ``status='running' AND locked_by=?`` — identical to the guard
+    used by ``complete`` and ``fail`` (Bug #4) — so a stale worker cannot bump
+    the lease of a row that a fresh claimant now owns.
+    """
+
+    if isinstance(event_ids, int):
+        ids: list[int] = [event_ids]
+    else:
+        ids = [int(eid) for eid in event_ids]
+    if not ids:
+        return 0
+    now = now_iso()
+    new_until = add_seconds(now, lease_seconds)
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"""
+        UPDATE events
+        SET locked_until=?
+        WHERE id IN ({placeholders})
+          AND status='running'
+          AND locked_by=?
+        """,
+        (new_until, *ids, worker_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def claim_next(
     conn: sqlite3.Connection,
     *,

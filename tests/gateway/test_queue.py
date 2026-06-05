@@ -460,5 +460,139 @@ class CompleteFailStatusGuardTests(unittest.TestCase):
             conn.close()
 
 
+class RenewLeaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-renew-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _claim_one(self, conn, *, worker: str = "w-a", lease: int = 300):
+        event, _ = queue.enqueue(
+            conn,
+            source="telegram",
+            source_message_id="rl1",
+            conversation_id="c",
+            content="hi",
+            user_id="u",
+        )
+        claimed = queue.claim_next(conn, worker_id=worker, lease_seconds=lease)
+        assert claimed is not None and claimed.id == event.id
+        return claimed
+
+    def test_renew_extends_locked_until_for_owner(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            claimed = self._claim_one(conn, lease=60)
+            original_until = claimed.locked_until
+            renewed = queue.renew_lease(
+                conn, claimed.id, worker_id="w-a", lease_seconds=600
+            )
+            self.assertEqual(renewed, 1)
+            row = conn.execute(
+                "SELECT locked_until, status, locked_by FROM events WHERE id=?",
+                (claimed.id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertEqual(row["locked_by"], "w-a")
+            self.assertNotEqual(row["locked_until"], original_until)
+            self.assertGreater(row["locked_until"], original_until)
+        finally:
+            conn.close()
+
+    def test_renew_refuses_when_not_owner(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            claimed = self._claim_one(conn, worker="w-a")
+            renewed = queue.renew_lease(
+                conn, claimed.id, worker_id="w-b", lease_seconds=300
+            )
+            self.assertEqual(renewed, 0)
+            row = conn.execute(
+                "SELECT locked_by FROM events WHERE id=?", (claimed.id,)
+            ).fetchone()
+            self.assertEqual(row["locked_by"], "w-a")
+        finally:
+            conn.close()
+
+    def test_renew_refuses_after_complete(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            claimed = self._claim_one(conn)
+            queue.complete(
+                conn, claimed.id, response="ok", expected_locked_by="w-a"
+            )
+            renewed = queue.renew_lease(
+                conn, claimed.id, worker_id="w-a", lease_seconds=300
+            )
+            self.assertEqual(renewed, 0)
+        finally:
+            conn.close()
+
+    def test_renew_after_lease_lost_to_other_worker(self) -> None:
+        """Simulates the bug we're fixing: lease expires, another worker claims
+        the row, and the original worker's heartbeat must NOT bump the new
+        owner's lease."""
+        conn = queue.connect(self.tmp)
+        try:
+            claimed = self._claim_one(conn, worker="w-a", lease=1)
+            # Force expiry then re-claim by a different worker via the public API
+            conn.execute(
+                "UPDATE events SET locked_until=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", claimed.id),
+            )
+            conn.commit()
+            new_claim = queue.claim_next(conn, worker_id="w-b", lease_seconds=300)
+            self.assertIsNotNone(new_claim)
+            assert new_claim is not None
+            self.assertEqual(new_claim.id, claimed.id)
+            # w-a now tries to heartbeat — must be rejected.
+            renewed = queue.renew_lease(
+                conn, claimed.id, worker_id="w-a", lease_seconds=300
+            )
+            self.assertEqual(renewed, 0)
+            row = conn.execute(
+                "SELECT locked_by FROM events WHERE id=?", (claimed.id,)
+            ).fetchone()
+            self.assertEqual(row["locked_by"], "w-b")
+        finally:
+            conn.close()
+
+    def test_renew_batch_renews_only_owned_rows(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            a, _ = queue.enqueue(
+                conn, source="telegram", source_message_id="a",
+                conversation_id="c1", content="a", user_id="u",
+            )
+            b, _ = queue.enqueue(
+                conn, source="telegram", source_message_id="b",
+                conversation_id="c1", content="b", user_id="u",
+            )
+            batch = queue.claim_batch_same_conversation(
+                conn, worker_id="w-a", lease_seconds=60
+            )
+            self.assertEqual(len(batch), 2)
+            # Hand row b to a different worker by directly mutating.
+            conn.execute(
+                "UPDATE events SET locked_by='w-b' WHERE id=?", (b.id,)
+            )
+            conn.commit()
+            renewed = queue.renew_lease(
+                conn, [a.id, b.id], worker_id="w-a", lease_seconds=600
+            )
+            self.assertEqual(renewed, 1)
+        finally:
+            conn.close()
+
+    def test_renew_empty_input_is_noop(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            self.assertEqual(
+                queue.renew_lease(conn, [], worker_id="w", lease_seconds=300),
+                0,
+            )
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

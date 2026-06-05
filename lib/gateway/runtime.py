@@ -234,6 +234,77 @@ def _lib_dir_newest_mtime(lib_dir: Path) -> tuple[float, str]:
     return newest_mtime, newest_name
 
 
+class _LeaseHeartbeat:
+    """Background thread that renews a SQLite queue lease while a brain call
+    runs. Stops on ``__exit__`` or when the lease is lost (row no longer owned
+    by ``worker_id``).
+
+    Interval is ``max(30, lease_seconds // 3)`` — renewing roughly three times
+    per lease window keeps the row owned without spamming the DB.
+    """
+
+    def __init__(
+        self,
+        *,
+        instance_dir: Path,
+        event_ids: list[int],
+        worker_id: str,
+        lease_seconds: int,
+        log: Callable[..., None],
+    ) -> None:
+        self._instance_dir = instance_dir
+        self._event_ids = list(event_ids)
+        self._worker_id = worker_id
+        self._lease_seconds = lease_seconds
+        self._log = log
+        self._interval = max(30.0, float(lease_seconds) / 3.0)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_LeaseHeartbeat":
+        if not self._event_ids or self._lease_seconds <= 0:
+            return self
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"gateway-lease-hb-{','.join(str(i) for i in self._event_ids[:3])}",
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                conn = queue.connect(self._instance_dir)
+                try:
+                    renewed = queue.renew_lease(
+                        conn,
+                        self._event_ids,
+                        worker_id=self._worker_id,
+                        lease_seconds=self._lease_seconds,
+                    )
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001
+                self._log(
+                    f"lease heartbeat error ids={self._event_ids} error={exc}",
+                    kind="lease_hb_error",
+                )
+                continue
+            if renewed == 0:
+                self._log(
+                    f"lease heartbeat lost ids={self._event_ids} "
+                    f"worker={self._worker_id} — stopping heartbeat",
+                    kind="lease_hb_lost",
+                )
+                return
+
+
 class GatewayRuntime:
     HEARTBEAT_INTERVAL_SECONDS = 5.0
     TRIAGE_REJECTION_MESSAGE = (
@@ -622,7 +693,8 @@ class GatewayRuntime:
             self._dispatch_parallel(event)
             return True
         try:
-            response = self.process_event(event)
+            with self._lease_heartbeat(batch_ids):
+                response = self.process_event(event)
             conn2 = queue.connect(self.instance_dir)
             try:
                 for eid in batch_ids:
@@ -1334,6 +1406,24 @@ class GatewayRuntime:
             "No prose, no Markdown, no explanation."
         )
 
+    def _lease_heartbeat(self, event_ids: list[int]) -> "_LeaseHeartbeat":
+        """Context manager that renews the SQLite queue lease for ``event_ids``
+        every ``lease_seconds / 3`` while the body runs.
+
+        Without this, long brain invocations (>lease_seconds) trip
+        ``requeue_expired`` mid-call, the row flips back to ``queued``, and
+        another slot claims + dispatches the same event a second time. The
+        observed symptom is duplicate replies on the channel.
+        """
+
+        return _LeaseHeartbeat(
+            instance_dir=self.instance_dir,
+            event_ids=list(event_ids),
+            worker_id=self.worker_id,
+            lease_seconds=self.config.lease_seconds,
+            log=self.log,
+        )
+
     def _dispatch_parallel(self, event: queue.Event) -> None:
         """Slot-aware dispatch for a single claimed event.
 
@@ -1387,7 +1477,8 @@ class GatewayRuntime:
 
         try:
             self._persist_slot_in_meta(event, slot)
-            response = self.process_event(event, slot=slot)
+            with self._lease_heartbeat([event.id]):
+                response = self.process_event(event, slot=slot)
             conn = queue.connect(self.instance_dir)
             try:
                 try:
