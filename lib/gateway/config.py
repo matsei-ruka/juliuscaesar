@@ -11,6 +11,8 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import brain_spec as _brain_spec
+from .lifecycle.profiles import ProfileRegistry
+from .lifecycle.routing import Reserves, Thresholds
 
 
 SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider", "pi")
@@ -222,6 +224,41 @@ class AdaptiveDiscoveryConfig:
 
 
 @dataclass(frozen=True)
+class NativeCompactionConfig:
+    enabled: bool = True
+    fallback_to_rotation: bool = True
+
+
+@dataclass(frozen=True)
+class SessionLifecycleConfig:
+    """§9 — context-aware session lifecycle.
+
+    `model_profiles` is the raw operator override block; the resolved
+    `ProfileRegistry` is built lazily via `registry()` so the dataclass stays
+    hashable/frozen. Disabled by default — `enabled: false` preserves current
+    behavior except that context-limit errors still stop generic retry
+    amplification (§23).
+    """
+
+    enabled: bool = False
+    thresholds: Thresholds = field(default_factory=Thresholds)
+    reserves: Reserves = field(default_factory=Reserves)
+    native_compaction: NativeCompactionConfig = field(default_factory=NativeCompactionConfig)
+    model_profiles: tuple[tuple[str, Any], ...] = ()
+
+    def registry(self) -> ProfileRegistry:
+        raw = {key: value for key, value in self.model_profiles}
+        return ProfileRegistry.from_config(raw or None)
+
+
+@dataclass(frozen=True)
+class CompactionNotifyConfig:
+    """§18.1 — operator notification on compaction. Default on."""
+
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     default_brain: str = "claude"
     default_model: str | None = None
@@ -248,6 +285,8 @@ class GatewayConfig:
     )
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     actions: ActionsConfig = field(default_factory=ActionsConfig)
+    session_lifecycle: SessionLifecycleConfig = field(default_factory=SessionLifecycleConfig)
+    compaction_notify: CompactionNotifyConfig = field(default_factory=CompactionNotifyConfig)
 
     def channel(self, name: str) -> ChannelConfig:
         return self.channels.get(name, ChannelConfig())
@@ -596,6 +635,8 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "supervisor",
         "parallel",
         "actions",
+        "session_lifecycle",
+        "compaction_notify",
     }
     for key in data:
         if key not in allowed_top:
@@ -1275,8 +1316,106 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
             ):
                 errors.append("actions.suppress_background_tool_messages: must be boolean")
 
+    _validate_session_lifecycle(errors, data.get("session_lifecycle"))
+
+    compaction_notify_raw = data.get("compaction_notify")
+    if compaction_notify_raw is not None:
+        if not isinstance(compaction_notify_raw, dict):
+            errors.append("compaction_notify: must be a mapping")
+        else:
+            for key in compaction_notify_raw:
+                if key != "enabled":
+                    errors.append(f"compaction_notify.{key}: unknown field")
+            if compaction_notify_raw.get("enabled") is not None and not isinstance(
+                compaction_notify_raw["enabled"], bool
+            ):
+                errors.append("compaction_notify.enabled: must be boolean")
+
     if errors:
         raise ConfigError("; ".join(errors))
+
+
+def _validate_session_lifecycle(errors: list[str], raw: Any) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        errors.append("session_lifecycle: must be a mapping")
+        return
+    allowed = {
+        "enabled",
+        "thresholds",
+        "reserves",
+        "native_compaction",
+        "model_profiles",
+        "idle",
+        "checkpoint",
+        "fallback_limits",
+        "tool_results",
+    }
+    for key in raw:
+        if key not in allowed:
+            errors.append(f"session_lifecycle.{key}: unknown field")
+    if raw.get("enabled") is not None and not isinstance(raw["enabled"], bool):
+        errors.append("session_lifecycle.enabled: must be boolean")
+
+    th = raw.get("thresholds")
+    if th is not None:
+        if not isinstance(th, dict):
+            errors.append("session_lifecycle.thresholds: must be a mapping")
+        else:
+            try:
+                candidate = Thresholds(
+                    observe_ratio=float(th.get("observe_ratio", Thresholds().observe_ratio)),
+                    idle_maintenance_ratio=float(
+                        th.get("idle_maintenance_ratio", Thresholds().idle_maintenance_ratio)
+                    ),
+                    rotate_ratio=float(th.get("rotate_ratio", Thresholds().rotate_ratio)),
+                    emergency_ratio=float(
+                        th.get("emergency_ratio", Thresholds().emergency_ratio)
+                    ),
+                )
+            except (TypeError, ValueError):
+                errors.append("session_lifecycle.thresholds: ratios must be numbers")
+            else:
+                for msg in candidate.validate():
+                    errors.append(f"session_lifecycle.thresholds.{msg}")
+
+    rv = raw.get("reserves")
+    if rv is not None:
+        if not isinstance(rv, dict):
+            errors.append("session_lifecycle.reserves: must be a mapping")
+        else:
+            try:
+                candidate_rv = Reserves(
+                    output_tokens=int(rv.get("output_tokens", Reserves().output_tokens)),
+                    turn_input_tokens=int(
+                        rv.get("turn_input_tokens", Reserves().turn_input_tokens)
+                    ),
+                )
+            except (TypeError, ValueError):
+                errors.append("session_lifecycle.reserves: must be integers")
+            else:
+                for msg in candidate_rv.validate():
+                    errors.append(f"session_lifecycle.reserves.{msg}")
+
+    profiles = raw.get("model_profiles")
+    if profiles is not None and not isinstance(profiles, dict):
+        errors.append("session_lifecycle.model_profiles: must be a mapping")
+    elif isinstance(profiles, dict):
+        for pkey, spec in profiles.items():
+            if not isinstance(spec, dict):
+                errors.append(f"session_lifecycle.model_profiles.{pkey}: must be a mapping")
+                continue
+            cap = spec.get("input_capacity_tokens")
+            if cap is not None:
+                _validate_positive_int(
+                    errors, f"session_lifecycle.model_profiles.{pkey}.input_capacity_tokens", cap
+                )
+            for flag in ("extended_context", "enabled", "allow_capacity_upgrade", "requires_credits"):
+                if spec.get(flag) is not None and not isinstance(spec[flag], bool):
+                    errors.append(
+                        f"session_lifecycle.model_profiles.{pkey}.{flag}: must be boolean"
+                    )
 
 
 def validate_config(instance_dir: Path) -> GatewayConfig:
@@ -1596,6 +1735,49 @@ def _load_actions(data: dict[str, Any]) -> ActionsConfig:
     )
 
 
+def _load_session_lifecycle(data: dict[str, Any]) -> SessionLifecycleConfig:
+    raw = data.get("session_lifecycle") if isinstance(data.get("session_lifecycle"), dict) else {}
+    defaults = SessionLifecycleConfig()
+    th_raw = raw.get("thresholds") if isinstance(raw.get("thresholds"), dict) else {}
+    thresholds = Thresholds(
+        observe_ratio=float(th_raw.get("observe_ratio", defaults.thresholds.observe_ratio)),
+        idle_maintenance_ratio=float(
+            th_raw.get("idle_maintenance_ratio", defaults.thresholds.idle_maintenance_ratio)
+        ),
+        rotate_ratio=float(th_raw.get("rotate_ratio", defaults.thresholds.rotate_ratio)),
+        emergency_ratio=float(th_raw.get("emergency_ratio", defaults.thresholds.emergency_ratio)),
+    )
+    rv_raw = raw.get("reserves") if isinstance(raw.get("reserves"), dict) else {}
+    reserves = Reserves(
+        output_tokens=int(rv_raw.get("output_tokens", defaults.reserves.output_tokens)),
+        turn_input_tokens=int(rv_raw.get("turn_input_tokens", defaults.reserves.turn_input_tokens)),
+    )
+    nc_raw = raw.get("native_compaction") if isinstance(raw.get("native_compaction"), dict) else {}
+    native_compaction = NativeCompactionConfig(
+        enabled=bool(nc_raw.get("enabled", defaults.native_compaction.enabled)),
+        fallback_to_rotation=bool(
+            nc_raw.get("fallback_to_rotation", defaults.native_compaction.fallback_to_rotation)
+        ),
+    )
+    profiles_raw = raw.get("model_profiles") if isinstance(raw.get("model_profiles"), dict) else {}
+    model_profiles = tuple(
+        (str(key), value) for key, value in profiles_raw.items() if isinstance(value, dict)
+    )
+    return SessionLifecycleConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        thresholds=thresholds,
+        reserves=reserves,
+        native_compaction=native_compaction,
+        model_profiles=model_profiles,
+    )
+
+
+def _load_compaction_notify(data: dict[str, Any]) -> CompactionNotifyConfig:
+    raw = data.get("compaction_notify") if isinstance(data.get("compaction_notify"), dict) else {}
+    defaults = CompactionNotifyConfig()
+    return CompactionNotifyConfig(enabled=bool(raw.get("enabled", defaults.enabled)))
+
+
 def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     raw = data.get("reliability") if isinstance(data.get("reliability"), dict) else {}
     backoff = raw.get("backoff_seconds") or data.get("event_retry_backoff_seconds")
@@ -1714,6 +1896,8 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         adaptive_discovery=_load_adaptive_discovery(data),
         parallel=_load_parallel(data),
         actions=_load_actions(data),
+        session_lifecycle=_load_session_lifecycle(data),
+        compaction_notify=_load_compaction_notify(data),
     )
 
 
@@ -1773,6 +1957,25 @@ triage_routing:
   image: claude:sonnet-4-6
   voice: claude:sonnet-4-6
   system: claude:haiku-4-5
+# session_lifecycle: context-aware session lifecycle (docs/specs/context-aware-session-lifecycle.md).
+# Disabled by default — context-limit errors still stop generic retry amplification.
+# Enable to measure context pressure and rotate provider sessions before they exhaust.
+session_lifecycle:
+  enabled: false
+  thresholds:
+    observe_ratio: 0.50
+    idle_maintenance_ratio: 0.60
+    rotate_ratio: 0.70
+    emergency_ratio: 0.85
+  reserves:
+    output_tokens: 16000
+    turn_input_tokens: 12000
+  native_compaction:
+    enabled: true
+    fallback_to_rotation: true
+# compaction_notify: Telegram message to the operator's main chat on every compaction.
+compaction_notify:
+  enabled: true
 channels:
   telegram:
     enabled: {str(telegram_enabled).lower()}
