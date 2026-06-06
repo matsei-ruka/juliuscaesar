@@ -5,6 +5,27 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.06.06.1
+
+Codex brain: honor `CODEX_HOME` when capturing session ids.
+
+- `lib/gateway/brains/codex.py:_session_root()` now reads `CODEX_HOME`
+  (via `env_value(instance_dir, "CODEX_HOME")`, which falls through to
+  the process env because `CODEX_*` is reserved) before defaulting to
+  `~/.codex/`. Previously the adapter hard-coded `Path.home() / ".codex"`,
+  so any instance whose `.env` redirected Codex state had
+  `capture_session_id()` always return `None`. Effect: zero rows ever
+  persisted to the `sessions` table → every dispatch ran with
+  `resume=no` → no conversational memory across turns → footer card
+  showed "no session" indefinitely.
+- Detected on `sofia_almeida` (VM 122): 411 events processed, 0 sessions
+  persisted; codex wrote rollout JSONL to
+  `/home/jc/sofia_almeida/.codex/sessions/` while adapter snapshotted
+  `/home/jc/.codex/sessions/` (empty).
+- `pre_invoke_snapshot()` and `capture_session_id()` pass
+  `self.instance_dir` into `_session_root()`. Regression test added in
+  `tests/gateway/test_codex_sessions.py::test_codex_home_env_redirects_session_root`.
+
 ## 2026.05.17.05
 
 Supervisor: delete card on completion, simplified format, real brain signal.

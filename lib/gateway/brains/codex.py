@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from ..config import env_value
@@ -9,13 +10,20 @@ from ..queue import Event
 from .base import Brain, UUID_RE
 
 
-def _session_root() -> Path:
+def _session_root(instance_dir: Path | None = None) -> Path:
     """Return the directory Codex writes per-session JSONL into.
 
-    Modern Codex puts these under `~/.codex/sessions/`. Older builds wrote
-    directly to `~/.codex/`. Fall back so capture works on both.
+    Honors `CODEX_HOME` so multi-instance hosts that redirect Codex state
+    away from `~/.codex/` (via instance `.env` sourced into the gateway
+    process) still get session capture. Falls back to `~/.codex/`. Modern
+    Codex nests under `<base>/sessions/`; older builds wrote directly to
+    `<base>/`.
     """
-    base = Path.home() / ".codex"
+    if instance_dir is not None:
+        codex_home = env_value(instance_dir, "CODEX_HOME")
+    else:
+        codex_home = os.environ.get("CODEX_HOME", "")
+    base = Path(codex_home) if codex_home else Path.home() / ".codex"
     nested = base / "sessions"
     return nested if nested.is_dir() else base
 
@@ -72,7 +80,7 @@ class CodexBrain(Brain):
         global scan that could pick up an unrelated session created by a
         concurrent Codex process.
         """
-        return _snapshot_session_paths(_session_root())
+        return _snapshot_session_paths(_session_root(self.instance_dir))
 
     def capture_session_id(self, started_at: str) -> str | None:
         """Return the session id created by this invocation, or None.
@@ -93,7 +101,7 @@ class CodexBrain(Brain):
         before = getattr(self, "_pre_state", None)
         if not isinstance(before, frozenset):
             before = frozenset()
-        after = _snapshot_session_paths(_session_root())
+        after = _snapshot_session_paths(_session_root(self.instance_dir))
         new_paths = after - before
         if not new_paths or len(new_paths) > 1:
             return None

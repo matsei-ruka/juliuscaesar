@@ -111,6 +111,31 @@ class CodexSessionCaptureTests(unittest.TestCase):
                 brain._pre_state = brain.pre_invoke_snapshot()
                 self.assertIsNone(brain.capture_session_id("2026-05-01T10:00:00Z"))
 
+    def test_codex_home_env_redirects_session_root(self):
+        """When CODEX_HOME points at a non-HOME location, snapshots follow it.
+
+        Multi-instance hosts set CODEX_HOME=<instance>/.codex to isolate
+        Codex state per instance. The adapter must snapshot that directory,
+        not `~/.codex/`, otherwise capture always returns None and the
+        sessions table stays empty.
+        """
+        with tempfile.TemporaryDirectory() as home_tmp, \
+                tempfile.TemporaryDirectory() as codex_tmp:
+            codex_sessions = Path(codex_tmp) / "sessions"
+            codex_sessions.mkdir(parents=True)
+            env_patch = {"HOME": home_tmp, "CODEX_HOME": codex_tmp}
+            with mock.patch.dict(os.environ, env_patch):
+                brain = CodexBrain(Path.cwd())
+                brain._pre_state = brain.pre_invoke_snapshot()
+
+                new_uuid = "deadbeef-dead-beef-dead-beefdeadbeef"
+                rollout = codex_sessions / f"rollout-2026-06-06T05-{new_uuid}.jsonl"
+                rollout.write_text("{}", encoding="utf-8")
+
+                self.assertEqual(
+                    brain.capture_session_id("2026-06-06T05:00:00Z"),
+                    new_uuid,
+                )
 
 if __name__ == "__main__":
     unittest.main()
