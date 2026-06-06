@@ -848,26 +848,55 @@ session. Context-lifecycle errors use the dedicated recovery path in section
 
 ## 17. Context-specific recovery
 
-Add recovery classifications:
+### 17.1 Classification policy — model-decided, not regex-pinned
 
-```text
-context_exhausted
-context_profile_unavailable
-```
+Classification of adapter failures is the responsibility of the existing
+recovery classifier (`lib/gateway/recovery/classifier.py`). That classifier is
+the single source of truth: it routes a small set of high-confidence,
+provider-stable strings via a cheap regex prefilter and delegates every other
+stderr to an LLM (the same OpenRouter triage backend used elsewhere).
 
-Deterministic signatures include:
+Context-lifecycle errors **must be added as new categories on the LLM side**,
+not as new regex rules. Rationale:
 
-- `Prompt is too long`;
-- `context window exceeded`;
-- `maximum context length`;
-- provider-equivalent token-limit errors;
-- extended/1M context requires credits or entitlement.
+- Anthropic CLI, Anthropic API, OpenRouter, Codex, and Gemini all emit
+  different surface strings for the same underlying condition
+  (e.g. Anthropic CLI: `Prompt is too long for requested model`;
+  Anthropic API: `Input is too long for the requested model` with HTTP 400;
+  extended/1M billing errors: a different shape again; Codex:
+  different wording per model). A regex table is a maintenance trap: it
+  must be re-tuned every time a provider changes wording or a new provider
+  is added, and it fails silently when an unmatched string falls through to
+  `unknown`.
+- The classifier prompt already enumerates `transient`, `session_expired`,
+  `session_missing`, `bad_input`, `unknown`. Adding context categories there
+  is one prompt edit and inherits the same OpenRouter call already on the
+  hot path. No new infrastructure is required.
 
-`context_profile_unavailable` is distinct because the session may still fit a
-standard profile after rotation. It is not an authentication failure and must
-not mark the entire brain failed.
+This spec therefore adds the categories below as additions to the classifier
+prompt (`lib/gateway/recovery/prompt.md`) and as new
+`ClassificationKind` literal values; it does **not** add provider-specific
+regex rules.
 
-Recovery behavior:
+### 17.2 New categories
+
+Two new categories, both decided by the LLM:
+
+- `context_exhausted` — the session's accumulated context exceeds the model's
+  capacity (or the account's enabled extended-context entitlement). Examples:
+  Anthropic CLI `Prompt is too long`; Anthropic API `Input is too long`
+  (HTTP 400); 1M / extended-context credit-required errors; equivalent
+  Codex / Gemini token-limit errors. Confidence floor: 0.6 (the standard
+  dispatcher floor); below that the dispatcher falls back to `unknown`.
+- `context_profile_unavailable` — the session would fit a standard profile,
+  but the requested profile (1M, extended, paid tier) is unavailable for
+  this account or this turn. Distinct from `session_expired` because auth
+  itself is fine; distinct from `context_exhausted` because rotation to a
+  different profile resolves it without dropping context.
+
+These join the existing kinds; no existing kind is renamed.
+
+### 17.3 Recovery behavior (unchanged from prior draft)
 
 ```text
 context_exhausted
@@ -889,6 +918,20 @@ The old session mapping must be cleared with the same race-safe semantics as
 `session_missing`, extended to include slot for gateway owners. Heartbeat and
 worker runners must apply the same expected-session compare-and-clear rule to
 their own owner stores.
+
+### 17.4 Implementation surface
+
+Minimal, contained:
+
+1. Extend `ClassificationKind` literal in
+   `lib/gateway/recovery/classifier.py` with `context_exhausted` and
+   `context_profile_unavailable`.
+2. Add the two categories (with one or two illustrative stderr examples each)
+   to `lib/gateway/recovery/prompt.md`.
+3. Add two handlers under `lib/gateway/recovery/handlers/` and register them
+   in `RecoveryDispatcher.__init__`.
+4. **Do not** add new regex rules to `_REGEX_RULES`. The point of routing
+   through the LLM is to absorb provider-string drift without code changes.
 
 ## 18. `/compact` behavior
 
@@ -914,6 +957,42 @@ Checkpoint: current goals, 3 open threads, 5 decisions preserved.
 The command must not write a global unscoped signal. If maintenance is queued
 because a slot is busy, the response must say so and the gateway must have a
 consumer that executes it later.
+
+### 18.1 Operator notification on compaction
+
+Every successful compaction event (whether triggered by `/compact`, by
+idle maintenance, or by `context_exhausted` recovery) must emit a Telegram
+message to the instance's primary operator chat (the `main_chat_id` /
+first entry of `channels.telegram.chat_ids`, configured per instance).
+
+Requirements:
+
+1. The notification fires on the **compaction** itself, not the dispatch
+   that follows. A turn that succeeds without compaction must not produce
+   a notification.
+2. Single message per compaction event. If multiple slots compact for the
+   same `(channel, conversation_id)` in the same operation, the gateway
+   batches them into one message rather than emitting one per slot.
+3. The message body identifies: trigger reason (`/compact` /
+   `idle_maintenance` / `context_exhausted_recovery`), conversation hint
+   (channel name + truncated conversation id or human-readable label when
+   available), brain + slot, and measured before/after token counts when
+   available. Example:
+
+   ```text
+   🧹 Context compacted (idle_maintenance)
+   telegram · 28547271 · claude slot 0
+   142K → 31K tokens
+   ```
+
+4. Delivery uses the existing Telegram channel send path; it must not
+   bypass the rate limiter or the markdown escaper.
+5. The notification is best-effort. A failed send must not block or
+   reverse the compaction itself; it is logged as
+   `context_compaction_notify_failed`.
+6. The feature is gated by `compaction_notify.enabled` (default `true`)
+   in `ops/gateway.yaml`. An operator who runs many instances in one chat
+   may disable it per-instance to avoid noise.
 
 ## 19. Observability
 
