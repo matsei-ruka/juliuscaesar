@@ -5,6 +5,56 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.06.06.3
+
+Context-aware session lifecycle (spec
+`docs/specs/context-aware-session-lifecycle.md`, PR #85). Ships the telemetry,
+profile, routing, recovery, and operator-notification layers; idle-maintenance
+rotation from cron and the `jc sessions` CLI are documented follow-ups.
+
+- **§8 Context telemetry.** New `lib/gateway/lifecycle/telemetry.py` records a
+  per-owner `session_lifecycle` row (companion table in `queue.db`) keyed by
+  `owner_key = gateway:<channel>:<conversation_id>:<brain>:<slot>`. Each turn
+  stores `effective_input_tokens = input + cache_creation + cache_read` when
+  the adapter reports usage; turns without a usage signal bump `turn_count`
+  and preserve the prior token reading (§8.2). `BrainResult` gains an optional
+  `usage: dict | None` field; only `codex_api` wires real usage today, every
+  other adapter records a zero-usage turn.
+- **§9 Context profiles + config schema.** `lib/gateway/lifecycle/profiles.py`
+  models capacity-as-profile and computes the session ceiling (largest enabled
+  profile). `session_lifecycle:` and `compaction_notify:` blocks added to the
+  config schema and `render_default_config` (both disabled-by-default except
+  `compaction_notify.enabled`, default true).
+- **§11 Routing pressure gate.** `lib/gateway/lifecycle/routing.py` evaluates
+  routing pressure (`required / selected_profile.capacity`) and lifecycle
+  pressure (`current / ceiling.capacity`) against the §10.2 decision table
+  (DISPATCH / UPGRADE / ROTATE / EMERGENCY_ROTATE / FAIL). Wired into
+  `process_event` via `_apply_routing_pressure`; an UPGRADE swaps to the
+  larger profile's model and logs `kind="context_capacity_upgrade"`.
+- **§17 LLM-decided context recovery.** New classifier kinds
+  `context_exhausted` and `context_profile_unavailable` with handlers in
+  `lib/gateway/recovery/handlers/`. Classification stays LLM-driven (OpenRouter
+  triage, confidence floor 0.6) — no new regex rules added to `_REGEX_RULES`.
+- **§18 `/compact` command.** `lib/gateway/overrides.py` recognizes `/compact`;
+  `runtime._handle_compact` rotates the conversation's busy slots via
+  `lifecycle/compaction.py` and delivers the report through the normal
+  channel send path.
+- **§18.1 Operator notification on compaction.** `lib/gateway/lifecycle/notify.py`
+  sends a single batched message to the operator's main chat whenever a
+  conversation is compacted, gated by `compaction_notify.enabled`. Best-effort,
+  through the existing channel send path (rate limiter + escaper preserved).
+- **§19 Observability.** New structured log kinds: `context_usage_updated`,
+  `context_capacity_upgrade`, `context_compaction`.
+- **§10 idle maintenance (stub).** `lib/heartbeat/builtins/context_maintenance.py`
+  ships as a read-only inventory: it loads lifecycle telemetry and flags owners
+  over the `idle_maintenance_ratio` / `rotate_ratio` thresholds, but never
+  rotates. Operators opt in via `heartbeat/tasks.yaml` (`builtin:
+  context_maintenance`). Rotating idle sessions from the cron path is the
+  documented follow-up; live `/compact` and the `context_exhausted` recovery
+  handler already rotate on demand.
+- **`jc sessions` CLI (deferred).** Inspecting/rotating sessions from the CLI is
+  not in this change — a follow-up.
+
 ## 2026.06.06.2
 
 Reply footer: fall back to the resumed session id when capture returns None.
