@@ -156,6 +156,16 @@ def compact_conversation(
             f"brain={ref.brain} slot={ref.slot} trigger={trigger}",
             kind="context_compaction_deferred",
         )
+    runtime.log(
+        f"context_compaction trigger={trigger} channel={channel} "
+        f"conversation_id={conversation_id} rotated={len(compacted)} queued={len(queued)}",
+        kind="context_compaction",
+        trigger=trigger,
+        channel=channel,
+        conversation_id=conversation_id,
+        slots_rotated=len(compacted),
+        slots_queued=len(queued),
+    )
 
     report = _render_report(compacted, queued)
     return CompactionResult(compacted=compacted, queued=queued, report=report)

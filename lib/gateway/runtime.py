@@ -2169,10 +2169,16 @@ class GatewayRuntime:
         out_meta.setdefault("delivery_channel", channel)
         self._deliver_response(channel, reply, out_meta)
         self.log(
-            f"slash command id={event.id} kind=compact "
+            f"slash command id={event.id} kind=compact trigger={notify.TRIGGER_COMPACT} "
+            f"channel={channel} conversation_id={event.conversation_id} "
             f"rotated={len(result.compacted)} queued={len(result.queued)}",
             event_id=event.id,
             kind="context_compaction",
+            trigger=notify.TRIGGER_COMPACT,
+            channel=channel,
+            conversation_id=event.conversation_id,
+            slots_rotated=len(result.compacted),
+            slots_queued=len(result.queued),
         )
         return reply
 
@@ -2229,7 +2235,7 @@ class GatewayRuntime:
             return "codex"
         if text.startswith("gemini"):
             return "gemini"
-        return text.split(":", 1)[0] if ":" in text else text
+        return text.split(":", 1)[0] if ":" in text else ""
 
     def _rotate_session_for_pressure(
         self,
@@ -2401,7 +2407,8 @@ class GatewayRuntime:
         )
         if decision.action == routing.UPGRADE and decision.upgrade_profile is not None:
             up = decision.upgrade_profile
-            if self._model_family(up.model) != brain.split(":", 1)[0]:
+            model_family = self._model_family(up.model)
+            if model_family and model_family != brain.split(":", 1)[0]:
                 decision = routing.GuardDecision(
                     routing.ROTATE,
                     "upgrade profile crosses brain family; rotating instead",
@@ -2412,10 +2419,18 @@ class GatewayRuntime:
             else:
                 self.log(
                     f"context_capacity_upgrade id={event.id} brain={brain} "
-                    f"from={selected.key} to={up.key} required={required} "
-                    f"routing_pressure={decision.routing_pressure:.2f}",
+                    f"from_model={selected.model} to_model={up.model} "
+                    f"from_profile={selected.key} to_profile={up.key} "
+                    f"pressure={decision.routing_pressure:.2f}",
                     event_id=event.id,
                     kind="context_capacity_upgrade",
+                    brain=brain,
+                    slot=slot,
+                    from_model=selected.model,
+                    to_model=up.model,
+                    from_profile=selected.key,
+                    to_profile=up.key,
+                    pressure=decision.routing_pressure,
                 )
                 return brain, up.model, resume_session
         if decision.action in (routing.ROTATE, routing.EMERGENCY_ROTATE) and resume_session:
@@ -2486,10 +2501,21 @@ class GatewayRuntime:
             )
         finally:
             conn.close()
+        lifecycle_p: float | None = None
+        if tel.effective_input_tokens is not None and selected is not None:
+            registry, _ = self._resolve_context_profile(brain, model)
+            ceiling = profiles.session_ceiling(registry, model=selected.model, selected=selected)
+            lifecycle_p = routing.lifecycle_pressure(tel.effective_input_tokens, ceiling)
         self.log(
-            f"context_usage_updated owner={owner} brain={brain} "
-            f"effective={tel.effective_input_tokens} source={tel.usage_source} "
-            f"turn={tel.turn_count}",
+            f"context_usage_updated owner={owner} brain={brain} slot={slot} "
+            f"model={model or '-'} effective_input_tokens={tel.effective_input_tokens} "
+            f"source={tel.usage_source} lifecycle_pressure="
+            f"{f'{lifecycle_p:.2f}' if lifecycle_p is not None else '-'} turn={tel.turn_count}",
             event_id=event.id,
             kind="context_usage_updated",
+            brain=brain,
+            slot=slot,
+            model=model,
+            effective_input_tokens=tel.effective_input_tokens,
+            lifecycle_pressure=lifecycle_p,
         )

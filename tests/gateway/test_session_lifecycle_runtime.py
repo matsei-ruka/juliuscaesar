@@ -217,3 +217,35 @@ def test_upgrade_cross_family_rotates_instead(tmp_path: Path) -> None:
 
     assert invoke.call_args.kwargs["resume_session"] is None
     runtime.close()
+
+
+def test_upgrade_and_usage_logs_are_enriched(tmp_path: Path) -> None:
+    instance = _instance(config_text=_config())
+    _seed_session(instance, tokens=20_000)
+    runtime = _runtime(instance)
+    runtime._deliver_response = lambda source, response, meta: None
+    logs: list[tuple[str, dict]] = []
+    runtime.log = lambda message, **fields: logs.append((message, fields))
+
+    with mock.patch(
+        "gateway.runtime.invoke_brain",
+        return_value=BrainResult(
+            response="ok",
+            session_id="sess-new",
+            usage={"input_tokens": 42_000, "output_tokens": 200},
+        ),
+    ):
+        runtime.process_event(_event(event_id=2, content="x" * 300_000))
+
+    upgrade = next(fields for _msg, fields in logs if fields.get("kind") == "context_capacity_upgrade")
+    assert upgrade["from_profile"] == "small-standard"
+    assert upgrade["to_profile"] == "small-extended"
+    assert upgrade["pressure"] > 1.0
+
+    usage = next(fields for _msg, fields in logs if fields.get("kind") == "context_usage_updated")
+    assert usage["brain"] == "claude"
+    assert usage["slot"] == 0
+    assert usage["model"] == "small"
+    assert usage["effective_input_tokens"] == 42_000
+    assert usage["lifecycle_pressure"] is not None
+    runtime.close()
