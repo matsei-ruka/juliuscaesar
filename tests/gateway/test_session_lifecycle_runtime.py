@@ -9,7 +9,7 @@ from unittest import mock
 
 from gateway import queue, sessions
 from gateway.brains.base import BrainResult
-from gateway.lifecycle import compaction, telemetry
+from gateway.lifecycle import compaction, routing, telemetry
 from gateway.runtime import GatewayRuntime
 
 
@@ -105,6 +105,33 @@ def _seed_session(instance: Path, *, tokens: int) -> None:
         conn.close()
 
 
+def _seed_rotated_session(instance: Path) -> None:
+    conn = queue.connect(instance)
+    try:
+        sessions.upsert_session(
+            conn,
+            channel="telegram",
+            conversation_id="c1",
+            brain="claude",
+            session_id="sess-1234",
+            slot=0,
+        )
+        telemetry.record_usage(
+            conn,
+            owner_key=compaction.owner_key("telegram", "c1", "claude", 0),
+            brain="claude",
+            usage=telemetry.ContextUsage.from_anthropic_usage({"input_tokens": 10}),
+            model="small",
+            context_profile="small-standard",
+        )
+        telemetry.record_rotation(
+            conn,
+            owner_key=compaction.owner_key("telegram", "c1", "claude", 0),
+        )
+    finally:
+        conn.close()
+
+
 def test_rotate_pressure_dispatches_without_resume(tmp_path: Path) -> None:
     instance = _instance(config_text=_config())
     _seed_session(instance, tokens=220_000)
@@ -154,4 +181,23 @@ def test_fail_pressure_delivers_operator_error_and_skips_dispatch(tmp_path: Path
         assert "Unable to route this turn safely" in row["error"]
     finally:
         conn.close()
+    runtime.close()
+
+
+def test_usage_known_false_after_rotation(tmp_path: Path) -> None:
+    instance = _instance(config_text=_config())
+    _seed_rotated_session(instance)
+    runtime = _runtime(instance)
+    runtime._deliver_response = lambda source, response, meta: None
+
+    with mock.patch(
+        "gateway.runtime.routing.evaluate_pressure",
+        wraps=routing.evaluate_pressure,
+    ) as evaluate, mock.patch(
+        "gateway.runtime.invoke_brain",
+        return_value=BrainResult(response="ok", session_id="sess-new"),
+    ):
+        runtime.process_event(_event())
+
+    assert evaluate.call_args.kwargs["usage_known"] is False
     runtime.close()

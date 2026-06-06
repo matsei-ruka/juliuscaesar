@@ -2386,7 +2386,7 @@ class GatewayRuntime:
             thresholds=lc.thresholds,
             resumed=bool(resume_session),
             larger_profiles=larger,
-            usage_known=tel is not None,
+            usage_known=bool(tel and tel.effective_input_tokens),
         )
         if decision.action == routing.UPGRADE and decision.upgrade_profile is not None:
             up = decision.upgrade_profile
