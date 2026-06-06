@@ -1660,13 +1660,13 @@ class GatewayRuntime:
             f"session resume id={event.id} conv={event.conversation_id or '-'} "
             f"brain={brain} slot={slot} session={resume_session or 'none'}"
         )
-        brain, model = self._apply_routing_pressure(
+        brain, model, resume_session = self._apply_routing_pressure(
             event=event,
             channel=channel,
             brain=brain,
             model=model,
             slot=slot,
-            resumed=bool(resume_session),
+            resume_session=resume_session,
         )
         self.log(
             f"dispatch begin id={event.id} brain={brain} model={model or '-'} "
@@ -2220,6 +2220,64 @@ class GatewayRuntime:
         profile = registry.for_model(lookup_model) if lookup_model else None
         return registry, profile
 
+    def _rotate_session_for_pressure(
+        self,
+        *,
+        channel: str,
+        conversation_id: str,
+        brain: str,
+        slot: int,
+        resume_session: str,
+        kind: str,
+        event_id: int,
+        reason: str,
+    ) -> None:
+        conn = queue.connect(self.instance_dir)
+        try:
+            rotated = compaction.rotate_slot(
+                conn,
+                channel=channel,
+                conversation_id=conversation_id,
+                brain=brain,
+                slot=slot,
+                expected_session_id=resume_session,
+            )
+        finally:
+            conn.close()
+        if rotated is not None:
+            self.log(
+                f"{kind} id={event_id} channel={channel} conversation_id={conversation_id} "
+                f"brain={brain} slot={slot} reason={reason}",
+                event_id=event_id,
+                kind=kind,
+            )
+
+    def _fail_routing_pressure(
+        self,
+        *,
+        event: queue.Event,
+        channel: str,
+        message: str,
+    ) -> None:
+        meta = decode_meta(event)
+        meta.setdefault("delivery_channel", channel)
+        self._deliver_response(channel, message, meta)
+        conn = queue.connect(self.instance_dir)
+        try:
+            try:
+                queue.fail(
+                    conn,
+                    event.id,
+                    error=message,
+                    max_retries=0,
+                    expected_locked_by=self.worker_id,
+                )
+            except KeyError:
+                pass
+        finally:
+            conn.close()
+        raise RuntimeError(message)
+
     # Triage-time safety: brains whose ceiling is 200K (sonnet/haiku) must not
     # be chosen for a conversation whose tracked context already exceeds the
     # safe input threshold. Override to claude:opus (which carries the 1M
@@ -2291,17 +2349,17 @@ class GatewayRuntime:
         brain: str,
         model: str | None,
         slot: int,
-        resumed: bool,
-    ) -> tuple[str, str | None]:
+        resume_session: str | None,
+    ) -> tuple[str, str | None, str | None]:
         """§11 pre-dispatch size gate — upgrade to a larger-capacity profile
         when the selected one can no longer fit the projected turn. Gated by
         `session_lifecycle.enabled`; a no-op when disabled or unresolvable."""
         lc = self.config.session_lifecycle
         if not lc.enabled or not event.conversation_id:
-            return brain, model
+            return brain, model, resume_session
         registry, selected = self._resolve_context_profile(brain, model)
         if selected is None:
-            return brain, model
+            return brain, model, resume_session
         owner = compaction.owner_key(channel, event.conversation_id, brain, slot)
         conn = queue.connect(self.instance_dir)
         try:
@@ -2326,7 +2384,7 @@ class GatewayRuntime:
             required=required,
             current_context=last_eff,
             thresholds=lc.thresholds,
-            resumed=resumed,
+            resumed=bool(resume_session),
             larger_profiles=larger,
             usage_known=tel is not None,
         )
@@ -2339,8 +2397,33 @@ class GatewayRuntime:
                 event_id=event.id,
                 kind="context_capacity_upgrade",
             )
-            return brain, up.model
-        return brain, model
+            return brain, up.model, resume_session
+        if decision.action in (routing.ROTATE, routing.EMERGENCY_ROTATE) and resume_session:
+            self._rotate_session_for_pressure(
+                channel=channel,
+                conversation_id=event.conversation_id,
+                brain=brain,
+                slot=slot,
+                resume_session=resume_session,
+                kind=(
+                    "context_emergency_rotate"
+                    if decision.action == routing.EMERGENCY_ROTATE
+                    else "context_rotate"
+                ),
+                event_id=event.id,
+                reason=decision.reason,
+            )
+            return brain, model, None
+        if decision.action == routing.FAIL:
+            self._fail_routing_pressure(
+                event=event,
+                channel=channel,
+                message=(
+                    "Unable to route this turn safely: the active session cannot fit the "
+                    "next dispatch and no compatible capacity upgrade is available."
+                ),
+            )
+        return brain, model, resume_session
 
     def _record_context_usage(
         self,
