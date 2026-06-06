@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import actions_registry, capabilities, goal_cache, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
+from .lifecycle import compaction, notify, profiles, routing, telemetry
 from .channels.telegram_outbound import send_text as telegram_send_text
 from .brain_output import (
     RECOVERED_ENVELOPE_ERROR,
@@ -110,6 +111,17 @@ def _elapsed_seconds(event: queue.Event, monotonic_start: float | None) -> float
     if monotonic_start is not None:
         return max(0.0, time.monotonic() - monotonic_start)
     return _seconds_since(event.received_at)
+
+
+def _estimate_prompt_tokens(content: str | None) -> int:
+    """Coarse new-prompt size estimate for the routing gate (§10.1).
+
+    ~4 chars/token is the standard rough heuristic; the gate only needs an
+    order-of-magnitude figure to detect when a turn no longer fits.
+    """
+    if not content:
+        return 0
+    return max(1, len(content) // 4)
 
 
 _STOPWORDS: frozenset[str] = frozenset({
@@ -1645,6 +1657,14 @@ class GatewayRuntime:
             f"session resume id={event.id} conv={event.conversation_id or '-'} "
             f"brain={brain} slot={slot} session={resume_session or 'none'}"
         )
+        brain, model = self._apply_routing_pressure(
+            event=event,
+            channel=channel,
+            brain=brain,
+            model=model,
+            slot=slot,
+            resumed=bool(resume_session),
+        )
         self.log(
             f"dispatch begin id={event.id} brain={brain} model={model or '-'} "
             f"slot={slot} resume={'yes' if resume_session else 'no'}"
@@ -1716,6 +1736,15 @@ class GatewayRuntime:
                 effective_session_id,
                 slot=slot,
             )
+
+        self._record_context_usage(
+            event=event,
+            channel=channel,
+            brain=brain,
+            model=model,
+            slot=slot,
+            result=result,
+        )
 
         # Sticky brain is only set by an explicit user action: `/brain X` slash
         # or `[brain] ...` inline prefix. Triage runs every message otherwise,
@@ -2094,6 +2123,8 @@ class GatewayRuntime:
         meta: dict[str, Any],
         channel: str,
     ) -> str:
+        if slash.kind == "compact":
+            return self._handle_compact(event, meta, channel)
         if slash.kind == "brain" and slash.spec and event.conversation_id:
             brain, _, model = slash.spec.partition(":")
             # Slash always pins sticky for a healthy default window even if
@@ -2110,6 +2141,36 @@ class GatewayRuntime:
         meta.setdefault("delivery_channel", channel)
         self._deliver_response(channel, reply, meta)
         self.log(f"slash command id={event.id} kind={slash.kind} spec={slash.spec or '-'}")
+        return reply
+
+    def _handle_compact(
+        self,
+        event: queue.Event,
+        meta: dict[str, Any],
+        channel: str,
+    ) -> str:
+        if not event.conversation_id:
+            reply = "Nothing to compact — no active conversation."
+            self._deliver_response(channel, reply, dict(meta, delivery_channel=channel))
+            return reply
+        busy = set(self._busy_slots.get((channel, event.conversation_id), set()))
+        result = compaction.compact_conversation(
+            self,
+            channel=channel,
+            conversation_id=event.conversation_id,
+            trigger=notify.TRIGGER_COMPACT,
+            busy_slots=busy,
+        )
+        reply = result.report
+        out_meta = dict(meta)
+        out_meta.setdefault("delivery_channel", channel)
+        self._deliver_response(channel, reply, out_meta)
+        self.log(
+            f"slash command id={event.id} kind=compact "
+            f"rotated={len(result.compacted)} queued={len(result.queued)}",
+            event_id=event.id,
+            kind="context_compaction",
+        )
         return reply
 
     def _update_sticky(
@@ -2136,3 +2197,124 @@ class GatewayRuntime:
             )
         finally:
             conn.close()
+
+    # --- §11 routing pressure + §8 telemetry persistence -----------------
+
+    def _resolve_context_profile(self, brain: str, model: str | None):
+        """Map a routed (brain, model) to a registry + standard profile.
+
+        Returns (registry, profile|None). The profile is None when the model
+        cannot be resolved to a known capacity profile — the guard then
+        dispatches unchanged rather than guessing capacity (§5.2, §9).
+        """
+        registry = self.config.session_lifecycle.registry()
+        profile = registry.for_model(model) if model else None
+        return registry, profile
+
+    def _apply_routing_pressure(
+        self,
+        *,
+        event: queue.Event,
+        channel: str,
+        brain: str,
+        model: str | None,
+        slot: int,
+        resumed: bool,
+    ) -> tuple[str, str | None]:
+        """§11 pre-dispatch size gate — upgrade to a larger-capacity profile
+        when the selected one can no longer fit the projected turn. Gated by
+        `session_lifecycle.enabled`; a no-op when disabled or unresolvable."""
+        lc = self.config.session_lifecycle
+        if not lc.enabled or not event.conversation_id:
+            return brain, model
+        registry, selected = self._resolve_context_profile(brain, model)
+        if selected is None:
+            return brain, model
+        owner = compaction.owner_key(channel, event.conversation_id, brain, slot)
+        conn = queue.connect(self.instance_dir)
+        try:
+            tel = telemetry.get_telemetry(conn, owner_key=owner)
+        finally:
+            conn.close()
+        last_eff = (tel.effective_input_tokens or 0) if tel else 0
+        required = routing.required_context(
+            last_effective_input=last_eff,
+            estimated_new_prompt=_estimate_prompt_tokens(event.content),
+            reserves=lc.reserves,
+        )
+        ceiling = profiles.session_ceiling(registry, model=selected.model, selected=selected)
+        larger = [
+            p
+            for p in registry.enabled_for_model(selected.model)
+            if p.input_capacity_tokens > selected.input_capacity_tokens
+        ]
+        decision = routing.evaluate_pressure(
+            selected_profile=selected,
+            ceiling=ceiling,
+            required=required,
+            current_context=last_eff,
+            thresholds=lc.thresholds,
+            resumed=resumed,
+            larger_profiles=larger,
+            usage_known=tel is not None,
+        )
+        if decision.action == routing.UPGRADE and decision.upgrade_profile is not None:
+            up = decision.upgrade_profile
+            self.log(
+                f"context_capacity_upgrade id={event.id} brain={brain} "
+                f"from={selected.key} to={up.key} required={required} "
+                f"routing_pressure={decision.routing_pressure:.2f}",
+                event_id=event.id,
+                kind="context_capacity_upgrade",
+            )
+            return brain, up.model
+        return brain, model
+
+    def _record_context_usage(
+        self,
+        *,
+        event: queue.Event,
+        channel: str,
+        brain: str,
+        model: str | None,
+        slot: int,
+        result: Any,
+    ) -> None:
+        """§8 persist the turn's context usage. Gated by session_lifecycle."""
+        lc = self.config.session_lifecycle
+        if not lc.enabled or not event.conversation_id:
+            return
+        owner = compaction.owner_key(channel, event.conversation_id, brain, slot)
+        raw = getattr(result, "usage", None)
+        if isinstance(raw, dict) and raw:
+            usage = telemetry.ContextUsage.from_anthropic_usage(raw, source="api")
+        else:
+            usage = telemetry.ContextUsage(
+                input_tokens=None,
+                cache_creation_input_tokens=None,
+                cache_read_input_tokens=None,
+                output_tokens=None,
+                effective_input_tokens=None,
+                source="estimate",
+                measured_at=telemetry.now_iso(),
+            )
+        _, selected = self._resolve_context_profile(brain, model)
+        conn = queue.connect(self.instance_dir)
+        try:
+            tel = telemetry.record_usage(
+                conn,
+                owner_key=owner,
+                brain=brain,
+                usage=usage,
+                model=model,
+                context_profile=selected.key if selected else None,
+            )
+        finally:
+            conn.close()
+        self.log(
+            f"context_usage_updated owner={owner} brain={brain} "
+            f"effective={tel.effective_input_tokens} source={tel.usage_source} "
+            f"turn={tel.turn_count}",
+            event_id=event.id,
+            kind="context_usage_updated",
+        )
