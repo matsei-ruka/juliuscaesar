@@ -168,6 +168,22 @@ class AccountabilitiesSchemaTests(unittest.TestCase):
             self.assertTrue(cfg.accountabilities.enabled)
             self.assertEqual(cfg.accountabilities.authority_channel, "telegram-primary")
 
+
+class SessionLifecycleSchemaTests(unittest.TestCase):
+    def test_rejects_not_yet_supported_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_yaml(
+                instance,
+                "session_lifecycle:\n"
+                "  enabled: true\n"
+                "  idle:\n"
+                "    after_seconds: 30\n",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(instance)
+            self.assertIn("session_lifecycle.idle: field idle not yet supported", str(ctx.exception))
+
     def test_accountabilities_enabled_email_without_sender_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)

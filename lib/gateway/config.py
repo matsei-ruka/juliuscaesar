@@ -1355,6 +1355,9 @@ def _validate_session_lifecycle(errors: list[str], raw: Any) -> None:
     for key in raw:
         if key not in allowed:
             errors.append(f"session_lifecycle.{key}: unknown field")
+    for key in ("idle", "checkpoint", "fallback_limits", "tool_results"):
+        if raw.get(key) is not None:
+            errors.append(f"session_lifecycle.{key}: field {key} not yet supported")
     if raw.get("enabled") is not None and not isinstance(raw["enabled"], bool):
         errors.append("session_lifecycle.enabled: must be boolean")
 
