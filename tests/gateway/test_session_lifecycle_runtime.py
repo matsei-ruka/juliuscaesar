@@ -184,6 +184,25 @@ def test_fail_pressure_delivers_operator_error_and_skips_dispatch(tmp_path: Path
     runtime.close()
 
 
+def test_routing_pressure_rotates_when_fresh_selected_model_fits(tmp_path: Path) -> None:
+    instance = _instance(config_text=_config(extended_enabled=False))
+    _seed_session(instance, tokens=60_000)
+    runtime = _runtime(instance)
+    delivered: list[str] = []
+    runtime._deliver_response = lambda source, response, meta: delivered.append(response)
+
+    with mock.patch(
+        "gateway.runtime.invoke_brain",
+        return_value=BrainResult(response="fresh reply", session_id="sess-new"),
+    ) as invoke:
+        response = runtime.process_event(_event(content="x" * 160_000))
+
+    assert response == "fresh reply"
+    assert delivered == ["fresh reply"]
+    assert invoke.call_args.kwargs["resume_session"] is None
+    runtime.close()
+
+
 def test_usage_known_false_after_rotation(tmp_path: Path) -> None:
     instance = _instance(config_text=_config())
     _seed_rotated_session(instance)

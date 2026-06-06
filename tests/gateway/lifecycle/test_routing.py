@@ -92,13 +92,25 @@ class PressureTest(unittest.TestCase):
         d = routing.evaluate_pressure(
             selected_profile=SMALL,
             ceiling=SMALL,
-            required=150_000,  # exceeds SMALL, but lifecycle pressure stays low
+            required=170_000,  # fresh turn still exceeds SMALL after rotation
             current_context=50_000,
             thresholds=routing.Thresholds(),
             resumed=True,
             larger_profiles=[],
         )
         self.assertEqual(d.action, routing.FAIL)
+
+    def test_overflow_without_larger_rotates_when_fresh_turn_fits(self) -> None:
+        d = routing.evaluate_pressure(
+            selected_profile=SMALL,
+            ceiling=SMALL,
+            required=150_000,  # retained context causes overflow; fresh fits
+            current_context=50_000,
+            thresholds=routing.Thresholds(),
+            resumed=True,
+            larger_profiles=[],
+        )
+        self.assertEqual(d.action, routing.ROTATE)
 
 
 if __name__ == "__main__":

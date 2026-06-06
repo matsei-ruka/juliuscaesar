@@ -167,6 +167,16 @@ def evaluate_pressure(
                 upgrade_profile=profile,
             )
 
+    fresh_required = max(0, required - max(0, current_context))
+    if resumed and selected_profile is not None and routing_pressure(fresh_required, selected_profile) <= 1.0:
+        return GuardDecision(
+            ROTATE,
+            "selected profile safely fits after rotation",
+            route_p,
+            life_p,
+            selected_profile,
+        )
+
     return GuardDecision(
         FAIL,
         "no safe profile and rotation unavailable",
