@@ -150,6 +150,28 @@ def compact_conversation(
             slots=compacted,
             conversation_label=conversation_label,
         )
+    compacted_payload = [
+        {
+            "owner_kind": "gateway",
+            "owner_key": owner_key(channel, conversation_id, item.brain, item.slot),
+            "brain": item.brain,
+            "slot": item.slot,
+            "tokens_before": item.tokens_before,
+            "tokens_after": item.tokens_after,
+            "method": item.method,
+        }
+        for item in compacted
+    ]
+    queued_payload = [
+        {
+            "owner_kind": "gateway",
+            "owner_key": owner_key(channel, conversation_id, ref.brain, ref.slot),
+            "brain": ref.brain,
+            "slot": ref.slot,
+            "session_id_prefix": ref.session_id[:8],
+        }
+        for ref in queued
+    ]
     for ref in queued:
         runtime.log(
             f"context_compaction_deferred channel={channel} conversation_id={conversation_id} "
@@ -165,6 +187,8 @@ def compact_conversation(
         conversation_id=conversation_id,
         slots_rotated=len(compacted),
         slots_queued=len(queued),
+        compacted_slots=compacted_payload,
+        queued_slots=queued_payload,
     )
 
     report = _render_report(compacted, queued)

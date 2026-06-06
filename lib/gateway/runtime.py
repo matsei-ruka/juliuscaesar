@@ -1747,6 +1747,7 @@ class GatewayRuntime:
             model=model,
             slot=slot,
             result=result,
+            session_id=effective_session_id,
         )
 
         # Sticky brain is only set by an explicit user action: `/brain X` slash
@@ -2179,6 +2180,28 @@ class GatewayRuntime:
             conversation_id=event.conversation_id,
             slots_rotated=len(result.compacted),
             slots_queued=len(result.queued),
+            compacted_slots=[
+                {
+                    "owner_kind": "gateway",
+                    "owner_key": compaction.owner_key(channel, event.conversation_id, item.brain, item.slot),
+                    "brain": item.brain,
+                    "slot": item.slot,
+                    "tokens_before": item.tokens_before,
+                    "tokens_after": item.tokens_after,
+                    "method": item.method,
+                }
+                for item in result.compacted
+            ],
+            queued_slots=[
+                {
+                    "owner_kind": "gateway",
+                    "owner_key": compaction.owner_key(channel, event.conversation_id, ref.brain, ref.slot),
+                    "brain": ref.brain,
+                    "slot": ref.slot,
+                    "session_id_prefix": ref.session_id[:8],
+                }
+                for ref in result.queued
+            ],
         )
         return reply
 
@@ -2417,6 +2440,7 @@ class GatewayRuntime:
                     decision.selected_profile,
                 )
             else:
+                session_prefix = resume_session[:8] if resume_session else None
                 self.log(
                     f"context_capacity_upgrade id={event.id} brain={brain} "
                     f"from_model={selected.model} to_model={up.model} "
@@ -2424,13 +2448,24 @@ class GatewayRuntime:
                     f"pressure={decision.routing_pressure:.2f}",
                     event_id=event.id,
                     kind="context_capacity_upgrade",
+                    owner_kind="gateway",
+                    owner_key=owner,
                     brain=brain,
+                    channel=channel,
+                    conversation_id=event.conversation_id,
                     slot=slot,
+                    session_id_prefix=session_prefix,
+                    effective_input_tokens=last_eff,
                     from_model=selected.model,
                     to_model=up.model,
                     from_profile=selected.key,
                     to_profile=up.key,
+                    selected_capacity_tokens=selected.input_capacity_tokens,
+                    session_ceiling_capacity_tokens=ceiling.input_capacity_tokens if ceiling else None,
                     pressure=decision.routing_pressure,
+                    routing_pressure=decision.routing_pressure,
+                    lifecycle_pressure=decision.lifecycle_pressure,
+                    reason=decision.reason,
                 )
                 return brain, up.model, resume_session
         if decision.action in (routing.ROTATE, routing.EMERGENCY_ROTATE) and resume_session:
@@ -2469,6 +2504,7 @@ class GatewayRuntime:
         model: str | None,
         slot: int,
         result: Any,
+        session_id: str | None = None,
     ) -> None:
         """§8 persist the turn's context usage. Gated by session_lifecycle."""
         lc = self.config.session_lifecycle
@@ -2502,10 +2538,12 @@ class GatewayRuntime:
         finally:
             conn.close()
         lifecycle_p: float | None = None
+        ceiling = None
         if tel.effective_input_tokens is not None and selected is not None:
             registry, _ = self._resolve_context_profile(brain, model)
             ceiling = profiles.session_ceiling(registry, model=selected.model, selected=selected)
             lifecycle_p = routing.lifecycle_pressure(tel.effective_input_tokens, ceiling)
+        session_prefix = session_id[:8] if session_id else None
         self.log(
             f"context_usage_updated owner={owner} brain={brain} slot={slot} "
             f"model={model or '-'} effective_input_tokens={tel.effective_input_tokens} "
@@ -2513,9 +2551,19 @@ class GatewayRuntime:
             f"{f'{lifecycle_p:.2f}' if lifecycle_p is not None else '-'} turn={tel.turn_count}",
             event_id=event.id,
             kind="context_usage_updated",
+            owner_kind="gateway",
+            owner_key=owner,
             brain=brain,
+            channel=channel,
+            conversation_id=event.conversation_id,
             slot=slot,
+            session_id_prefix=session_prefix,
             model=model,
+            context_profile=selected.key if selected else None,
             effective_input_tokens=tel.effective_input_tokens,
+            usage_source=tel.usage_source,
+            selected_capacity_tokens=selected.input_capacity_tokens if selected else None,
+            session_ceiling_capacity_tokens=ceiling.input_capacity_tokens if ceiling else None,
             lifecycle_pressure=lifecycle_p,
+            turn_count=tel.turn_count,
         )
