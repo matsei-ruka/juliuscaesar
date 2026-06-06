@@ -149,6 +149,12 @@ def compact_conversation(
             slots=compacted,
             conversation_label=conversation_label,
         )
+    for ref in queued:
+        runtime.log(
+            f"context_compaction_deferred channel={channel} conversation_id={conversation_id} "
+            f"brain={ref.brain} slot={ref.slot} trigger={trigger}",
+            kind="context_compaction_deferred",
+        )
 
     report = _render_report(compacted, queued)
     return CompactionResult(compacted=compacted, queued=queued, report=report)
@@ -159,7 +165,7 @@ def _render_report(
 ) -> str:
     if not compacted and not queued:
         return "No active brain session to compact for this conversation."
-    lines = ["Context maintenance complete."]
+    lines = [f"Context maintenance complete. Rotated {len(compacted)} slot(s); queued {len(queued)}."]
     for s in compacted:
         lines.append(
             f"{s.brain} slot {s.slot}: "

@@ -108,6 +108,11 @@ class CompactConversationTest(unittest.TestCase):
         self.assertEqual([s.slot for s in result.queued], [1])
         notify_fn.assert_called_once()
         self.assertIn("rotated", result.report)
+        self.assertIn("queued 1", result.report)
+        self.assertTrue(
+            any("context_compaction_deferred" in line for line in rt.logs),
+            rt.logs,
+        )
 
     def test_no_slots_no_notify(self) -> None:
         inst = _instance()
