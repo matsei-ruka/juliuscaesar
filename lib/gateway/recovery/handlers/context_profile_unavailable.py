@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 
 from ... import queue, router
-from ...lifecycle import compaction
+from ...lifecycle import compaction, telemetry
 from .base import Fail, RecoveryContext, RecoveryDecision, Retry
 
 _MARKER = "context_profile_recovery"
@@ -36,6 +36,20 @@ class ContextProfileUnavailableHandler:
         brain = _guess_brain(event, ctx, channel)
         if not brain:
             return Fail(reason="context_profile_unavailable without resolvable brain")
+
+        if _fits_standard_profile(ctx, channel, event.conversation_id, brain):
+            ctx.log(
+                f"context_profile_unavailable_warning id={event.id} brain={brain} "
+                "reason=standard_profile_still_fits",
+                event_id=getattr(event, "id", None),
+                kind="context_profile_unavailable_warning",
+                brain=brain,
+            )
+            _reenqueue(event, ctx, meta)
+            return Retry(
+                reason="context_profile_unavailable — retrying without rotation",
+                delay_seconds=0.0,
+            )
 
         rotated = _rotate_brain_slots(ctx, channel, event.conversation_id, brain)
         ctx.log(
@@ -73,6 +87,49 @@ def _rotate_brain_slots(ctx, channel, conversation_id, brain) -> int:
     finally:
         conn.close()
     return rotated
+
+
+def _fits_standard_profile(ctx, channel: str, conversation_id: str, brain: str) -> bool:
+    registry = ctx.config.session_lifecycle.registry()
+    standard_profiles = [
+        profile
+        for profile in registry.all()
+        if profile.enabled
+        and not profile.extended_context
+        and _profile_family(profile.model) == brain
+    ]
+    if not standard_profiles:
+        return False
+    conn = queue.connect(ctx.instance_dir)
+    try:
+        slots = compaction.list_conversation_slots(
+            conn, channel=channel, conversation_id=conversation_id
+        )
+        for ref in slots:
+            if ref.brain.split(":", 1)[0] != brain:
+                continue
+            tel = telemetry.get_telemetry(
+                conn,
+                owner_key=compaction.owner_key(channel, conversation_id, ref.brain, ref.slot),
+            )
+            if tel is None or tel.effective_input_tokens is None:
+                continue
+            if any(tel.effective_input_tokens <= p.input_capacity_tokens for p in standard_profiles):
+                return True
+    finally:
+        conn.close()
+    return False
+
+
+def _profile_family(model: str) -> str:
+    text = (model or "").strip().lower()
+    if text.startswith("claude"):
+        return "claude"
+    if text.startswith(("gpt-", "o", "codex")):
+        return "codex"
+    if text.startswith("gemini"):
+        return "gemini"
+    return text.split(":", 1)[0] if ":" in text else text
 
 
 def _reenqueue(event, ctx: RecoveryContext, meta: dict) -> None:

@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import queue, sessions  # noqa: E402
 from gateway.config import GatewayConfig  # noqa: E402
+from gateway.lifecycle import compaction, telemetry  # noqa: E402
 from gateway.queue import Event  # noqa: E402
 from gateway.recovery.classifier import Classification  # noqa: E402
 from gateway.recovery.handlers.base import Fail, RecoveryContext, Retry  # noqa: E402
@@ -118,6 +119,16 @@ class ContextProfileUnavailableHandlerTests(unittest.TestCase):
     def test_first_pass_rotates_and_retries_without_notify(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             inst = _instance(tmp)
+            conn = queue.connect(inst)
+            try:
+                telemetry.record_usage(
+                    conn,
+                    owner_key=compaction.owner_key("telegram", "c1", "claude", 0),
+                    brain="claude",
+                    usage=telemetry.ContextUsage.from_anthropic_usage({"input_tokens": 250_000}),
+                )
+            finally:
+                conn.close()
             ctx = _ctx(inst)
             decision = ContextProfileUnavailableHandler().handle(
                 _event(),
@@ -125,6 +136,50 @@ class ContextProfileUnavailableHandlerTests(unittest.TestCase):
                 ctx,
             )
             self.assertIsInstance(decision, Retry)
+
+    def test_standard_fit_retries_without_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = _instance(tmp)
+            conn = queue.connect(inst)
+            try:
+                telemetry.record_usage(
+                    conn,
+                    owner_key=compaction.owner_key("telegram", "c1", "claude", 0),
+                    brain="claude",
+                    usage=telemetry.ContextUsage.from_anthropic_usage({"input_tokens": 120_000}),
+                )
+            finally:
+                conn.close()
+            logs: list[tuple[str, dict]] = []
+            runtime = mock.Mock()
+            runtime.config = GatewayConfig()
+            runtime.instance_dir = inst
+            ctx = RecoveryContext(
+                instance_dir=inst,
+                config=GatewayConfig(),
+                runtime=runtime,
+                log=lambda msg, **fields: logs.append((msg, fields)),
+            )
+
+            decision = ContextProfileUnavailableHandler().handle(
+                _event(),
+                Classification(kind="context_profile_unavailable", confidence=0.9),
+                ctx,
+            )
+
+            self.assertIsInstance(decision, Retry)
+            conn = queue.connect(inst)
+            try:
+                self.assertIsNotNone(
+                    sessions.get_session(
+                        conn, channel="telegram", conversation_id="c1", brain="claude", slot=0
+                    )
+                )
+            finally:
+                conn.close()
+            self.assertTrue(
+                any(fields.get("kind") == "context_profile_unavailable_warning" for _msg, fields in logs)
+            )
 
     def test_second_pass_with_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
