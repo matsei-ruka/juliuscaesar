@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 from gateway import queue, sessions  # noqa: E402
 from gateway.config import render_default_config  # noqa: E402
+from gateway.lifecycle import compaction, telemetry  # noqa: E402
 from gateway.runtime import GatewayRuntime  # noqa: E402
 
 
@@ -52,6 +53,12 @@ def _seed(instance: Path) -> None:
             brain="claude",
             session_id="sess-claude-aaaa",
             slot=0,
+        )
+        telemetry.record_usage(
+            conn,
+            owner_key=compaction.owner_key("telegram", "28547271", "claude", 0),
+            brain="claude",
+            usage=telemetry.ContextUsage.from_anthropic_usage({"input_tokens": 120_000}),
         )
         queue.enqueue(
             conn,
@@ -99,6 +106,12 @@ class CompactionNotifyRuntimeTest(unittest.TestCase):
                     conn, channel="telegram", conversation_id="28547271", brain="claude", slot=0
                 )
             )
+            tel = telemetry.get_telemetry(
+                conn,
+                owner_key=compaction.owner_key("telegram", "28547271", "claude", 0),
+            )
+            assert tel is not None
+            self.assertIsNone(tel.effective_input_tokens)
         finally:
             conn.close()
         runtime.close()
