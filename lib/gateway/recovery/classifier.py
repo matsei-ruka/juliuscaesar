@@ -33,8 +33,24 @@ ClassificationKind = Literal[
     "session_expired",
     "session_missing",
     "bad_input",
+    "context_exhausted",
+    "context_profile_unavailable",
     "unknown",
 ]
+
+# Context-lifecycle categories are LLM-decided only — deliberately NOT added to
+# `_REGEX_RULES`. Provider surface strings drift (Anthropic CLI vs API vs Codex
+# vs Gemini); routing through the classifier prompt absorbs that drift without
+# code changes (§17.1).
+_VALID_KINDS = (
+    "transient",
+    "session_expired",
+    "session_missing",
+    "bad_input",
+    "context_exhausted",
+    "context_profile_unavailable",
+    "unknown",
+)
 
 
 @dataclass(frozen=True)
@@ -162,7 +178,7 @@ def _parse_classifier_json(raw: str) -> Classification | None:
     if not isinstance(data, dict):
         return None
     kind = str(data.get("kind") or "unknown")
-    if kind not in ("transient", "session_expired", "session_missing", "bad_input", "unknown"):
+    if kind not in _VALID_KINDS:
         kind = "unknown"
     try:
         confidence = float(data.get("confidence", 0.0))

@@ -27,6 +27,22 @@ Kinds:
 - bad_input        → malformed event, oversized payload, unsupported file type,
                      image too large, MIME mismatch, "invalid base64", schema
                      violation. Retrying will not help; the input itself is wrong.
+- context_exhausted → the resumed session's accumulated context exceeds the
+                     model's capacity (or the account's enabled extended-context
+                     entitlement). Provider strings differ: Anthropic CLI
+                     "Prompt is too long for requested model"; Anthropic API
+                     "Input is too long for the requested model" (HTTP 400);
+                     1M / extended-context "credit"/"usage required" errors;
+                     Codex / Gemini token-limit errors. Distinct from bad_input:
+                     the input is fine, the SESSION is too big. Rotating to a
+                     fresh session resolves it.
+- context_profile_unavailable → the session would fit a standard profile, but
+                     the requested profile (1M, extended, paid tier) is
+                     unavailable for this account or this turn. Auth itself is
+                     fine (distinct from session_expired); the context still
+                     fits a standard profile (distinct from context_exhausted).
+                     Rotating to a different profile resolves it without
+                     dropping context.
 - unknown          → none of the above clearly applies, or the stderr is empty.
 
 Confidence is your own self-rating (0..1). The dispatcher treats anything < 0.6
@@ -45,6 +61,24 @@ stderr: "Image exceeds maximum size of 5MB (got 12MB)"
 
 stderr: "Error: No conversation found with session ID 7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46"
 → {"kind":"session_missing","confidence":0.97,"extracted":{"session_id":"7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46"}}
+
+stderr: "Prompt is too long for requested model claude-sonnet-4-6 (estimated 248123 tokens, limit 200000)"
+→ {"kind":"context_exhausted","confidence":0.96,"extracted":{}}
+
+stderr: "API error 400: Input is too long for the requested model. Reduce the length of the messages."
+→ {"kind":"context_exhausted","confidence":0.94,"extracted":{}}
+
+stderr: "Error: model context window exceeded — total tokens 1048901 > 1000000 (Gemini)"
+→ {"kind":"context_exhausted","confidence":0.93,"extracted":{}}
+
+stderr: "context_length_exceeded: this conversation is too long for gpt-5.4; start a new session"
+→ {"kind":"context_exhausted","confidence":0.92,"extracted":{}}
+
+stderr: "Extended 1M context requires usage credits on this account; falling back is disabled."
+→ {"kind":"context_profile_unavailable","confidence":0.9,"extracted":{}}
+
+stderr: "The requested 1M token context window beta is not enabled for your organization."
+→ {"kind":"context_profile_unavailable","confidence":0.9,"extracted":{}}
 
 Now classify:
 EVENT: {event_content}
