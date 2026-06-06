@@ -13,10 +13,10 @@ from gateway.lifecycle import compaction, routing, telemetry
 from gateway.runtime import GatewayRuntime
 
 
-def _config(*, extended_enabled: bool = True) -> str:
+def _config(*, default_brain: str = "claude:small", model_name: str = "small", extended_enabled: bool = True) -> str:
     return (
         f"""
-default_brain: claude:small
+default_brain: {default_brain}
 channels:
   telegram:
     enabled: true
@@ -32,10 +32,10 @@ session_lifecycle:
     turn_input_tokens: 12000
   model_profiles:
     small-standard:
-      model: small
+      model: {model_name}
       input_capacity_tokens: 100000
     small-extended:
-      model: small
+      model: {model_name}
       variant: extended
       input_capacity_tokens: 300000
       extended_context: true
@@ -82,23 +82,23 @@ def _event(*, event_id: int = 1, content: str = "hello", conv: str = "c1"):
     )
 
 
-def _seed_session(instance: Path, *, tokens: int) -> None:
+def _seed_session(instance: Path, *, brain: str = "claude", model: str = "small", tokens: int) -> None:
     conn = queue.connect(instance)
     try:
         sessions.upsert_session(
             conn,
             channel="telegram",
             conversation_id="c1",
-            brain="claude",
+            brain=brain,
             session_id="sess-1234",
             slot=0,
         )
         telemetry.record_usage(
             conn,
-            owner_key=compaction.owner_key("telegram", "c1", "claude", 0),
-            brain="claude",
+            owner_key=compaction.owner_key("telegram", "c1", brain, 0),
+            brain=brain,
             usage=telemetry.ContextUsage.from_anthropic_usage({"input_tokens": tokens}),
-            model="small",
+            model=model,
             context_profile="small-standard",
         )
     finally:
@@ -200,4 +200,20 @@ def test_usage_known_false_after_rotation(tmp_path: Path) -> None:
         runtime.process_event(_event())
 
     assert evaluate.call_args.kwargs["usage_known"] is False
+    runtime.close()
+
+
+def test_upgrade_cross_family_rotates_instead(tmp_path: Path) -> None:
+    instance = _instance(config_text=_config(default_brain="codex:claude-small", model_name="claude-small"))
+    _seed_session(instance, brain="codex", model="claude-small", tokens=10_000)
+    runtime = _runtime(instance)
+    runtime._deliver_response = lambda source, response, meta: None
+
+    with mock.patch(
+        "gateway.runtime.invoke_brain",
+        return_value=BrainResult(response="fresh reply", session_id="sess-new"),
+    ) as invoke:
+        runtime.process_event(_event(content="x" * 300_000))
+
+    assert invoke.call_args.kwargs["resume_session"] is None
     runtime.close()

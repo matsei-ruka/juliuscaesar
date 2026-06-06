@@ -2220,6 +2220,17 @@ class GatewayRuntime:
         profile = registry.for_model(lookup_model) if lookup_model else None
         return registry, profile
 
+    @staticmethod
+    def _model_family(model: str | None) -> str:
+        text = (model or "").strip().lower()
+        if text.startswith("claude"):
+            return "claude"
+        if text.startswith(("gpt-", "o", "codex")):
+            return "codex"
+        if text.startswith("gemini"):
+            return "gemini"
+        return text.split(":", 1)[0] if ":" in text else text
+
     def _rotate_session_for_pressure(
         self,
         *,
@@ -2390,14 +2401,23 @@ class GatewayRuntime:
         )
         if decision.action == routing.UPGRADE and decision.upgrade_profile is not None:
             up = decision.upgrade_profile
-            self.log(
-                f"context_capacity_upgrade id={event.id} brain={brain} "
-                f"from={selected.key} to={up.key} required={required} "
-                f"routing_pressure={decision.routing_pressure:.2f}",
-                event_id=event.id,
-                kind="context_capacity_upgrade",
-            )
-            return brain, up.model, resume_session
+            if self._model_family(up.model) != brain.split(":", 1)[0]:
+                decision = routing.GuardDecision(
+                    routing.ROTATE,
+                    "upgrade profile crosses brain family; rotating instead",
+                    decision.routing_pressure,
+                    decision.lifecycle_pressure,
+                    decision.selected_profile,
+                )
+            else:
+                self.log(
+                    f"context_capacity_upgrade id={event.id} brain={brain} "
+                    f"from={selected.key} to={up.key} required={required} "
+                    f"routing_pressure={decision.routing_pressure:.2f}",
+                    event_id=event.id,
+                    kind="context_capacity_upgrade",
+                )
+                return brain, up.model, resume_session
         if decision.action in (routing.ROTATE, routing.EMERGENCY_ROTATE) and resume_session:
             self._rotate_session_for_pressure(
                 channel=channel,
