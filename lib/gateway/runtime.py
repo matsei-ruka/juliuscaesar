@@ -1702,9 +1702,19 @@ class GatewayRuntime:
             )
             return result.response or ""
 
-        if result.session_id:
+        # When Codex resumes (no new rollout file written), capture_session_id
+        # returns None even though the dispatch ran inside `resume_session`.
+        # Use the resumed id as the effective session for footer + bookkeeping
+        # so the table's updated_at reflects activity and the footer doesn't
+        # falsely advertise "no session".
+        effective_session_id = result.session_id or resume_session
+        if effective_session_id:
             self._record_session(
-                channel, event.conversation_id, brain, result.session_id, slot=slot
+                channel,
+                event.conversation_id,
+                brain,
+                effective_session_id,
+                slot=slot,
             )
 
         # Sticky brain is only set by an explicit user action: `/brain X` slash
@@ -1746,7 +1756,7 @@ class GatewayRuntime:
                 self.config.reply_footer,
                 brain=brain,
                 model=model,
-                session_id=result.session_id,
+                session_id=effective_session_id,
                 elapsed_seconds=_elapsed_seconds(event, monotonic_start),
                 slot=slot,
                 max_concurrent=self.config.parallel.max_concurrent,

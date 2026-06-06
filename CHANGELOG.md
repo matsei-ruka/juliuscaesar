@@ -5,6 +5,25 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.06.06.2
+
+Reply footer: fall back to the resumed session id when capture returns None.
+
+- `lib/gateway/runtime.py`: after `invoke_brain`, compute
+  `effective_session_id = result.session_id or resume_session` and use it
+  both for `_record_session` (so the sessions row's `updated_at` keeps
+  ticking on continued conversations) and for `reply_footer.render_footer`
+  (so the footer shows the actual session in use).
+- Codex's CLI does not write a new rollout JSONL when invoked with
+  `--resume <uuid>` — it appends to the existing file. The adapter's
+  pre/post snapshot diff therefore returns `None` for every resumed turn,
+  which previously made the footer advertise `sess none` even though the
+  dispatch successfully resumed a real session. The runtime now treats
+  the looked-up `resume_session` as the authoritative id when the brain
+  result didn't carry a fresh one.
+- Regression test:
+  `tests/gateway/test_reply_footer_runtime.py::test_footer_falls_back_to_resumed_session_id_when_capture_returns_none`.
+
 ## 2026.06.06.1
 
 Codex brain: honor `CODEX_HOME` when capturing session ids.
