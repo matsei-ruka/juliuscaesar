@@ -487,25 +487,23 @@ class PiBrainAdjustResumeSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             brain = self._brain(tmpdir=Path(tmpdir))
             uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
-            session_dir = _pi_session_dir(tmpdir)
-            session_dir.mkdir(parents=True, exist_ok=True)
-            (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
-                b'{"type":"image","mimeType":"image/jpeg","data":"/9j/abc"}'
-            )
-            result = brain.adjust_resume_session("deepseek-v4-flash", uuid)
-            self.assertIsNone(result)
+            with _PiHome(tmpdir) as pi_home:
+                (pi_home.sessions / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
+                    b'{"type":"image","mimeType":"image/jpeg","data":"/9j/abc"}'
+                )
+                result = brain.adjust_resume_session("deepseek-v4-flash", uuid)
+                self.assertIsNone(result)
 
     def test_keeps_session_when_text_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             brain = self._brain(tmpdir=Path(tmpdir))
             uuid = "019e3039-b427-7702-ab4c-d41d9b4f72ef"
-            session_dir = _pi_session_dir(tmpdir)
-            session_dir.mkdir(parents=True, exist_ok=True)
-            (session_dir / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
-                b'{"role":"user","content":[{"type":"text","text":"hello"}]}'
-            )
-            result = brain.adjust_resume_session("deepseek-v4-flash", uuid)
-            self.assertEqual(result, uuid)
+            with _PiHome(tmpdir) as pi_home:
+                (pi_home.sessions / f"2026-05-16T09-59-08-584Z_{uuid}.jsonl").write_bytes(
+                    b'{"role":"user","content":[{"type":"text","text":"hello"}]}'
+                )
+                result = brain.adjust_resume_session("deepseek-v4-flash", uuid)
+                self.assertEqual(result, uuid)
 
     def test_keeps_session_when_file_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
