@@ -66,6 +66,12 @@ class RotateSlotTest(unittest.TestCase):
             assert result is not None
             self.assertEqual(result.tokens_before, 120_000)
             self.assertEqual(result.tokens_after, 0)
+            tel = telemetry.get_telemetry(
+                conn,
+                owner_key=compaction.owner_key("telegram", "conv1", "claude", 0),
+            )
+            assert tel is not None
+            self.assertIsNone(tel.effective_input_tokens)
             remaining = compaction.list_conversation_slots(
                 conn, channel="telegram", conversation_id="conv1"
             )

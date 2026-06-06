@@ -76,12 +76,13 @@ def rotate_slot(
     )
     conn.commit()
     telemetry.record_rotation(conn, owner_key=key)
+    after = telemetry.get_telemetry(conn, owner_key=key)
 
     return notify.SlotCompaction(
         brain=brain.split(":", 1)[0],
         slot=slot,
         tokens_before=tokens_before,
-        tokens_after=0,
+        tokens_after=(after.effective_input_tokens or 0) if after else 0,
         method="rotated",
     )
 
