@@ -2240,13 +2240,15 @@ class GatewayRuntime:
         dispatches unchanged rather than guessing capacity (§5.2, §9).
         """
         registry = self.config.session_lifecycle.registry()
-        lookup_model = model
-        # Brain specs carry short model aliases (e.g. "sonnet-4-6" from
-        # "claude:sonnet-4-6"), but profiles use the full canonical model id
-        # ("claude-sonnet-4-6"). Prepend the brain prefix for Claude.
-        if lookup_model and brain == "claude" and not lookup_model.startswith("claude-"):
-            lookup_model = f"claude-{lookup_model}"
-        profile = registry.for_model(lookup_model) if lookup_model else None
+        if not model:
+            return registry, None
+        profile = registry.for_model(model)
+        if profile is None and brain == "claude" and not model.startswith("claude-"):
+            # Brain specs carry short aliases ("sonnet-4-6" from "claude:sonnet-4-6")
+            # but built-in profiles use canonical ids ("claude-sonnet-4-6"). Try the
+            # prefixed form as a fallback so operator-defined model names (e.g. "small")
+            # resolve on exact match and don't get mangled.
+            profile = registry.for_model(f"claude-{model}")
         return registry, profile
 
     @staticmethod
