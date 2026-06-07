@@ -170,7 +170,7 @@ class ContextProfileUnavailableHandlerTests(unittest.TestCase):
             self.assertIsInstance(decision, Retry)
             conn = queue.connect(inst)
             try:
-                self.assertIsNotNone(
+                self.assertIsNone(
                     sessions.get_session(
                         conn, channel="telegram", conversation_id="c1", brain="claude", slot=0
                     )
