@@ -68,9 +68,11 @@ if (( PROMPT_LEN > MAX_PROMPT_BYTES )); then
     PROMPT="${PROMPT:0:$MAX_PROMPT_BYTES}"
 fi
 
-# -p/--single requires its value as the immediately following argument.
-# Build ARGS with prompt adjacent to -p, then append resume/model/passthrough.
-ARGS=("-p" "$PROMPT")
+# grok 0.2.x rejects prompts starting with "---" via -p (clap treats them as
+# unexpected arguments even when quoted). Use --prompt-file to bypass this.
+PROMPT_TMP=$(mktemp -t grok-prompt.XXXXXX)
+printf '%s' "$PROMPT" > "$PROMPT_TMP"
+ARGS=("--prompt-file" "$PROMPT_TMP")
 
 RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"
 if [[ -n "$RESUME" ]]; then
@@ -87,7 +89,7 @@ fi
 
 NDJSON_TMP=$(mktemp -t grok-ndjson.XXXXXX)
 STDERR_TMP=$(mktemp -t grok-stderr.XXXXXX)
-trap 'rm -f "$NDJSON_TMP" "$STDERR_TMP"' EXIT
+trap 'rm -f "$PROMPT_TMP" "$NDJSON_TMP" "$STDERR_TMP"' EXIT
 
 grok "${ARGS[@]}" >"$NDJSON_TMP" 2>"$STDERR_TMP" || RC=$?
 RC="${RC:-0}"
