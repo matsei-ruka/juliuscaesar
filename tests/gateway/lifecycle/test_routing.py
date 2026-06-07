@@ -113,5 +113,18 @@ class PressureTest(unittest.TestCase):
         self.assertEqual(d.action, routing.ROTATE)
 
 
+class ProviderManagedCompactionTest(unittest.TestCase):
+    def test_opencode_skips_rotation(self) -> None:
+        self.assertIn("opencode", routing.PROVIDER_MANAGED_COMPACTION_BRAINS)
+        self.assertFalse(routing.should_rotate("opencode"))
+        self.assertFalse(routing.should_rotate("opencode:anything"))
+
+    def test_other_brains_still_rotate(self) -> None:
+        self.assertTrue(routing.should_rotate("claude"))
+        self.assertTrue(routing.should_rotate("claude:sonnet"))
+        self.assertTrue(routing.should_rotate("codex"))
+        self.assertTrue(routing.should_rotate("pi:minimax-m3"))
+
+
 if __name__ == "__main__":
     unittest.main()

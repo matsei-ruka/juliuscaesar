@@ -2399,6 +2399,8 @@ class GatewayRuntime:
         lc = self.config.session_lifecycle
         if not lc.enabled or not event.conversation_id:
             return brain, model, resume_session
+        if not routing.should_rotate(brain):
+            return brain, model, resume_session
         registry, selected = self._resolve_context_profile(brain, model)
         if selected is None:
             return brain, model, resume_session
