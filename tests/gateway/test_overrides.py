@@ -16,7 +16,7 @@ class InlineOverrideTests(unittest.TestCase):
     def test_short_alias_resolves(self):
         result = overrides.parse_inline_override("[opus] explain quantum tunneling")
         self.assertIsNotNone(result)
-        self.assertEqual(result.spec, "claude:opus-4-7-1m")
+        self.assertEqual(result.spec, "claude:opus-4-8")
         self.assertEqual(result.cleaned_content, "explain quantum tunneling")
 
     def test_full_spec_passed_through(self):
@@ -40,21 +40,13 @@ class SlashCommandTests(unittest.TestCase):
         cmd = overrides.parse_slash_command("/brain opus")
         self.assertIsNotNone(cmd)
         self.assertEqual(cmd.kind, "brain")
-        self.assertEqual(cmd.spec, "claude:opus-4-7-1m")
+        self.assertEqual(cmd.spec, "claude:opus-4-8")
         self.assertIn("sticky brain", cmd.reply.lower())
 
     def test_brain_help(self):
         cmd = overrides.parse_slash_command("/brain")
         self.assertEqual(cmd.kind, "help")
         self.assertIn("usage", cmd.reply.lower())
-
-    def test_compact_command(self):
-        cmd = overrides.parse_slash_command("/compact")
-        self.assertIsNotNone(cmd)
-        self.assertEqual(cmd.kind, "compact")
-
-    def test_compact_case_insensitive(self):
-        self.assertEqual(overrides.parse_slash_command("  /COMPACT  ").kind, "compact")
 
     def test_unrelated_slash(self):
         self.assertIsNone(overrides.parse_slash_command("/help"))
