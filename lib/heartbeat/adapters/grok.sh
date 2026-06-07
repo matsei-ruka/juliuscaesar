@@ -61,7 +61,16 @@ case "$MODEL" in
     *)                        ;;  # passthrough — grok rejects unknown ids
 esac
 
-ARGS=("-p")
+PROMPT=$(cat)
+PROMPT_LEN=${#PROMPT}
+if (( PROMPT_LEN > MAX_PROMPT_BYTES )); then
+    echo "grok adapter: prompt truncated from ${PROMPT_LEN} to ${MAX_PROMPT_BYTES} chars (ARG_MAX safeguard)" >&2
+    PROMPT="${PROMPT:0:$MAX_PROMPT_BYTES}"
+fi
+
+# -p/--single requires its value as the immediately following argument.
+# Build ARGS with prompt adjacent to -p, then append resume/model/passthrough.
+ARGS=("-p" "$PROMPT")
 
 RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"
 if [[ -n "$RESUME" ]]; then
@@ -75,14 +84,6 @@ fi
 if (( ${#PASSTHROUGH_ARGS[@]} > 0 )); then
     ARGS+=("${PASSTHROUGH_ARGS[@]}")
 fi
-
-PROMPT=$(cat)
-PROMPT_LEN=${#PROMPT}
-if (( PROMPT_LEN > MAX_PROMPT_BYTES )); then
-    echo "grok adapter: prompt truncated from ${PROMPT_LEN} to ${MAX_PROMPT_BYTES} chars (ARG_MAX safeguard)" >&2
-    PROMPT="${PROMPT:0:$MAX_PROMPT_BYTES}"
-fi
-ARGS+=("$PROMPT")
 
 NDJSON_TMP=$(mktemp -t grok-ndjson.XXXXXX)
 STDERR_TMP=$(mktemp -t grok-stderr.XXXXXX)
