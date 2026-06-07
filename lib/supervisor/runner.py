@@ -46,6 +46,7 @@ LogFn = Callable[[str], None]
 # instance_boot_id for every tick within a gateway lifetime. Keyed by
 # instance_dir so multi-instance test runs don't share boot ids.
 _REPORTER_CACHE: dict[str, "CompanyReporter | None"] = {}
+FINALIZE_ATTEMPT_CAP = 5
 
 
 def _build_default_reporter(instance_dir: Path, log: LogFn) -> "CompanyReporter | None":
@@ -627,6 +628,8 @@ def _finalize_completed(
             continue
 
         # --- Card delete (only if we have one) ---
+        card_ok = True
+        card_failure = ""
         if ev_state.channel_message_id:
             source = str(status_row.get("source") or "telegram")
             meta = status_row.get("meta") or {}
@@ -650,8 +653,18 @@ def _finalize_completed(
                         "ok": ok,
                     },
                 )
+                if ok:
+                    ev_state.channel_message_id = None
+                else:
+                    card_ok = False
+                    card_failure = "sender.delete returned False"
+            else:
+                card_ok = False
+                card_failure = "missing delivery address"
 
         # --- the-company finalize ---
+        reporter_ok = True
+        reporter_failure = ""
         if (
             reporter is not None
             and ev_state.company_reported_started
@@ -670,9 +683,40 @@ def _finalize_completed(
             )
             if ok:
                 ev_state.company_reported_finished = True
+            else:
+                reporter_ok = False
+                reporter_failure = "reporter.report_finished returned False"
 
-        # Drop the event from state — finalized in both channels.
-        del state.events[str(eid)]
+        if card_ok and reporter_ok:
+            del state.events[str(eid)]
+            continue
+
+        ev_state.finalize_attempts = min(
+            FINALIZE_ATTEMPT_CAP, int(ev_state.finalize_attempts or 0) + 1
+        )
+        if ev_state.finalize_attempts >= FINALIZE_ATTEMPT_CAP:
+            details = {
+                "card_ok": card_ok,
+                "reporter_ok": reporter_ok,
+                "card_failure": card_failure,
+                "reporter_failure": reporter_failure,
+            }
+            _write_log(
+                instance_dir,
+                {
+                    "kind": "finalize_abandoned",
+                    "ts": now.isoformat(),
+                    "event_id": eid,
+                    "status": status,
+                    "attempts": ev_state.finalize_attempts,
+                    "details": details,
+                },
+            )
+            log(
+                f"finalize_abandoned event={eid} status={status} attempts={ev_state.finalize_attempts} "
+                f"card_ok={card_ok} reporter_ok={reporter_ok}"
+            )
+            del state.events[str(eid)]
 
 
 def _parse_iso(value: str) -> datetime | None:

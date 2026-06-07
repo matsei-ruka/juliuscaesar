@@ -45,6 +45,7 @@ class EventState:
     company_brain: str = ""
     company_model: str = ""
     company_started_at_iso: str = ""
+    finalize_attempts: int = 0
     # Wall-clock timestamp (seconds since epoch) when the entry should become
     # eligible for prune. Set whenever recovery_attempts is bumped or the row
     # transitions out of the active set with non-zero counter; 0 means
