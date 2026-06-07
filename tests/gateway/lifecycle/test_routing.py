@@ -53,6 +53,32 @@ class PressureTest(unittest.TestCase):
         )
         self.assertEqual(d.action, routing.DISPATCH)
 
+    def test_fresh_session_oversized_fails_without_larger_profile(self) -> None:
+        d = routing.evaluate_pressure(
+            selected_profile=SMALL,
+            ceiling=SMALL,
+            required=150_000,
+            current_context=0,
+            thresholds=routing.Thresholds(),
+            resumed=False,
+            larger_profiles=[],
+        )
+        self.assertEqual(d.action, routing.FAIL)
+        self.assertEqual(d.reason, "context_required_exceeds_profile")
+
+    def test_fresh_session_oversized_can_upgrade_to_larger_profile(self) -> None:
+        d = routing.evaluate_pressure(
+            selected_profile=SMALL,
+            ceiling=BIG,
+            required=150_000,
+            current_context=0,
+            thresholds=routing.Thresholds(),
+            resumed=False,
+            larger_profiles=[BIG],
+        )
+        self.assertEqual(d.action, routing.UPGRADE)
+        self.assertEqual(d.upgrade_profile, BIG)
+
     def test_fitting_profile_dispatches(self) -> None:
         d = routing.evaluate_pressure(
             selected_profile=SMALL,

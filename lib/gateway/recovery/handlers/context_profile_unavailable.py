@@ -38,16 +38,18 @@ class ContextProfileUnavailableHandler:
             return Fail(reason="context_profile_unavailable without resolvable brain")
 
         if _fits_standard_profile(ctx, channel, event.conversation_id, brain):
+            cleared = _clear_brain_session_mappings(ctx, channel, event.conversation_id, brain)
             ctx.log(
                 f"context_profile_unavailable_warning id={event.id} brain={brain} "
-                "reason=standard_profile_still_fits",
+                f"reason=standard_profile_still_fits cleared={cleared}",
                 event_id=getattr(event, "id", None),
                 kind="context_profile_unavailable_warning",
                 brain=brain,
+                cleared=cleared,
             )
             _reenqueue(event, ctx, meta)
             return Retry(
-                reason="context_profile_unavailable — retrying without rotation",
+                reason="context_profile_unavailable — retrying on fresh standard profile",
                 delay_seconds=0.0,
             )
 
@@ -87,6 +89,29 @@ def _rotate_brain_slots(ctx, channel, conversation_id, brain) -> int:
     finally:
         conn.close()
     return rotated
+
+
+def _clear_brain_session_mappings(ctx, channel, conversation_id, brain) -> int:
+    conn = queue.connect(ctx.instance_dir)
+    try:
+        rows = conn.execute(
+            """
+            SELECT slot FROM sessions
+            WHERE channel=? AND conversation_id=? AND brain=?
+            """,
+            (channel, conversation_id, brain.split(":", 1)[0]),
+        ).fetchall()
+        conn.execute(
+            """
+            DELETE FROM sessions
+            WHERE channel=? AND conversation_id=? AND brain=?
+            """,
+            (channel, conversation_id, brain.split(":", 1)[0]),
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
 
 
 def _fits_standard_profile(ctx, channel: str, conversation_id: str, brain: str) -> bool:

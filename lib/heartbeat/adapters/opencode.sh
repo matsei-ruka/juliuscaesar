@@ -69,6 +69,12 @@ trap 'rm -f "$NDJSON_TMP"' EXIT
 opencode "${ARGS[@]}" >"$NDJSON_TMP" 2>&1 || RC=$?
 RC="${RC:-0}"
 
+if [[ "$RC" != "0" ]]; then
+    echo "opencode adapter: opencode exited rc=$RC; last NDJSON/stderr lines:" >&2
+    tail -n 50 "$NDJSON_TMP" >&2 || true
+    exit "$RC"
+fi
+
 OPENCODE_DB="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
 if [[ ! -f "$OPENCODE_DB" ]] && [[ -f "$HOME/Library/Application Support/opencode/opencode.db" ]]; then
     OPENCODE_DB="$HOME/Library/Application Support/opencode/opencode.db"

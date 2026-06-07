@@ -10,6 +10,7 @@ Each brain module subclasses `Brain` and overrides:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
@@ -38,6 +39,8 @@ from ..queue import Event
 FRAMEWORK_ROOT = Path(__file__).resolve().parents[2]
 ADAPTERS_DIR = FRAMEWORK_ROOT / "heartbeat" / "adapters"
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -550,10 +553,30 @@ Your reply is only the text the user reads.
         sidecar_session_id: str | None = None
         sidecar_usage: dict | None = None
         if usage_path.exists():
+            payload = None
             try:
-                payload = json.loads(usage_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                payload = None
+                raw_sidecar = usage_path.read_text(encoding="utf-8")
+            except OSError as err:
+                logger.warning(
+                    "usage_sidecar_read_failed event_id=%s brain=%s path=%s err=%s",
+                    event.id,
+                    self.name,
+                    usage_path,
+                    err,
+                )
+                raw_sidecar = ""
+            if raw_sidecar:
+                try:
+                    payload = json.loads(raw_sidecar)
+                except json.JSONDecodeError as err:
+                    logger.warning(
+                        "usage_sidecar_parse_failed event_id=%s brain=%s path=%s err=%s",
+                        event.id,
+                        self.name,
+                        usage_path,
+                        err,
+                    )
+                    payload = None
             if isinstance(payload, dict):
                 sid = payload.get("session_id")
                 if isinstance(sid, str) and sid:
