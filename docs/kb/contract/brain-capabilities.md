@@ -11,7 +11,7 @@ code_anchors:
     symbol: "exec claude"
   - path: lib/heartbeat/adapters/aider.sh
     symbol: "exec aider"
-last_verified: 2026-05-07
+last_verified: 2026-06-07
 verified_by: Matsei Ruka
 related:
   - contract/adapter-and-delivery-contracts.md
@@ -20,7 +20,7 @@ related:
 
 ## Summary
 
-The gateway supports six brains. Five shell out via `lib/heartbeat/adapters/<name>.sh`; one (`codex_api`) calls the OpenAI Responses API directly via the local Codex CLI's OAuth token. Each brain has a Python wrapper under `lib/gateway/brains/<name>.py` that the dispatcher (`dispatch.py:_BRAIN_REGISTRY`) routes to. Triage classifiers no longer name brains directly; the gateway maps triage classes to supported brain specs from config, then still enforces capability constraints such as image events requiring a vision-capable brain.
+The gateway supports seven shell-adapter brains plus one direct-API brain. Seven shell out via `lib/heartbeat/adapters/<name>.sh`; one (`codex_api`) calls the OpenAI Responses API directly via the local Codex CLI's OAuth token. Each brain has a Python wrapper under `lib/gateway/brains/<name>.py` that the dispatcher (`dispatch.py:_BRAIN_REGISTRY`) routes to. Triage classifiers no longer name brains directly; the gateway maps triage classes to supported brain specs from config, then still enforces capability constraints such as image events requiring a vision-capable brain.
 
 ## Matrix
 
@@ -30,8 +30,31 @@ The gateway supports six brains. Five shell out via `lib/heartbeat/adapters/<nam
 | codex     | yes           | partial | yes        | no  | `codex exec` subprocess     | `codex exec resume <uuid>`               |
 | codex_api | no (no shell) | partial | no         | no  | direct Responses API call   | API conversation id (no shell session)   |
 | gemini    | partial       | yes     | partial    | yes | `gemini -p` subprocess      | `gemini --resume <uuid \| latest>`       |
+| grok      | yes           | yes     | yes        | no  | `grok -p` subprocess        | `grok -r <uuid>` (`-c` continues last)   |
 | opencode  | yes           | no      | yes        | no  | `opencode run` subprocess   | `opencode run --session <id>`            |
 | aider     | yes (git ops) | no      | yes        | no  | `aider` subprocess          | history file in `AIDER_HISTORY_DIR/<id>` |
+| pi        | yes           | yes     | yes        | no  | `pi -p` subprocess          | `pi --session <uuid>`                    |
+
+### Grok specifics
+
+- Binary: `grok` (xAI grok CLI 0.2.x, ships through SuperGrok / X Premium+).
+- Auth: `XAI_API_KEY` from the instance `.env`, falls back to grok's own
+  OAuth state in `~/.grok/`.
+- Models: `grok-build` (default, optimal for coding) and
+  `grok-composer-2.5-fast` (lower latency). Brain spec aliases:
+  `grok` / `grok:grok-build` → `grok-build`, `grok:fast` →
+  `grok-composer-2.5-fast`.
+- L1 preamble is delivered via `--system-prompt-override <PREAMBLE>` rather
+  than `<system>` tag injection.
+- Session id is captured from the terminal `{"type":"end",...}` NDJSON event
+  (not the first event — that pattern is opencode).
+- Token telemetry reads `effective_input_tokens` from the last line of
+  `~/.grok/sessions/<urlencode(cwd)>/<sessionId>/updates.jsonl`. No
+  output/cache token breakdown is exposed; the sidecar records zero for
+  those fields, which §8 rotation tolerates.
+- Compaction is NOT provider-managed — grok exposes `/compact` but no
+  auto-threshold, so the framework's §8 rotation drives lifecycle.
+- Subscription: SuperGrok or X Premium+ required for unmetered access.
 
 ## Invariants
 

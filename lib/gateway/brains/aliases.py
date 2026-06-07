@@ -9,7 +9,9 @@ from __future__ import annotations
 
 
 SHORT_NAME_ALIASES: dict[str, str] = {
-    "opus": "claude:opus-4-7-1m",
+    "opus": "claude:opus-4-8",
+    "opus48": "claude:opus-4-8",
+    "opus-4-8": "claude:opus-4-8",
     "opus47": "claude:opus-4-7-1m",
     "opus-4-7": "claude:opus-4-7",
     "sonnet": "claude:sonnet-4-6",
@@ -30,6 +32,10 @@ SHORT_NAME_ALIASES: dict[str, str] = {
     "gemini20": "gemini:gemini-2.0-flash",
     "opencode": "opencode",
     "aider": "aider",
+    "grok": "grok",
+    "grok-build": "grok:grok-build",
+    "grok-fast": "grok:fast",
+    "grok-composer": "grok:fast",
     "pi": "pi",
     "pi-sonnet": "pi:sonnet",
     "pi-opus": "pi:opus",
