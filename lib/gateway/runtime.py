@@ -1631,6 +1631,9 @@ class GatewayRuntime:
                     f"(was {brain}) reason=image_path"
                 )
                 brain, model = vision_brain, None
+        brain, model = self._triage_capacity_guard(
+            event=event, channel=channel, brain=brain, model=model
+        )
         self.log(
             f"route id={event.id} channel={channel} brain={brain} "
             f"model={model or '-'} reason={selection.reason}"
@@ -2210,6 +2213,60 @@ class GatewayRuntime:
         registry = self.config.session_lifecycle.registry()
         profile = registry.for_model(model) if model else None
         return registry, profile
+
+    # Triage-time safety: brains whose ceiling is 200K (sonnet/haiku) must not
+    # be chosen for a conversation whose tracked context already exceeds the
+    # safe input threshold. Override to claude:opus (which carries the 1M
+    # extended profile).
+    _TRIAGE_CAPACITY_OVERRIDES: tuple[tuple[str, int, str], ...] = (
+        ("claude:sonnet", 170_000, "claude:opus"),
+        ("claude:haiku", 170_000, "claude:opus"),
+    )
+
+    def _triage_capacity_guard(
+        self,
+        *,
+        event: queue.Event,
+        channel: str,
+        brain: str,
+        model: str | None,
+    ) -> tuple[str, str | None]:
+        if not event.conversation_id:
+            return brain, model
+        rule = next(
+            (r for r in self._TRIAGE_CAPACITY_OVERRIDES if r[0] == brain),
+            None,
+        )
+        if rule is None:
+            return brain, model
+        _, threshold, target_brain = rule
+        conn = queue.connect(self.instance_dir)
+        try:
+            telemetry.init_db(conn)
+            row = conn.execute(
+                "SELECT MAX(effective_input_tokens) FROM session_lifecycle "
+                "WHERE owner_key LIKE ?",
+                (f"gateway:{channel}:{event.conversation_id}:%",),
+            ).fetchone()
+        finally:
+            conn.close()
+        max_ctx = int(row[0]) if row and row[0] else 0
+        if max_ctx <= threshold:
+            return brain, model
+        self.log(
+            f"triage_capacity_guard id={event.id} from_brain={brain} "
+            f"to_brain={target_brain} max_effective={max_ctx} "
+            f"threshold={threshold}",
+            event_id=event.id,
+            kind="triage_capacity_guard",
+            channel=channel,
+            conversation_id=event.conversation_id,
+            from_brain=brain,
+            to_brain=target_brain,
+            max_effective_input_tokens=max_ctx,
+            threshold_tokens=threshold,
+        )
+        return target_brain, None
 
     def _apply_routing_pressure(
         self,
