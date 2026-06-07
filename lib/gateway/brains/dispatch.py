@@ -18,6 +18,7 @@ from .claude import ClaudeBrain
 from .codex import CodexBrain
 from .codex_api import CodexApiBrain
 from .gemini import GeminiBrain
+from .grok import GrokBrain
 from .opencode import OpencodeBrain
 from .openrouter import OpenRouterBrain
 from .pi import PiBrain
@@ -28,6 +29,7 @@ _BRAIN_REGISTRY: dict[str, type[Brain]] = {
     "codex": CodexBrain,
     "codex_api": CodexApiBrain,
     "gemini": GeminiBrain,
+    "grok": GrokBrain,
     "opencode": OpencodeBrain,
     "openrouter": OpenRouterBrain,
     "aider": AiderBrain,

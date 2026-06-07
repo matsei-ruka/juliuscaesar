@@ -13,6 +13,7 @@ from .claude import ClaudeBrain
 from .codex import CodexBrain
 from .dispatch import invoke_brain, supported_brains
 from .gemini import GeminiBrain
+from .grok import GrokBrain
 from .opencode import OpencodeBrain
 from .pi import PiBrain
 
@@ -26,6 +27,7 @@ __all__ = [
     "ClaudeBrain",
     "CodexBrain",
     "GeminiBrain",
+    "GrokBrain",
     "OpencodeBrain",
     "PiBrain",
     "invoke_brain",
