@@ -70,12 +70,30 @@ def rotate_slot(
     before = telemetry.get_telemetry(conn, owner_key=key)
     tokens_before = before.effective_input_tokens if before else None
 
-    conn.execute(
-        "DELETE FROM sessions WHERE channel=? AND conversation_id=? AND brain=? AND slot=?",
-        (channel, conversation_id, brain.split(":", 1)[0], int(slot)),
-    )
-    conn.commit()
-    telemetry.record_rotation(conn, owner_key=key)
+    ts = telemetry.now_iso()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM sessions WHERE channel=? AND conversation_id=? AND brain=? AND slot=?",
+            (channel, conversation_id, brain.split(":", 1)[0], int(slot)),
+        )
+        conn.execute(
+            """
+            UPDATE session_lifecycle SET
+                rotation_count=rotation_count+1,
+                effective_input_tokens=NULL,
+                usage_source=NULL,
+                maintenance_state='rotated',
+                last_activity_at=?,
+                updated_at=?
+            WHERE owner_key=?
+            """,
+            (ts, ts, key),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     after = telemetry.get_telemetry(conn, owner_key=key)
 
     return notify.SlotCompaction(
