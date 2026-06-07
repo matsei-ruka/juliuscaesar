@@ -23,6 +23,7 @@ class RegistryTest(unittest.TestCase):
                 "claude-sonnet-4-6",
                 "claude-haiku-4-5",
                 "gpt-5.4",
+                "gpt-5.5",
                 "gemini-2.5-pro",
             },
         )

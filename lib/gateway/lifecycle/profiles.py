@@ -68,7 +68,12 @@ DEFAULT_PROFILES: tuple[ContextProfile, ...] = (
     ContextProfile(
         key="gpt-5-4-standard",
         model="gpt-5.4",
-        input_capacity_tokens=256_000,
+        input_capacity_tokens=128_000,  # 256K total = 128K input + 128K output
+    ),
+    ContextProfile(
+        key="gpt-5-5-pro",
+        model="gpt-5.5",
+        input_capacity_tokens=272_000,  # Codex Pro tier: 400K total, 272K input
     ),
     ContextProfile(
         key="gemini-2-5-pro-standard",
