@@ -55,6 +55,22 @@ DEFAULT_PROFILES: tuple[ContextProfile, ...] = (
         requires_credits=True,
         enabled=True,
     ),
+    # opus-4-7-1m: the 1M-context variant of Opus 4.7; carries the same
+    # capacity envelope as 4-8. The gateway's "opus" alias routes here.
+    ContextProfile(
+        key="claude-opus-4-7-1m-standard",
+        model="claude-opus-4-7-1m",
+        input_capacity_tokens=200_000,
+    ),
+    ContextProfile(
+        key="claude-opus-4-7-1m-extended",
+        model="claude-opus-4-7-1m",
+        variant="extended",
+        input_capacity_tokens=1_000_000,
+        extended_context=True,
+        requires_credits=True,
+        enabled=True,
+    ),
     ContextProfile(
         key="claude-sonnet-4-6-standard",
         model="claude-sonnet-4-6",

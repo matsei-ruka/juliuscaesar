@@ -2211,16 +2211,25 @@ class GatewayRuntime:
         dispatches unchanged rather than guessing capacity (§5.2, §9).
         """
         registry = self.config.session_lifecycle.registry()
-        profile = registry.for_model(model) if model else None
+        lookup_model = model
+        # Brain specs carry short model aliases (e.g. "sonnet-4-6" from
+        # "claude:sonnet-4-6"), but profiles use the full canonical model id
+        # ("claude-sonnet-4-6"). Prepend the brain prefix for Claude.
+        if lookup_model and brain == "claude" and not lookup_model.startswith("claude-"):
+            lookup_model = f"claude-{lookup_model}"
+        profile = registry.for_model(lookup_model) if lookup_model else None
         return registry, profile
 
     # Triage-time safety: brains whose ceiling is 200K (sonnet/haiku) must not
     # be chosen for a conversation whose tracked context already exceeds the
     # safe input threshold. Override to claude:opus (which carries the 1M
     # extended profile).
-    _TRIAGE_CAPACITY_OVERRIDES: tuple[tuple[str, int, str], ...] = (
-        ("claude:sonnet", 170_000, "claude:opus"),
-        ("claude:haiku", 170_000, "claude:opus"),
+    # Format: (brain, model_prefix, threshold_tokens, target_brain_spec)
+    # model_prefix matches the start of the model string (e.g. "sonnet" matches
+    # "sonnet", "sonnet-4-6", etc.). brain is the bare brain name ("claude").
+    _TRIAGE_CAPACITY_OVERRIDES: tuple[tuple[str, str, int, str], ...] = (
+        ("claude", "sonnet", 170_000, "claude:opus"),
+        ("claude", "haiku", 170_000, "claude:opus"),
     )
 
     def _triage_capacity_guard(
@@ -2234,12 +2243,18 @@ class GatewayRuntime:
         if not event.conversation_id:
             return brain, model
         rule = next(
-            (r for r in self._TRIAGE_CAPACITY_OVERRIDES if r[0] == brain),
+            (
+                r
+                for r in self._TRIAGE_CAPACITY_OVERRIDES
+                if r[0] == brain and (model or "").startswith(r[1])
+            ),
             None,
         )
         if rule is None:
             return brain, model
-        _, threshold, target_brain = rule
+        _, _prefix, threshold, target_spec = rule
+        target_brain_name, _, target_model = target_spec.partition(":")
+
         conn = queue.connect(self.instance_dir)
         try:
             telemetry.init_db(conn)
@@ -2255,18 +2270,18 @@ class GatewayRuntime:
             return brain, model
         self.log(
             f"triage_capacity_guard id={event.id} from_brain={brain} "
-            f"to_brain={target_brain} max_effective={max_ctx} "
+            f"to_brain={target_brain_name} max_effective={max_ctx} "
             f"threshold={threshold}",
             event_id=event.id,
             kind="triage_capacity_guard",
             channel=channel,
             conversation_id=event.conversation_id,
             from_brain=brain,
-            to_brain=target_brain,
+            to_brain=target_brain_name,
             max_effective_input_tokens=max_ctx,
             threshold_tokens=threshold,
         )
-        return target_brain, None
+        return target_brain_name, target_model or None
 
     def _apply_routing_pressure(
         self,

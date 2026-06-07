@@ -3,6 +3,11 @@
 Sonnet and Haiku top out at 200K input. When the conversation already carries
 a tracked session above the safe threshold, triage must not pick them — the
 guard forces `claude:opus` so the 1M extended profile can absorb the turn.
+
+Runtime model strings use the short alias form produced by the router
+("sonnet-4-6" from a "claude:sonnet-4-6" brain spec, "haiku-4-5", etc.),
+NOT the full canonical profile model id ("claude-sonnet-4-6"). Tests here
+use the actual runtime values so they catch real dispatching bugs.
 """
 
 from __future__ import annotations
@@ -91,52 +96,66 @@ class TriageCapacityGuardTest(unittest.TestCase):
 
     def test_below_threshold_keeps_sonnet(self) -> None:
         _seed_usage(self.instance, brain="claude", tokens=120_000)
+        # Runtime produces brain="claude", model="sonnet-4-6" from "claude:sonnet-4-6" spec.
         brain, model = self.runtime._triage_capacity_guard(
-            event=_event(), channel="telegram", brain="claude:sonnet", model="claude-sonnet-4-6"
+            event=_event(), channel="telegram", brain="claude", model="sonnet-4-6"
         )
-        self.assertEqual(brain, "claude:sonnet")
-        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertEqual(brain, "claude")
+        self.assertEqual(model, "sonnet-4-6")
 
     def test_above_threshold_overrides_to_opus(self) -> None:
         _seed_usage(self.instance, brain="claude", tokens=180_000)
         brain, model = self.runtime._triage_capacity_guard(
-            event=_event(), channel="telegram", brain="claude:sonnet", model="claude-sonnet-4-6"
+            event=_event(), channel="telegram", brain="claude", model="sonnet-4-6"
         )
-        self.assertEqual(brain, "claude:opus")
-        self.assertIsNone(model)
+        # Guard splits "claude:opus" → brain="claude", model="opus".
+        # invoke_brain("claude", ...) hits _BRAIN_REGISTRY["claude"] ✓.
+        self.assertEqual(brain, "claude")
+        self.assertEqual(model, "opus")
 
     def test_haiku_also_overrides(self) -> None:
         _seed_usage(self.instance, brain="claude", tokens=200_000)
         brain, model = self.runtime._triage_capacity_guard(
-            event=_event(), channel="telegram", brain="claude:haiku", model="claude-haiku-4-5"
+            event=_event(), channel="telegram", brain="claude", model="haiku-4-5"
         )
-        self.assertEqual(brain, "claude:opus")
-        self.assertIsNone(model)
+        self.assertEqual(brain, "claude")
+        self.assertEqual(model, "opus")
 
     def test_opus_never_overridden(self) -> None:
         _seed_usage(self.instance, brain="claude", tokens=300_000)
+        # "opus-4-7-1m" comes from the "opus" alias → "claude:opus-4-7-1m" spec.
         brain, model = self.runtime._triage_capacity_guard(
-            event=_event(), channel="telegram", brain="claude:opus", model="claude-opus-4-8"
+            event=_event(), channel="telegram", brain="claude", model="opus-4-7-1m"
         )
-        self.assertEqual(brain, "claude:opus")
-        self.assertEqual(model, "claude-opus-4-8")
+        self.assertEqual(brain, "claude")
+        self.assertEqual(model, "opus-4-7-1m")
 
     def test_no_conversation_id_skips_guard(self) -> None:
         _seed_usage(self.instance, brain="claude", tokens=500_000)
         event = _event(conversation_id="")
         brain, model = self.runtime._triage_capacity_guard(
-            event=event, channel="telegram", brain="claude:sonnet", model="claude-sonnet-4-6"
+            event=event, channel="telegram", brain="claude", model="sonnet-4-6"
         )
-        self.assertEqual(brain, "claude:sonnet")
-        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertEqual(brain, "claude")
+        self.assertEqual(model, "sonnet-4-6")
 
     def test_empty_telemetry_keeps_sonnet(self) -> None:
         # No usage recorded — table empty, guard is a no-op.
         brain, model = self.runtime._triage_capacity_guard(
-            event=_event(), channel="telegram", brain="claude:sonnet", model="claude-sonnet-4-6"
+            event=_event(), channel="telegram", brain="claude", model="sonnet-4-6"
         )
-        self.assertEqual(brain, "claude:sonnet")
-        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertEqual(brain, "claude")
+        self.assertEqual(model, "sonnet-4-6")
+
+    def test_model_none_skips_guard(self) -> None:
+        # model=None means brain picked without a model spec; guard cannot
+        # determine family, so it is a no-op regardless of context size.
+        _seed_usage(self.instance, brain="claude", tokens=500_000)
+        brain, model = self.runtime._triage_capacity_guard(
+            event=_event(), channel="telegram", brain="claude", model=None
+        )
+        self.assertEqual(brain, "claude")
+        self.assertIsNone(model)
 
 
 if __name__ == "__main__":
