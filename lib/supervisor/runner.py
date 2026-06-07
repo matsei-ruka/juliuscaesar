@@ -8,6 +8,7 @@ Phase 3: AI narrator — cheap model call fills "Last signal" card field.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import uuid
 from datetime import datetime, timezone
@@ -100,6 +101,43 @@ def run_tick(
     if not cfg.enabled:
         return TickResult(enabled=False)
 
+    # Exclusive lock — prevents concurrent ticks from the supervisor daemon
+    # and the watchdog from both sending a card for the same event, which
+    # orphans the first card (it is sent but state.save never captures its
+    # message_id before the second caller overwrites it).
+    lock_path = Path(instance_dir) / "state" / "supervisor" / "tick.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = lock_path.open("a", encoding="utf-8")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_fh.close()
+        return TickResult(enabled=True)
+
+    try:
+        return _run_tick_locked(
+            instance_dir,
+            cfg=cfg,
+            dry_run=dry_run,
+            log=log,
+            sender=sender,
+            reporter=reporter,
+        )
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
+
+
+def _run_tick_locked(
+    instance_dir: Path,
+    *,
+    cfg: SupervisorConfig,
+    dry_run: bool = False,
+    log: LogFn,
+    sender: "CardSender | None",
+    reporter: "CompanyReporter | None | Any",
+) -> TickResult:
+    """Tick body — called only when the exclusive lock is held."""
     sender = sender or _MultiChannelSender()
     if reporter is _USE_DEFAULT_REPORTER:
         reporter = _build_default_reporter(instance_dir, log)

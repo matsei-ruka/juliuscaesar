@@ -9,7 +9,9 @@ from __future__ import annotations
 
 
 SHORT_NAME_ALIASES: dict[str, str] = {
-    "opus": "claude:opus-4-7-1m",
+    "opus": "claude:opus-4-8",
+    "opus48": "claude:opus-4-8",
+    "opus-4-8": "claude:opus-4-8",
     "opus47": "claude:opus-4-7-1m",
     "opus-4-7": "claude:opus-4-7",
     "sonnet": "claude:sonnet-4-6",
