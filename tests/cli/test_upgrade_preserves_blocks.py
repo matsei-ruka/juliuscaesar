@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -23,7 +24,8 @@ UPGRADE_BIN = REPO_ROOT / "bin" / "jc-upgrade"
 def _run_upgrade(instance: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PATH"] = "/usr/bin:/bin"
-    env["PYTHON"] = str(REPO_ROOT / ".venv" / "bin" / "python")
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python"
+    env["PYTHON"] = str(venv_python if venv_python.exists() else sys.executable)
     return subprocess.run(
         [str(UPGRADE_BIN), "--instance-dir", str(instance), "--defaults"],
         capture_output=True,
