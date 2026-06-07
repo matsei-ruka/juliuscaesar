@@ -44,6 +44,7 @@ export PATH="${HOME:-/tmp}/.local/bin:${HOME:-/tmp}/.npm-global/bin:${HOME:-/tmp
 MODEL_SPEC="${1:-}"
 shift || true
 PASSTHROUGH_ARGS=("$@")
+MAX_PROMPT_BYTES=102400
 
 if ! command -v grok >/dev/null 2>&1; then
     echo "grok CLI not installed. See https://github.com/superagent-ai/grok-cli or run 'npm i -g grok'" >&2
@@ -76,17 +77,37 @@ if (( ${#PASSTHROUGH_ARGS[@]} > 0 )); then
 fi
 
 PROMPT=$(cat)
+PROMPT_LEN=${#PROMPT}
+if (( PROMPT_LEN > MAX_PROMPT_BYTES )); then
+    echo "grok adapter: prompt truncated from ${PROMPT_LEN} to ${MAX_PROMPT_BYTES} chars (ARG_MAX safeguard)" >&2
+    PROMPT="${PROMPT:0:$MAX_PROMPT_BYTES}"
+fi
 ARGS+=("$PROMPT")
 
 NDJSON_TMP=$(mktemp -t grok-ndjson.XXXXXX)
-trap 'rm -f "$NDJSON_TMP"' EXIT
+STDERR_TMP=$(mktemp -t grok-stderr.XXXXXX)
+trap 'rm -f "$NDJSON_TMP" "$STDERR_TMP"' EXIT
 
-grok "${ARGS[@]}" >"$NDJSON_TMP" 2>&1 || RC=$?
+grok "${ARGS[@]}" >"$NDJSON_TMP" 2>"$STDERR_TMP" || RC=$?
 RC="${RC:-0}"
+
+if (( RC != 0 )); then
+    # Surface stderr + a tail of stdout so the gateway/recovery layer sees
+    # the real failure (stale session, auth, network) instead of an empty
+    # reply.
+    if [[ -s "$STDERR_TMP" ]]; then
+        cat "$STDERR_TMP" >&2
+    fi
+    if [[ -s "$NDJSON_TMP" ]]; then
+        echo "--- grok stdout tail ---" >&2
+        tail -n 20 "$NDJSON_TMP" >&2
+    fi
+    exit "$RC"
+fi
 
 SIDECAR="${JC_USAGE_SIDECAR_PATH:-}"
 
-python3 - "$NDJSON_TMP" "$SIDECAR" "$RESUME" "$HOME" <<'PYEOF'
+python3 - "$NDJSON_TMP" "$SIDECAR" "$RESUME" "$HOME" "$STDERR_TMP" <<'PYEOF'
 import json
 import os
 import sys
@@ -94,10 +115,11 @@ import urllib.parse
 from pathlib import Path
 
 
-ndjson_path, sidecar_path, resume_session, home_dir = sys.argv[1:5]
+ndjson_path, sidecar_path, resume_session, home_dir, stderr_path = sys.argv[1:6]
 
 reply_chunks: list[str] = []
 session_id: str | None = None
+got_end = False
 
 with open(ndjson_path, "r", encoding="utf-8", errors="replace") as fh:
     for line in fh:
@@ -114,14 +136,38 @@ with open(ndjson_path, "r", encoding="utf-8", errors="replace") as fh:
             if isinstance(data, str):
                 reply_chunks.append(data)
         elif kind == "end":
+            got_end = True
             sid = ev.get("sessionId")
             if isinstance(sid, str) and sid:
                 session_id = sid
 
-if not session_id and resume_session:
+# Only fall back to the prior session id when the stream actually closed
+# cleanly. A truncated/malformed stream (no `end` event) must NOT silently
+# resurrect a session that may already be dead — that produces cascading
+# stale-session failures on subsequent turns.
+if not session_id and resume_session and got_end:
     session_id = resume_session
 
 reply_text = "".join(reply_chunks).strip()
+
+# Truncated stream diagnostic: grok exited 0 but emitted nothing actionable.
+# Do NOT change exit code (would break the RC flow); just surface the warning
+# so the gateway log shows why the reply was empty.
+if not reply_chunks and not got_end:
+    sys.stderr.write(
+        "grok adapter: stream ended without 'end' event — possible truncation\n"
+    )
+    if stderr_path:
+        try:
+            tail = Path(stderr_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            tail = ""
+        if tail.strip():
+            sys.stderr.write("grok adapter: captured stderr:\n")
+            sys.stderr.write(tail)
+            if not tail.endswith("\n"):
+                sys.stderr.write("\n")
+
 sys.stdout.write(reply_text)
 
 
@@ -139,9 +185,11 @@ def probe_tokens(sid: str) -> int:
         Path(home_dir) / ".grok" / "sessions" / cwd_slug / sid / "updates.jsonl",
         Path(home_dir) / ".local" / "share" / "grok" / "sessions" / cwd_slug / sid / "updates.jsonl",
     ]
+    found_file = False
     for path in candidates:
         if not path.is_file():
             continue
+        found_file = True
         last_line = ""
         try:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -162,6 +210,11 @@ def probe_tokens(sid: str) -> int:
             val = totals.get("effective_input_tokens", 0)
             if isinstance(val, (int, float)):
                 return int(val)
+    if not found_file:
+        sys.stderr.write(
+            f"grok adapter: token file not found for session {sid} "
+            f"(cwd={os.getcwd()})\n"
+        )
     return 0
 
 

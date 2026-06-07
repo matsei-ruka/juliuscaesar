@@ -287,5 +287,131 @@ class GrokAdapterShellTests(unittest.TestCase):
             self.assertNotIn("-r", argv)
 
 
+@unittest.skipUnless(ADAPTER.exists(), "adapter missing")
+class GrokAdapterFailureModeTests(unittest.TestCase):
+    """Adapter must surface real failures instead of swallowing them silently."""
+
+    def _stub(self, stub_dir: Path, body: str) -> None:
+        path = stub_dir / "grok"
+        path.write_text(
+            "#!/usr/bin/env bash\n" + body + "\n", encoding="utf-8"
+        )
+        path.chmod(0o755)
+
+    def _env(self, stub: Path, sidecar: Path, **extra: str) -> dict:
+        env = {
+            "HOME": str(stub.parent),
+            "PATH": f"{stub}:/usr/bin:/bin",
+            "JC_USAGE_SIDECAR_PATH": str(sidecar),
+        }
+        env.update(extra)
+        return env
+
+    def test_nonzero_rc_surfaces_stderr_and_propagates(self) -> None:
+        """HIGH 1: grok stderr must not be swallowed into NDJSON stdout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            stub = tmp_path / "bin"
+            stub.mkdir()
+            self._stub(
+                stub,
+                'echo "grok: stale session id" >&2\nexit 7',
+            )
+            sidecar = tmp_path / "usage.json"
+            res = subprocess.run(
+                [str(ADAPTER), ""],
+                input="hi",
+                capture_output=True,
+                text=True,
+                env=self._env(stub, sidecar),
+                cwd=str(stub),
+                timeout=20,
+            )
+            self.assertEqual(res.returncode, 7)
+            self.assertIn("grok: stale session id", res.stderr)
+            # No partial reply written to stdout on hard failure.
+            self.assertEqual(res.stdout, "")
+            # Sidecar must NOT be written when the adapter bails early.
+            self.assertFalse(sidecar.exists())
+
+    def test_stream_without_end_does_not_resurrect_resume_session(self) -> None:
+        """HIGH 2: missing 'end' event MUST NOT restore the prior session id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            stub = tmp_path / "bin"
+            stub.mkdir()
+            # Stream a text chunk but no `end` event — simulates truncation.
+            self._stub(
+                stub,
+                "cat <<'NDJSON'\n"
+                '{"type":"text","data":"partial"}\n'
+                "NDJSON\nexit 0",
+            )
+            sidecar = tmp_path / "usage.json"
+            res = subprocess.run(
+                [str(ADAPTER), ""],
+                input="hi",
+                capture_output=True,
+                text=True,
+                env=self._env(
+                    stub,
+                    sidecar,
+                    HOME=str(tmp_path),
+                    JC_RESUME_SESSION="sid_dead",
+                ),
+                cwd=str(stub),
+                timeout=20,
+            )
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            # Dead session must NOT be silently re-asserted.
+            self.assertNotIn("session_id", payload)
+
+    def test_empty_stream_emits_truncation_warning(self) -> None:
+        """MED 1: empty/truncated stream warns to stderr for log visibility."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            stub = tmp_path / "bin"
+            stub.mkdir()
+            self._stub(stub, "exit 0")  # no stdout, no stderr, RC=0
+            sidecar = tmp_path / "usage.json"
+            res = subprocess.run(
+                [str(ADAPTER), ""],
+                input="hi",
+                capture_output=True,
+                text=True,
+                env=self._env(stub, sidecar, HOME=str(tmp_path)),
+                cwd=str(stub),
+                timeout=20,
+            )
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("stream ended without 'end' event", res.stderr)
+
+    def test_oversized_prompt_is_truncated_with_warning(self) -> None:
+        """MED 3: ARG_MAX guard truncates >100KB prompts and warns."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            stub = tmp_path / "bin"
+            stub.mkdir()
+            self._stub(
+                stub,
+                "echo '{\"type\":\"end\",\"stopReason\":\"EndTurn\",\"sessionId\":\"sid_ok\",\"requestId\":\"r\"}'\nexit 0",
+            )
+            sidecar = tmp_path / "usage.json"
+            big_prompt = "x" * (102400 + 5000)
+            res = subprocess.run(
+                [str(ADAPTER), ""],
+                input=big_prompt,
+                capture_output=True,
+                text=True,
+                env=self._env(stub, sidecar, HOME=str(tmp_path)),
+                cwd=str(stub),
+                timeout=20,
+            )
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            self.assertIn("prompt truncated", res.stderr)
+            self.assertIn("ARG_MAX safeguard", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
