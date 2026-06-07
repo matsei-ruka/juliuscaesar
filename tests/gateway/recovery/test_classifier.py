@@ -126,6 +126,15 @@ class LLMClassifyTests(unittest.TestCase):
         self.assertEqual(c.kind, "unknown")
         self.assertEqual(c.source, "fallback")
 
+    def test_context_kinds_are_valid(self):
+        for kind in ("context_exhausted", "context_profile_unavailable"):
+            self.assertIn(kind, classifier._VALID_KINDS)
+            parsed = classifier._parse_classifier_json(
+                f'{{"kind": "{kind}", "confidence": 0.9}}'
+            )
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed.kind, kind)
+
     def test_llm_low_confidence_demoted_to_unknown(self):
         with mock.patch.object(classifier, "regex_prefilter", return_value=None), \
              mock.patch.object(

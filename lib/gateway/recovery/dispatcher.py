@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 from . import classifier, state as state_module
 from .handlers.bad_input import BadInputHandler
 from .handlers.base import Defer, Fail, RecoveryContext, RecoveryDecision, Retry
+from .handlers.context_exhausted import ContextExhaustedHandler
+from .handlers.context_profile_unavailable import ContextProfileUnavailableHandler
 from .handlers.session_expired import SessionExpiredHandler
 from .handlers.session_missing import SessionMissingHandler
 from .handlers.transient import TransientHandler
@@ -40,6 +42,8 @@ class RecoveryDispatcher:
             "session_expired": SessionExpiredHandler(),
             "session_missing": SessionMissingHandler(),
             "bad_input": BadInputHandler(),
+            "context_exhausted": ContextExhaustedHandler(),
+            "context_profile_unavailable": ContextProfileUnavailableHandler(),
             "unknown": UnknownHandler(),
         }
 

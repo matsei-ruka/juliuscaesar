@@ -167,4 +167,8 @@ class CodexApiBrain(Brain):
             )
             if result.usage:
                 log(f"codex_api usage event={event.id} usage={result.usage}")
-        return BrainResult(response=result.text.strip(), session_id=None)
+        return BrainResult(
+            response=result.text.strip(),
+            session_id=None,
+            usage=result.usage if isinstance(result.usage, dict) else None,
+        )

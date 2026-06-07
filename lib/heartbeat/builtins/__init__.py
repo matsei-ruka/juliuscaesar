@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import commitments_tick as _commitments_tick
+from . import context_maintenance as _context_maintenance
 from . import dream_tick as _dream_tick
 from . import hot_tidy as _hot_tidy
 from . import journal_tidy as _journal_tidy
@@ -24,6 +25,7 @@ BuiltinFn = Callable[[Path, bool], dict]
 
 _BUILTINS: dict[str, BuiltinFn] = {
     "commitments_tick": _commitments_tick.run,
+    "context_maintenance": _context_maintenance.run,
     "dream_tick": _dream_tick.run,
     "hot_tidy": _hot_tidy.run,
     "journal_tidy": _journal_tidy.run,

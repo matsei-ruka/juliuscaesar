@@ -48,6 +48,14 @@ class SlashCommandTests(unittest.TestCase):
         self.assertEqual(cmd.kind, "help")
         self.assertIn("usage", cmd.reply.lower())
 
+    def test_compact_command(self):
+        cmd = overrides.parse_slash_command("/compact")
+        self.assertIsNotNone(cmd)
+        self.assertEqual(cmd.kind, "compact")
+
+    def test_compact_case_insensitive(self):
+        self.assertEqual(overrides.parse_slash_command("  /COMPACT  ").kind, "compact")
+
     def test_unrelated_slash(self):
         self.assertIsNone(overrides.parse_slash_command("/help"))
 

@@ -9,6 +9,7 @@ Matches the EmailChannel pattern in ``email.py``.
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from pathlib import Path

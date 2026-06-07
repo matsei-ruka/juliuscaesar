@@ -45,6 +45,10 @@ class BrainResult:
     response: str
     session_id: str | None = None
     push_marker_path: str | None = None
+    # §8 context telemetry: raw provider usage dict when the adapter can
+    # surface it (token counts for the just-completed turn). None when the
+    # adapter has no usage signal — the runtime then records a zero-usage turn.
+    usage: dict | None = None
     # Phase 2: action-registry state snapshotted just before unregister so
     # the runtime can post a Background-done card when the subprocess was
     # demoted to background mid-flight.

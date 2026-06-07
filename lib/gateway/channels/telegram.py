@@ -201,6 +201,12 @@ class TelegramChannel:
         )
         set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=emoji, log=self.log)
 
+        def _remove() -> None:
+            time.sleep(30)
+            set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=None)
+
+        threading.Thread(target=_remove, daemon=True).start()
+
     def _max_concurrent(self) -> int:
         """Return the configured `parallel.max_concurrent` (default 1).
 
@@ -211,12 +217,6 @@ class TelegramChannel:
             return int(load_config_cached(self.instance_dir).parallel.max_concurrent)
         except Exception:  # noqa: BLE001
             return 1
-
-        def _remove() -> None:
-            time.sleep(30)
-            set_message_reaction(token=token, chat_id=chat_id, message_id=message_id, emoji=None)
-
-        threading.Thread(target=_remove, daemon=True).start()
 
     def close(self) -> None:
         """Release cached resources (chats DB connection). Idempotent."""
@@ -1361,7 +1361,7 @@ class TelegramChannel:
                                             response="Video too large (>50 MB). Send a shorter clip.",
                                             meta={
                                                 "chat_id": chat_id,
-                                                "message_thread_id": thread_id,
+                                                "message_thread_id": message.get("message_thread_id"),
                                             },
                                             log=self.log,
                                         )

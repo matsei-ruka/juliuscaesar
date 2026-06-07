@@ -21,6 +21,7 @@ from .brains.aliases import resolve_alias
 _INLINE_PREFIX_RE = re.compile(r"^\s*\[(?P<spec>[A-Za-z0-9_:.\-]+)\]\s*(?P<rest>.*)$", re.DOTALL)
 _SLASH_BRAIN_RE = re.compile(r"^\s*/brain\s+(?P<spec>[A-Za-z0-9_:.\-]+)\s*$", re.IGNORECASE)
 _SLASH_HELP_RE = re.compile(r"^\s*/brain\s*$", re.IGNORECASE)
+_SLASH_COMPACT_RE = re.compile(r"^\s*/compact\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,9 @@ def parse_inline_override(content: str) -> InlineOverride | None:
 
 
 def parse_slash_command(content: str) -> SlashCommand | None:
-    """Recognize `/brain ...` slash commands."""
+    """Recognize `/brain ...` and `/compact` slash commands."""
+    if _SLASH_COMPACT_RE.match(content or ""):
+        return SlashCommand(kind="compact")
     if _SLASH_HELP_RE.match(content or ""):
         return SlashCommand(
             kind="help",

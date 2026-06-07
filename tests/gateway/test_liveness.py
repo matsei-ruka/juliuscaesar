@@ -92,7 +92,7 @@ class GatewayPidFindingTests(unittest.TestCase):
                 token = Path(token).name or "python"
             else:
                 token = "python"
-            f = _pid_finding(pidfile, label="x", cmdline_marker=token)
+            f = _pid_finding(pidfile, label="x", cmdline_markers=[token])
             self.assertEqual(f.level, "ok", msg=f"got {f}")
 
 
