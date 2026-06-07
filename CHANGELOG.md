@@ -5,6 +5,49 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.06.07.2
+
+Three merged PRs land in this release: opencode v2 adapter, grok adapter,
+and a fix-set from a Codex audit of recent main commits. Plus pretest
+cleanup and the supervisor concurrent-tick lock from earlier in the day.
+
+- **opencode v2 adapter (PR #86).** Full rewrite of the opencode brain +
+  shell adapter for context-aware lifecycle parity: sessionID captured
+  from the first NDJSON `step_start` event on stdout, token usage read
+  from the SQLite `opencode.db` (`message.data` JSON blob, `part` table
+  for reply text), written to `$JC_USAGE_SIDECAR_PATH`. New
+  `lib/gateway/brains/base.py` sidecar reader picks it up for any future
+  adapter. `PROVIDER_MANAGED_COMPACTION_BRAINS = {"opencode"}` in
+  `routing.py` skips §8 rotation (opencode handles its own compaction
+  internally at the model's `usable` threshold).
+- **grok adapter (PR #87).** New `GrokBrain` + `grok.sh` for xAI grok CLI
+  0.2.x. NDJSON parse (`thought` ignored, `text` concat, `end` carries
+  `sessionId`), `--system-prompt-override` for L1 preamble + goal anchor,
+  token telemetry from `~/.grok/sessions/<cwd-urlencoded>/<sid>/updates.jsonl`
+  (`_meta.totalTokens.effective_input_tokens`), `--file` for image
+  attach. Brain spec aliases: `grok` → `grok-build`, `grok-fast` →
+  `grok-composer-2.5-fast`. Auth via SuperGrok/X Premium+ subscription
+  or `XAI_API_KEY` in instance `.env`. 16 tests covering happy path +
+  failure modes (truncated stream, missing updates.jsonl, ARG_MAX guard,
+  stderr/stdout separation).
+- **Audit-188 fix set (PR #88).** Eight targeted patches from Codex
+  gpt-5.5 review of `f59aa63` (supervisor lock), `4f5c6a0` (opencode v2),
+  `486e974` (PR #85). Notable: orphan-card delete only on finalize
+  success (`runner.py:668`); UPSERT atomic for `turn_count` race
+  (`telemetry.py`); capacity check on `resumed=False` paths
+  (`routing.py:139`); compaction `BEGIN IMMEDIATE` (`compaction.py`);
+  opencode SQLite path percent-encoded against `?`/`#` in session ids;
+  opencode NDJSON replay to stderr on RC≠0 for recovery classifier.
+- **Pretest cleanup (PR #89).** Telegram `push_marker` test isolated
+  from `$ORIGIN_CHAT_ID` ambient leak (`mock.patch.dict(clear=True)`
+  + `sys.argv` pin); flaky `test_workers_env` quarantined.
+- **Supervisor concurrent-tick lock (f59aa63).** `_run_tick` now wraps
+  the per-instance flock in an exclusive `fcntl.LOCK_EX`. Prevents the
+  watch loop (5 s) and watchdog tick (2 min) from both calling
+  `sender.send()` on the same long-running event when the card
+  re-publish hits the same boundary. Same orphan-card class of bug, but
+  the upstream race rather than the downstream finalize.
+
 ## 2026.06.07.1
 
 Context-aware session lifecycle — bug fixes and operator model profile normalization
