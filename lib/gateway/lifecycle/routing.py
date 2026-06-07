@@ -137,8 +137,28 @@ def evaluate_pressure(
     life_p = lifecycle_pressure(current_context, ceiling)
 
     if not resumed:
+        if selected_profile is not None and route_p <= 1.0:
+            return GuardDecision(
+                DISPATCH, "selected profile safely fits", route_p, life_p, selected_profile
+            )
+        for profile in larger_profiles or []:
+            if not profile.allow_capacity_upgrade or not profile.contributes_to_ceiling:
+                continue
+            if routing_pressure(required, profile) <= 1.0:
+                return GuardDecision(
+                    UPGRADE,
+                    "selected profile does not fit; upgrading to larger compatible profile",
+                    route_p,
+                    life_p,
+                    selected_profile,
+                    upgrade_profile=profile,
+                )
         return GuardDecision(
-            DISPATCH, "no resumed session", route_p, life_p, selected_profile
+            FAIL,
+            "context_required_exceeds_profile",
+            route_p,
+            life_p,
+            selected_profile,
         )
 
     if life_p >= thresholds.emergency_ratio:
