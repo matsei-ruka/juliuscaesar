@@ -15,7 +15,7 @@ from .lifecycle.profiles import ProfileRegistry
 from .lifecycle.routing import Reserves, Thresholds
 
 
-SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider", "pi")
+SUPPORTED_BRAINS = ("claude", "codex", "codex_api", "opencode", "gemini", "aider", "pi", "grok")
 SUPPORTED_UNSAFE_FALLBACK_BRAINS = (*SUPPORTED_BRAINS, "openrouter")
 SUPPORTED_CHANNELS = ("telegram", "slack", "discord", "voice", "jc-events", "cron", "email", "company-inbox", "whatsapp")
 SUPPORTED_TRIAGE_BACKENDS = (
