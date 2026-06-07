@@ -1,6 +1,6 @@
 # Opencode adapter v2 — context-aware lifecycle parity
 
-**Status:** draft
+**Status:** approved — implementation
 **Author:** Rachel (with Luca)
 **Date:** 2026-06-07
 **Branch:** `spec/opencode-v2`
@@ -51,15 +51,19 @@ From `opencode --help` and https://opencode.ai/docs/cli/ + deepwiki (`sst/openco
 | Token stats | `opencode stats` | global cost/token summary |
 | Session list | `opencode session list --format json` | per-session id + tokens + time |
 
-NDJSON events seen during `run --format json` (per current adapter parser):
+NDJSON events emitted by `run --format json` (verified 2026-06-07 via web research — deepwiki sst/opencode/6.1 + CLI docs + issue #14702):
 
-- `{"type":"text","part":{"type":"text","text":"…"}}` — assistant text output (concatenate to build the reply).
-- `{"type":"session","session":{...}}` — session info, usually first frame.
-- `{"type":"stats","tokens":{...}}` or similar — per-turn token usage (verify exact key on first install).
+- `{"type":"step_start", ...}` / `{"type":"step_finish", ...}` — turn boundaries, include `sessionID`.
+- `{"type":"text","part":{"type":"text","text":"…"}}` — assistant text output (concatenate).
+- `{"type":"reasoning", ...}` — model reasoning chunks (ignore for reply).
+- `{"type":"tool_use", ...}` — tool calls.
+- `{"type":"error", ...}` — runtime errors.
+
+**Resolved (Q1):** stdout NDJSON does **not** carry token usage. Issue #14702 requests `opencode stats --format json` — not shipped. Token data lives only in SQLite (`~/.local/share/opencode/opencode.db`, table `messages`, column `tokens`). The adapter MUST query SQLite directly after the run completes.
+
+**Resolved (Q2):** session ID is available as the `sessionID` field on every event in stdout (first `step_start` is sufficient). No directory diff needed.
 
 Auto-compaction (verified deepwiki 2.4): triggered internally via `isOverflow` against `usable = limit.context − 32 000 − 20 000`. Surfaces as a synthetic user message with a `CompactionPart`. The framework cannot intervene; the adapter just trusts opencode handled it.
-
-The worker MUST verify the exact `stats` key name against a live `opencode run --format json` invocation before implementing usage parsing. The current `opencode.sh` parser only handles `type=text` events; the v2 parser must scan for the stats event and persist its payload.
 
 ## 4. Architecture
 
@@ -86,8 +90,8 @@ Overrides:
   - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`.
   - `JC_OPENCODE_NO_TOOLS` (`"1"` / `"0"`) — read from `override.no_tools`. Adapter consumes.
 - `extra_args_for_event(event)` — map `meta.image_path` / `meta.image_paths` to `--file <path>` pairs.
-- `pre_invoke_snapshot()` — `frozenset` of session JSONL paths under `~/.local/share/opencode/projects/<slug>/sessions/` (or wherever opencode stores them — worker probes with `opencode session list --format json` to discover, falls back to homedir search). Diff-based capture, same trick as codex.
-- `capture_session_id(started_at)` — set-difference on the snapshot. If diff is empty, fall back to `opencode session list --format json` filtered by `directory == self.instance_dir` and pick the newest `time.updated >= t0`. The current implementation's two-axis query (`directory + updated`) stays as the fallback path.
+- `pre_invoke_snapshot()` — **not used**. Resolved Q2: session ID comes from first stdout event. Override returns `None`.
+- `capture_session_id(started_at)` — parse first NDJSON line on stdout, extract `sessionID` field. Fallback: `opencode session list --format json` filtered by `directory == self.instance_dir`, newest `time.updated >= started_at`. -40 LOC vs the snapshot-diff approach.
 - `adjust_model()` — pass-through for now. Vision upgrade handled internally by opencode model routing.
 
 ### 4.3 Adapter shell
@@ -99,8 +103,16 @@ Overrides:
 3. **Goal as system prompt** — opencode's `run` does not have `--append-system-prompt`, but a `<system>...</system>` prefix to the prompt body is the documented path. Adapter prepends `$JC_GOAL` (when set) wrapped in a `<system>` tag the model will treat as system context. If opencode ships a real flag by ship date, the adapter switches over.
 4. **Images** — extra `--file <path>` args (repeatable) passed through from `extra_args_for_event`.
 5. **Resume** — current `--session <id>` logic stays. Add `--continue` fallback only if explicit env asks.
-6. **Stats extraction** — pipe NDJSON through the Python parser, collect both `type=text` (response body) and the stats event (whatever its exact type — to be confirmed). Write the response to stdout as today; write a **single line JSON** with the stats payload to a sidecar file at `$JC_USAGE_SIDECAR_PATH` (env injected by the runtime to `state/gateway/usage/<event_id>.json`).
-7. **Return code semantics** — preserved: rc=0 on success, rc=127 if CLI missing.
+6. **Reply assembly** — pipe NDJSON through the Python parser, collect `type=text` events into the response body. Capture `sessionID` from the first event with that field.
+7. **Token usage via SQLite probe** — after `opencode run` exits, run:
+
+   ```bash
+   sqlite3 -json "$OPENCODE_DB" \
+     "SELECT tokens FROM messages WHERE session_id='${SESSION_ID}' ORDER BY rowid DESC LIMIT 1"
+   ```
+
+   Default `OPENCODE_DB="$HOME/.local/share/opencode/opencode.db"` (XDG on Linux). On macOS the worker verifies the path and writes a fallback `~/Library/Application Support/opencode/opencode.db`. Write the JSON result to `$JC_USAGE_SIDECAR_PATH`. If the probe fails (DB locked, row missing), write `{"error":"...", "session_id":"..."}` — the runtime treats absent/error sidecar as zero usage (§8.2 guard prevents regression).
+8. **Return code semantics** — preserved: rc=0 on success, rc=127 if CLI missing.
 
 The Python parser block stays inline (no new file). The sidecar path is new.
 
@@ -140,10 +152,12 @@ The framework still records the telemetry (effective_input_tokens) so cross-brai
 
 - `extra_env` returns expected keys when `.env` has them; empty when missing.
 - `extra_args_for_event` produces `--file <p>` pairs for `image_path`, `image_paths`, both, neither.
-- `capture_session_id` happy path: pre/post snapshot adds one file, returns its UUID stem.
-- `capture_session_id` ambiguous: pre/post adds two files → falls back to `session list` JSON probe.
-- `capture_session_id` empty diff + empty list → returns None.
-- Sidecar usage parsing: feed a fixture stats JSON, assert `BrainResult.usage` round-trips it.
+- `capture_session_id` happy path: first NDJSON line has `sessionID` field → returns it.
+- `capture_session_id` no `sessionID` in stream: falls back to `session list` JSON probe.
+- `capture_session_id` empty stream + empty list → returns None.
+- SQLite probe: fixture `opencode.db` with one message row, assert sidecar JSON contains expected tokens payload.
+- SQLite probe failure: missing DB file → sidecar contains `{"error":...}`, runtime treats as zero usage.
+- Sidecar usage parsing: feed a fixture sidecar JSON, assert `BrainResult.usage` round-trips it.
 
 `tests/test_lifecycle_routing.py` (update):
 
@@ -162,11 +176,16 @@ Integration probe (manual, doc only):
 4. Tag `v2026.06.XX.1`, ship via `jc update`.
 5. No agent in the fleet currently routes to opencode primary → no production risk on rollout. Sergio clones (.119/.120) are wired to install opencode for backup but it's not installed yet; install once v2 ships so they get the new adapter from day one.
 
-## 7. Open questions
+## 7. Open questions — resolved 2026-06-07
 
-- **Exact stats event type/key** — must be confirmed from a live `opencode run --format json` call. Documented as a hard worker checkpoint before any usage parsing lands.
-- **Session storage location** — deepwiki says SQLite; CLI surface is `session list`. The brain only needs IDs, so SQLite path doesn't matter, but `pre_invoke_snapshot` needs a directory to diff. If sessions are SQLite-only (no per-session file), drop the snapshot path entirely and rely solely on `session list` JSON before/after diff.
-- **System prompt injection mechanism** — `<system>` tag in prompt body vs a future native flag. Worker checks CLI first; if a flag exists by ship time, use it.
+- **~~Exact stats event type/key~~** → **stdout has no tokens.** SQLite probe required (§4.3 step 7). Issue #14702 tracks upstream feature request.
+- **~~Session storage location~~** → **SQLite-only** (`opencode.db`, table `messages`). Session ID exposed in stdout per-event `sessionID` field. Snapshot diff dropped from spec.
+- **~~System prompt injection~~** → **confirmed no native flag.** `<system>` tag in prompt body stays. Verified against `opencode run --help` (only `--continue`, `--session`, `--fork`, `--model`, `--variant`, `--format`).
+
+Remaining worker checkpoints (verify on live install, not blockers):
+
+- Exact `tokens` column schema on `messages` table (one row per turn vs aggregated).
+- macOS `OPENCODE_DB` path (Linux XDG confirmed `~/.local/share/opencode/opencode.db`).
 
 ## 8. Non-goals
 
