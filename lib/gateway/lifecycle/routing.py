@@ -92,6 +92,19 @@ EMERGENCY_ROTATE = "emergency_rotate"
 FAIL = "fail"
 
 
+# Brains whose CLI auto-compacts internally at a provider-specific threshold.
+# For these the framework records token telemetry for cross-brain visibility
+# (§8) but never drives a rotation — `should_rotate` returns False so the
+# pressure guard short-circuits to DISPATCH.
+PROVIDER_MANAGED_COMPACTION_BRAINS: frozenset[str] = frozenset({"opencode"})
+
+
+def should_rotate(brain: str) -> bool:
+    """Whether the framework owns rotation for `brain` or defers to provider."""
+    head = brain.split(":", 1)[0] if brain else brain
+    return head not in PROVIDER_MANAGED_COMPACTION_BRAINS
+
+
 @dataclass(frozen=True)
 class GuardDecision:
     action: str
