@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -84,6 +86,50 @@ class StoreTest(unittest.TestCase):
             telemetry.record_usage(conn, owner_key=key, brain="claude", usage=usage)
         rows = telemetry.list_telemetry(conn)
         self.assertEqual([r.owner_key for r in rows], ["b", "c", "a"])
+
+    def test_record_usage_concurrent_turn_count_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "queue.db"
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            telemetry.init_db(conn)
+            conn.close()
+
+            barrier = threading.Barrier(2)
+            errors: list[BaseException] = []
+
+            def worker() -> None:
+                worker_conn = sqlite3.connect(db, timeout=5.0)
+                worker_conn.row_factory = sqlite3.Row
+                try:
+                    usage = telemetry.ContextUsage.from_anthropic_usage(
+                        {"input_tokens": 100}, source="api"
+                    )
+                    barrier.wait(timeout=5.0)
+                    telemetry.record_usage(
+                        worker_conn, owner_key="k", brain="claude", usage=usage
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+                finally:
+                    worker_conn.close()
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+
+            self.assertFalse(errors)
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            try:
+                tel = telemetry.get_telemetry(conn, owner_key="k")
+            finally:
+                conn.close()
+            self.assertIsNotNone(tel)
+            assert tel is not None
+            self.assertEqual(tel.turn_count, 2)
 
 
 if __name__ == "__main__":

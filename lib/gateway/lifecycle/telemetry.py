@@ -170,24 +170,8 @@ def record_usage(
     advances `turn_count` and `last_activity_at` (§8.2).
     """
     init_db(conn)
-    existing = get_telemetry(conn, owner_key=owner_key)
     ts = now_iso()
-    if usage.is_zero and existing is not None:
-        eff = existing.effective_input_tokens
-        src = existing.usage_source
-        last_model = existing.last_model
-        profile = existing.context_profile
-    else:
-        eff = usage.effective_input_tokens
-        src = usage.source
-        last_model = model if model is not None else (existing.last_model if existing else None)
-        profile = context_profile if context_profile is not None else (
-            existing.context_profile if existing else None
-        )
-    turn_count = (existing.turn_count if existing else 0) + 1
-    rotation_count = existing.rotation_count if existing else 0
-    last_checkpoint_at = existing.last_checkpoint_at if existing else None
-    maintenance_state = existing.maintenance_state if existing else None
+    zero_usage = usage.is_zero
     conn.execute(
         """
         INSERT INTO session_lifecycle(
@@ -197,27 +181,43 @@ def record_usage(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(owner_key) DO UPDATE SET
             brain=excluded.brain,
-            last_model=excluded.last_model,
-            context_profile=excluded.context_profile,
-            effective_input_tokens=excluded.effective_input_tokens,
-            usage_source=excluded.usage_source,
-            turn_count=excluded.turn_count,
+            last_model=CASE
+                WHEN ? THEN session_lifecycle.last_model
+                ELSE COALESCE(excluded.last_model, session_lifecycle.last_model)
+            END,
+            context_profile=CASE
+                WHEN ? THEN session_lifecycle.context_profile
+                ELSE COALESCE(excluded.context_profile, session_lifecycle.context_profile)
+            END,
+            effective_input_tokens=CASE
+                WHEN ? THEN session_lifecycle.effective_input_tokens
+                ELSE excluded.effective_input_tokens
+            END,
+            usage_source=CASE
+                WHEN ? THEN session_lifecycle.usage_source
+                ELSE excluded.usage_source
+            END,
+            turn_count=session_lifecycle.turn_count + 1,
             last_activity_at=excluded.last_activity_at,
             updated_at=excluded.updated_at
         """,
         (
             owner_key,
             brain,
-            last_model,
-            profile,
-            eff,
-            src,
-            turn_count,
-            rotation_count,
-            last_checkpoint_at,
+            model,
+            context_profile,
+            usage.effective_input_tokens,
+            usage.source,
+            1,
+            0,
+            None,
             ts,
-            maintenance_state,
+            None,
             ts,
+            zero_usage,
+            zero_usage,
+            zero_usage,
+            zero_usage,
         ),
     )
     conn.commit()
