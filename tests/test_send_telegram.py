@@ -123,16 +123,22 @@ class SenderEscapingTests(unittest.TestCase):
             def fake_post(url, payload, *, timeout=20):
                 return 200, {"ok": True, "result": {"message_id": 888}}
 
+            # clear=True isolates from ambient per-event env vars
+            # (ORIGIN_CHAT_ID, TELEGRAM_CHAT_ID_OVERRIDE) that the host
+            # gateway exports — they would otherwise win over `.env` per
+            # the documented precedence ladder and the test would assert
+            # the leaked chat_id instead of 123.
             with mock.patch.object(self.mod, "_post", side_effect=fake_post), \
                  mock.patch.object(sys, "stdin", io.StringIO("hello marker")), \
                  mock.patch.object(sys, "stdout", io.StringIO()), \
+                 mock.patch.object(sys, "argv", ["send_telegram"]), \
                  mock.patch.dict(
                      os.environ,
                      {
                          "JC_INSTANCE_DIR": str(instance),
                          "JC_PUSH_MARKER_PATH": str(marker),
                      },
-                     clear=False,
+                     clear=True,
                  ):
                 rc = self.mod.main()
 
