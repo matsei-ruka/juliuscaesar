@@ -233,6 +233,56 @@ def send_voice(
     return str(result.get("message_id")) if result.get("message_id") is not None else None
 
 
+def send_photo(
+    *,
+    instance_dir: Path,
+    token: str,
+    image_path: str,
+    meta: dict[str, Any],
+    caption: str = "",
+) -> str | None:
+    """Upload a local image file and post it as a Telegram photo message."""
+    if not token:
+        return None
+    chat_id = str(
+        meta.get("chat_id")
+        or meta.get("notify_chat_id")
+        or env_value(instance_dir, "TELEGRAM_CHAT_ID")
+        or ""
+    )
+    if not chat_id:
+        return None
+    path = Path(image_path)
+    if not path.exists():
+        return None
+    mime, _ = mimetypes.guess_type(str(path))
+    mime = mime or "image/jpeg"
+    fields: list[tuple[str, str]] = [("chat_id", chat_id)]
+    if meta.get("message_thread_id"):
+        fields.append(("message_thread_id", str(meta["message_thread_id"])))
+    if caption:
+        fields.append(("caption", caption[:1024]))
+    files: list[tuple[str, str, bytes, str]] = [
+        ("photo", path.name, path.read_bytes(), mime),
+    ]
+    body, content_type = encode_multipart(fields, files)
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data=body,
+        headers={"Content-Type": content_type},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None
+    data = json.loads(raw) if raw else {}
+    if not data.get("ok"):
+        return None
+    result = data.get("result") or {}
+    return str(result.get("message_id")) if result.get("message_id") is not None else None
+
+
 def encode_multipart(
     fields: list[tuple[str, str]],
     files: list[tuple[str, str, bytes, str]],

@@ -63,6 +63,10 @@ class BrainResult:
     action_started_at: float = 0.0
     action_backgrounded_at: float = 0.0
     action_card_text: str = ""
+    # Image paths emitted by the adapter (e.g. grok image generation).
+    # Each entry is an absolute filesystem path. The runtime forwards them
+    # to the channel as separate photo/document messages after the text reply.
+    image_paths: tuple[str, ...] = ()
 
 
 class AdapterFailure(RuntimeError):
@@ -552,6 +556,7 @@ Your reply is only the text the user reads.
             pass
         sidecar_session_id: str | None = None
         sidecar_usage: dict | None = None
+        sidecar_image_paths: tuple[str, ...] = ()
         if usage_path.exists():
             payload = None
             try:
@@ -584,6 +589,11 @@ Your reply is only the text the user reads.
                 usage_field = payload.get("usage")
                 if isinstance(usage_field, dict) and usage_field:
                     sidecar_usage = usage_field
+                imgs = payload.get("images")
+                if isinstance(imgs, list):
+                    sidecar_image_paths = tuple(
+                        str(p) for p in imgs if isinstance(p, str) and p
+                    )
             try:
                 usage_path.unlink()
             except OSError:
@@ -600,6 +610,7 @@ Your reply is only the text the user reads.
             session_id=session_id,
             push_marker_path=str(push_marker_path),
             usage=sidecar_usage,
+            image_paths=sidecar_image_paths,
             action_session_id=action_session_id,
             action_role=str(snap.get("role") or "primary"),
             action_bg_chat_id=str(

@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from . import actions_registry, capabilities, goal_cache, overrides, process_sessions, queue, reply_footer, router, sessions, transcripts
 from .lifecycle import compaction, notify, profiles, routing, telemetry
+from .channels.telegram_outbound import send_photo as telegram_send_photo
 from .channels.telegram_outbound import send_text as telegram_send_text
 from .brain_output import (
     RECOVERED_ENVELOPE_ERROR,
@@ -1805,6 +1806,25 @@ class GatewayRuntime:
                 f"dispatch silent id={event.id} brain={brain} — "
                 "brain produced no text, skipping delivery + transcript log"
             )
+        if result.image_paths and channel == "telegram":
+            token = env_value(self.instance_dir, "TELEGRAM_BOT_TOKEN")
+            if token:
+                for img_path in result.image_paths:
+                    try:
+                        telegram_send_photo(
+                            instance_dir=self.instance_dir,
+                            token=token,
+                            image_path=img_path,
+                            meta=meta,
+                        )
+                        self.log(
+                            f"image sent id={event.id} brain={brain} path={img_path}"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(
+                            f"image send failed id={event.id} brain={brain} "
+                            f"path={img_path}: {exc}"
+                        )
         if self._company_reporter is not None:
             try:
                 meta_with_brain = {**meta, "brain": brain}

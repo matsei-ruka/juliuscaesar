@@ -5,6 +5,28 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.06.08.1
+
+Two grok-specific fixes:
+
+- **MODEL_SWITCH_INCOMPATIBLE_AGENT auto-retry.** When triage routes a
+  message to `grok:fast` but the active session was started with
+  `grok-build` (agent type `grok-build-plan` ≠ `cursor`), the adapter
+  previously propagated rc=1 and the recovery classifier entered a
+  300-second retry loop that always failed. Now `grok.sh` detects this
+  error code in the NDJSON/stderr output and immediately retries without
+  `-r` (fresh session), transparent to the gateway.
+- **Grok image delivery.** Grok saves generated images to
+  `~/.grok/sessions/<cwd-slug>/<sid>/images/`. The adapter now probes
+  that directory after each successful run and writes the paths to the
+  sidecar as `{"images": [...]}`. `BrainResult` gains an `image_paths`
+  field populated from the sidecar. The runtime sends each image to the
+  Telegram channel via `sendPhoto` after the text reply when
+  `channel == "telegram"`. New `send_photo()` helper added to
+  `telegram_outbound.py`.
+
+No schema changes. No config migration required.
+
 ## 2026.06.07.2
 
 Three merged PRs land in this release: opencode v2 adapter, grok adapter,

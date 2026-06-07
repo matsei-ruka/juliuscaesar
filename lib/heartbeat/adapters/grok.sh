@@ -95,17 +95,32 @@ grok "${ARGS[@]}" >"$NDJSON_TMP" 2>"$STDERR_TMP" || RC=$?
 RC="${RC:-0}"
 
 if (( RC != 0 )); then
+    # MODEL_SWITCH_INCOMPATIBLE_AGENT: the resumed session was started with a
+    # different agent type (e.g. grok-build-plan vs cursor). Drop -r and retry
+    # as a fresh session — grok's suggestion is "start_new_session".
+    if grep -q "MODEL_SWITCH_INCOMPATIBLE_AGENT" "$STDERR_TMP" "$NDJSON_TMP" 2>/dev/null; then
+        echo "grok adapter: MODEL_SWITCH_INCOMPATIBLE_AGENT — retrying as fresh session" >&2
+        FRESH_ARGS=("--prompt-file" "$PROMPT_TMP")
+        [[ -n "$MODEL" ]] && FRESH_ARGS+=("-m" "$MODEL")
+        (( ${#PASSTHROUGH_ARGS[@]} > 0 )) && FRESH_ARGS+=("${PASSTHROUGH_ARGS[@]}")
+        > "$NDJSON_TMP"
+        > "$STDERR_TMP"
+        RC=0
+        grok "${FRESH_ARGS[@]}" >"$NDJSON_TMP" 2>"$STDERR_TMP" || RC=$?
+    fi
     # Surface stderr + a tail of stdout so the gateway/recovery layer sees
     # the real failure (stale session, auth, network) instead of an empty
     # reply.
-    if [[ -s "$STDERR_TMP" ]]; then
-        cat "$STDERR_TMP" >&2
+    if (( RC != 0 )); then
+        if [[ -s "$STDERR_TMP" ]]; then
+            cat "$STDERR_TMP" >&2
+        fi
+        if [[ -s "$NDJSON_TMP" ]]; then
+            echo "--- grok stdout tail ---" >&2
+            tail -n 20 "$NDJSON_TMP" >&2
+        fi
+        exit "$RC"
     fi
-    if [[ -s "$NDJSON_TMP" ]]; then
-        echo "--- grok stdout tail ---" >&2
-        tail -n 20 "$NDJSON_TMP" >&2
-    fi
-    exit "$RC"
 fi
 
 SIDECAR="${JC_USAGE_SIDECAR_PATH:-}"
@@ -223,6 +238,30 @@ def probe_tokens(sid: str) -> int:
 
 input_tokens = probe_tokens(session_id) if session_id else 0
 
+
+def probe_images(sid: str) -> list[str]:
+    """Return sorted list of image paths grok wrote for ``sid``.
+
+    grok saves generated images to
+    ~/.grok/sessions/<cwd_slug>/<sid>/images/ (Linux/macOS default) or the
+    XDG variant.  Returns absolute path strings so the gateway delivery layer
+    can forward them to the channel without re-probing.
+    """
+    if not sid:
+        return []
+    cwd_slug = urllib.parse.quote(os.getcwd(), safe="")
+    candidates = [
+        Path(home_dir) / ".grok" / "sessions" / cwd_slug / sid / "images",
+        Path(home_dir) / ".local" / "share" / "grok" / "sessions" / cwd_slug / sid / "images",
+    ]
+    for img_dir in candidates:
+        if img_dir.is_dir():
+            return sorted(str(p) for p in img_dir.iterdir() if p.is_file())
+    return []
+
+
+images = probe_images(session_id) if session_id else []
+
 if sidecar_path:
     payload: dict = {
         "usage": {
@@ -234,6 +273,8 @@ if sidecar_path:
     }
     if session_id:
         payload["session_id"] = session_id
+    if images:
+        payload["images"] = images
     tmp = sidecar_path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as out:
