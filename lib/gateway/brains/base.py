@@ -413,6 +413,14 @@ Your reply is only the text the user reads.
         stdout_dir = self.instance_dir / "state" / "gateway" / "adapter_stdout"
         stdout_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = stdout_dir / f"{event.id}-{os.getpid()}-{int(wall_start)}.log"
+        usage_dir = self.instance_dir / "state" / "gateway" / "usage"
+        usage_dir.mkdir(parents=True, exist_ok=True)
+        usage_path = usage_dir / f"{event.id}-{os.getpid()}-{int(wall_start)}.json"
+        try:
+            usage_path.unlink()
+        except FileNotFoundError:
+            pass
+        env["JC_USAGE_SIDECAR_PATH"] = str(usage_path)
         with log_path.open("ab") as binlog:
             binlog.write(
                 f"[{start}] adapter start event={event.id} brain={self.name} model={model or '-'}\n".encode()
@@ -539,16 +547,36 @@ Your reply is only the text the user reads.
             stdout_path.unlink()
         except OSError:
             pass
-        session_id = None
-        try:
-            session_id = self.capture_session_id(start)
-        except Exception:  # noqa: BLE001
-            session_id = None
+        sidecar_session_id: str | None = None
+        sidecar_usage: dict | None = None
+        if usage_path.exists():
+            try:
+                payload = json.loads(usage_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                sid = payload.get("session_id")
+                if isinstance(sid, str) and sid:
+                    sidecar_session_id = sid
+                usage_field = payload.get("usage")
+                if isinstance(usage_field, dict) and usage_field:
+                    sidecar_usage = usage_field
+            try:
+                usage_path.unlink()
+            except OSError:
+                pass
+        session_id = sidecar_session_id
+        if session_id is None:
+            try:
+                session_id = self.capture_session_id(start)
+            except Exception:  # noqa: BLE001
+                session_id = None
         snap = action_snapshot or {}
         return BrainResult(
             response=stdout.strip(),
             session_id=session_id,
             push_marker_path=str(push_marker_path),
+            usage=sidecar_usage,
             action_session_id=action_session_id,
             action_role=str(snap.get("role") or "primary"),
             action_bg_chat_id=str(
