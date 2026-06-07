@@ -36,23 +36,20 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(prof.variant, "standard")
         self.assertEqual(prof.input_capacity_tokens, 200_000)
 
-    def test_extended_profile_disabled_excluded_from_enabled(self) -> None:
+    def test_opus_extended_profile_enabled_by_default(self) -> None:
         reg = profiles.ProfileRegistry()
-        enabled = reg.enabled_for_model("claude-opus-4-8")
-        # only the standard opus profile is enabled by default
-        self.assertEqual([p.variant for p in enabled], ["standard"])
-
-    def test_from_config_enables_extended(self) -> None:
-        reg = profiles.ProfileRegistry.from_config(
-            {"claude-opus-4-8-extended": {"enabled": True}}
-        )
         enabled = {p.variant for p in reg.enabled_for_model("claude-opus-4-8")}
         self.assertEqual(enabled, {"standard", "extended"})
 
-    def test_session_ceiling_is_largest_enabled(self) -> None:
+    def test_from_config_can_disable_extended(self) -> None:
         reg = profiles.ProfileRegistry.from_config(
-            {"claude-opus-4-8-extended": {"enabled": True}}
+            {"claude-opus-4-8-extended": {"enabled": False}}
         )
+        enabled = {p.variant for p in reg.enabled_for_model("claude-opus-4-8")}
+        self.assertEqual(enabled, {"standard"})
+
+    def test_session_ceiling_is_largest_enabled(self) -> None:
+        reg = profiles.ProfileRegistry()
         selected = reg.for_model("claude-opus-4-8")
         ceiling = profiles.session_ceiling(reg, model="claude-opus-4-8", selected=selected)
         self.assertIsNotNone(ceiling)

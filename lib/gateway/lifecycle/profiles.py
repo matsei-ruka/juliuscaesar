@@ -53,7 +53,7 @@ DEFAULT_PROFILES: tuple[ContextProfile, ...] = (
         input_capacity_tokens=1_000_000,
         extended_context=True,
         requires_credits=True,
-        enabled=False,
+        enabled=True,
     ),
     ContextProfile(
         key="claude-sonnet-4-6-standard",
