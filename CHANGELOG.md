@@ -5,6 +5,33 @@ All notable changes to JuliusCaesar are documented here. Versions follow CalVer
 
 ## Unreleased
 
+## 2026.06.07.1
+
+Context-aware session lifecycle — bug fixes and operator model profile normalization
+(follow-up to 2026.06.06.3, same PR #85 branch).
+
+- **Triage capacity guard fixed.** `_TRIAGE_CAPACITY_OVERRIDES` used full
+  `"claude:sonnet"` as the match key but the runtime passes `brain="claude"` and
+  `model="sonnet-4-6"` separately — the rule check never fired. Fixed: overrides
+  now match on bare brain name + model prefix (`startswith`). On override, returns
+  the split target `(brain="claude", model="opus")` so `invoke_brain` can look it
+  up in `_BRAIN_REGISTRY` without crashing.
+- **§11 routing pressure gate fixed.** `_resolve_context_profile` was prepending
+  `"claude-"` unconditionally, mangling operator-defined model names (`"small"` →
+  `"claude-small"` → no profile → gate silent no-op). Fixed: exact match first,
+  prefix fallback only when exact lookup misses and brain is `"claude"`.
+- **ROTATE and FAIL actions wired.** `_apply_routing_pressure` previously handled
+  only UPGRADE — ROTATE (slot rotation + clear resume) and FAIL (deliver error,
+  fail event) were silently ignored. Both are now handled. Method returns
+  `(brain, model, resume_session)` 3-tuple so the caller sees a cleared session
+  after rotation.
+- **Profile catalog expanded.** `claude-opus-4-7-1m` (standard 200K + extended 1M,
+  enabled by default) added so the default `opus` alias resolves to a known
+  profile. `claude-opus-4-8` 1M extended profile enabled by default. `gpt-5.5`
+  Pro tier (272K input) added.
+- **Release update scripts** for 2026.06.06.1, 2026.06.06.2, 2026.06.06.3 added
+  (test coverage was requiring them).
+
 ## 2026.06.06.3
 
 Context-aware session lifecycle (spec
