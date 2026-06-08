@@ -124,6 +124,7 @@ class CodexShellAdapterTests(unittest.TestCase):
         sandbox: str | None = None,
         model: str = "gpt-5",
         extra_args: list[str] | None = None,
+        resume_session: str | None = None,
     ) -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -152,6 +153,11 @@ class CodexShellAdapterTests(unittest.TestCase):
                 env.pop("CODEX_SANDBOX", None)
             else:
                 env["CODEX_SANDBOX"] = sandbox
+            if resume_session is None:
+                env.pop("JC_RESUME_SESSION", None)
+                env.pop("WORKER_RESUME_SESSION", None)
+            else:
+                env["JC_RESUME_SESSION"] = resume_session
 
             proc = subprocess.run(
                 [
@@ -198,6 +204,26 @@ class CodexShellAdapterTests(unittest.TestCase):
                 "gpt-5",
                 "--image",
                 "/tmp/scan.png",
+                "-",
+            ],
+        )
+
+    def test_resume_argv_includes_skip_git_repo_check(self) -> None:
+        # Resume path must carry --skip-git-repo-check too: instance dirs are
+        # not git repos, and without the flag `codex exec resume` aborts with
+        # "Not inside a trusted directory" (observed on yuki_tanaka 2026-06-08).
+        argv = self._run_adapter(resume_session="sess-abc")
+        self.assertEqual(
+            argv,
+            [
+                "exec",
+                "resume",
+                "--skip-git-repo-check",
+                "sess-abc",
+                "-c",
+                "sandbox_mode=workspace-write",
+                "--model",
+                "gpt-5",
                 "-",
             ],
         )

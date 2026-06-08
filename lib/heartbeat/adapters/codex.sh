@@ -30,7 +30,7 @@ fi
 RESUME="${JC_RESUME_SESSION:-${WORKER_RESUME_SESSION:-}}"
 
 if [[ -n "$RESUME" ]]; then
-    ARGS=("exec" "resume" "$RESUME")
+    ARGS=("exec" "resume" "--skip-git-repo-check" "$RESUME")
     case "$SANDBOX" in
         read-only|workspace-write)
             ARGS+=("-c" "sandbox_mode=$SANDBOX")
