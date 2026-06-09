@@ -15,6 +15,7 @@ Public API:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -31,6 +32,40 @@ LEGACY_TAG_PREFIX = "# jc-watchdog for "
 class Finding:
     level: str  # "ok" | "fail"
     message: str
+
+
+def _assert_invoker_owns_instance(instance_dir: Path) -> None:
+    """Refuse to touch crontabs when the invoking euid doesn't own the instance.
+
+    ``crontab`` always operates on the INVOKING user's crontab. Run from a
+    ``root@host`` shell, install lands the JC-WATCHDOG block in root's
+    crontab: root cron respawns the gateway as root, the brain sandbox blocks
+    ``/home/<jc_user>/*``, state/logs become root-owned, and the supervisor
+    hits PermissionError. This contaminated 3 fleet hosts on 2026-06-05 with
+    zero framework guards. Verify gets the same guard so a root-run
+    ``jc doctor`` can't report "block missing" against the wrong user's
+    crontab and tempt a root reinstall.
+
+    Fail-open when euid/owner can't be determined (non-POSIX, stat error):
+    the guard targets root-contamination, not platform portability.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return
+    try:
+        owner_uid = instance_dir.stat().st_uid
+    except OSError:
+        return
+    euid = geteuid()
+    if euid == owner_uid:
+        return
+    raise RuntimeError(
+        f"refusing watchdog cron operation: invoking euid={euid} does not own "
+        f"instance dir {instance_dir} (owner uid={owner_uid}). The JC-WATCHDOG "
+        f"block would land in the WRONG user's crontab and respawn the gateway "
+        f"as that user (root-contamination, observed 2026-06-05). Re-run as the "
+        f"instance owner, e.g.: su - <jc_user> -c 'jc watchdog install'"
+    )
 
 
 def _block_re(basename: str) -> re.Pattern[str]:
@@ -150,6 +185,7 @@ def install(
     crontab_writer=None,
 ) -> dict:
     instance_dir = instance_dir.resolve()
+    _assert_invoker_owns_instance(instance_dir)
     basename = instance_dir.name
     reader = crontab_reader or read_current_crontab
     writer = crontab_writer or _install_crontab
@@ -182,6 +218,10 @@ def verify(
     instance_dir = instance_dir.resolve()
     basename = instance_dir.name
     reader = crontab_reader or read_current_crontab
+    try:
+        _assert_invoker_owns_instance(instance_dir)
+    except RuntimeError as exc:
+        return Finding("fail", str(exc))
     try:
         text = reader()
     except RuntimeError as exc:

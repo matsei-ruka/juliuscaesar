@@ -268,5 +268,77 @@ class VerifyTests(unittest.TestCase):
             self.assertIn("@reboot", f.message)
 
 
+class EuidGuardTests(unittest.TestCase):
+    """Root-contamination guard: install/verify refuse when the invoking euid
+    doesn't own the instance dir (3 hosts contaminated 2026-06-05 by running
+    the cron write from a root shell)."""
+
+    def _instance(self, tmp: str) -> Path:
+        inst = Path(tmp) / "rachel_zane"
+        inst.mkdir()
+        return inst
+
+    def test_install_refuses_when_euid_differs_from_owner(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = self._instance(tmp)
+            cron = FakeCrontab("")
+            wrong_euid = inst.stat().st_uid + 1
+            with mock.patch("watchdog.install.os.geteuid", return_value=wrong_euid):
+                with self.assertRaises(RuntimeError) as ctx:
+                    install(
+                        inst,
+                        jc_binary="/usr/local/bin/jc",
+                        crontab_reader=cron.read,
+                        crontab_writer=cron.write,
+                    )
+            self.assertIn("does not own", str(ctx.exception))
+            self.assertIn("su - <jc_user>", str(ctx.exception))
+            # Nothing was written.
+            self.assertEqual(cron.writes, [])
+
+    def test_install_dry_run_also_refused(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = self._instance(tmp)
+            cron = FakeCrontab("")
+            wrong_euid = inst.stat().st_uid + 1
+            with mock.patch("watchdog.install.os.geteuid", return_value=wrong_euid):
+                with self.assertRaises(RuntimeError):
+                    install(
+                        inst,
+                        dry_run=True,
+                        jc_binary="/usr/local/bin/jc",
+                        crontab_reader=cron.read,
+                        crontab_writer=cron.write,
+                    )
+
+    def test_verify_fails_loud_when_euid_differs(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = self._instance(tmp)
+            cron = FakeCrontab("")
+            wrong_euid = inst.stat().st_uid + 1
+            with mock.patch("watchdog.install.os.geteuid", return_value=wrong_euid):
+                f = verify(inst, crontab_reader=cron.read)
+            self.assertEqual(f.level, "fail")
+            self.assertIn("does not own", f.message)
+
+    def test_install_allowed_for_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inst = self._instance(tmp)
+            cron = FakeCrontab("")
+            result = install(
+                inst,
+                jc_binary="/usr/local/bin/jc",
+                crontab_reader=cron.read,
+                crontab_writer=cron.write,
+            )
+            self.assertTrue(result["installed"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
