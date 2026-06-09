@@ -314,6 +314,11 @@ class PiShellAdapterTests(unittest.TestCase):
             env["HOME"] = str(fake_home)
             env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
             env["PI_ARGV_FILE"] = str(argv_file)
+            # Drop resume-session vars inherited from the live gateway shell —
+            # otherwise the parent process's JC_RESUME_SESSION leaks in and the
+            # non-resume cases assert against the wrong session id.
+            env.pop("JC_RESUME_SESSION", None)
+            env.pop("WORKER_RESUME_SESSION", None)
             if env_overrides:
                 env.update(env_overrides)
 
