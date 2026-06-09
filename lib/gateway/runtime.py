@@ -29,7 +29,7 @@ from .brains import invoke_brain
 from .channel_lifecycle import ChannelLifecycle
 from .channels.telegram import TelegramChannel
 from .config import ChannelConfig, GatewayConfig, clear_env_cache, env_value, load_config
-from .delivery import deliver_response
+from .delivery import DeliveryAmbiguous, deliver_response
 from .logging_setup import configure_logger
 from .brain_failure import BrainFailureStore
 from .recovery_integration import RecoveryIntegration
@@ -1712,7 +1712,7 @@ class GatewayRuntime:
         if meta.get("deliver_only"):
             response = event.content
             if self._delivery_ownership_ok(event):
-                self._deliver_response(event.source, response, meta)
+                self._deliver_response_idempotent(event, event.source, response, meta)
             return response
 
         channel = router.channel_name(event)
@@ -1924,7 +1924,7 @@ class GatewayRuntime:
             if owns_delivery:
                 if meta.get("was_voice"):
                     self._render_voice_reply(parsed.message, meta)
-                self._deliver_response(channel, message_out, meta)
+                self._deliver_response_idempotent(event, channel, message_out, meta)
                 self._log_outbound_transcript(event, message_out, meta, channel)
         else:
             self.log(
@@ -1963,6 +1963,8 @@ class GatewayRuntime:
         source: str,
         response: str,
         meta: dict[str, Any],
+        *,
+        strict_idempotency: bool = False,
     ) -> str | None:
         return deliver_response(
             instance_dir=self.instance_dir,
@@ -1972,7 +1974,83 @@ class GatewayRuntime:
             config_channels=self.config.channels,
             live_channels=self.channels,
             log=self.log,
+            strict_idempotency=strict_idempotency,
         )
+
+    def _deliver_response_idempotent(
+        self,
+        event: queue.Event,
+        channel: str,
+        response: str,
+        meta: dict[str, Any],
+    ) -> str | None:
+        """Ledger-gated delivery for event-keyed replies (audit Phase 2 #1/#2).
+
+        Delivery precedes ``complete()``; a crash or lease loss between the
+        send and the status flip re-runs the brain on re-claim and would send
+        a second reply — across process restarts, which the Phase 1 ownership
+        gate cannot see. The ``deliveries`` ledger is the durable
+        delivered-marker: reserve before sending, confirm after, and skip the
+        send entirely when a prior claim already confirmed (or attempted
+        ambiguously).
+
+        Events not claimed through the queue (``locked_by`` not a claim
+        token — direct calls, tests) bypass the ledger, mirroring
+        ``_delivery_ownership_ok``.
+        """
+        token = event.locked_by
+        if not token or not queue.is_claim_token(token):
+            return self._deliver_response(channel, response, meta)
+        conn = queue.connect(self.instance_dir)
+        try:
+            verdict, prior_message_id = queue.begin_delivery(
+                conn, event_id=event.id, channel=channel, locked_by=token
+            )
+        finally:
+            conn.close()
+        if verdict == "already_sent":
+            self.log(
+                f"delivery skipped id={event.id} channel={channel} "
+                f"reason=already_sent message_id={prior_message_id}",
+                kind="delivery_skipped_already_sent",
+            )
+            return prior_message_id
+        if verdict == "ambiguous":
+            self.log(
+                f"delivery skipped id={event.id} channel={channel} "
+                "reason=prior_attempt_unconfirmed — a previous claim sent (or "
+                "crashed mid-send) without confirming; not resending",
+                kind="delivery_skipped_ambiguous",
+            )
+            return None
+        try:
+            message_id = self._deliver_response(
+                channel, response, meta, strict_idempotency=True
+            )
+        except DeliveryAmbiguous as exc:
+            # Keep the 'sending' reservation: outcome unknown, the row is
+            # what blocks a duplicate on retry. Event completes normally.
+            self.log(
+                f"delivery ambiguous id={event.id} channel={channel} {exc} "
+                "— keeping ledger reservation, no fallback resend",
+                kind="delivery_ambiguous",
+            )
+            return None
+        conn2 = queue.connect(self.instance_dir)
+        try:
+            if message_id is not None:
+                queue.finish_delivery(
+                    conn2, event_id=event.id, channel=channel, message_id=str(message_id)
+                )
+            else:
+                # Provably-undelivered failure: release the reservation so a
+                # retry of the event may deliver.
+                queue.clear_delivery(
+                    conn2, event_id=event.id, channel=channel, locked_by=token
+                )
+        finally:
+            conn2.close()
+        return message_id
 
     def _handle_background_completion(
         self,
