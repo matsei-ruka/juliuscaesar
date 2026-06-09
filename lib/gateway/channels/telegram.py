@@ -1208,11 +1208,73 @@ class TelegramChannel:
     def ready(self) -> bool:
         return bool(self.token)
 
+    # Exponential backoff for consecutive not-ok getUpdates responses:
+    # 5, 10, 20, 40, 80, 160, capped at 300 seconds.
+    _POLL_BACKOFF_BASE_SECONDS = 5.0
+    _POLL_BACKOFF_MAX_SECONDS = 300.0
+
+    def _handle_poll_not_ok(
+        self,
+        data: dict[str, Any],
+        *,
+        streak: int,
+        should_stop: Callable[[], bool],
+    ) -> None:
+        """Log + back off after a not-ok getUpdates body (409/429 et al).
+
+        409 means another poller is consuming this token — usually a sibling
+        instance that leaked TELEGRAM_BOT_TOKEN (the fleet's known
+        impersonation vector); it gets a dedicated loud log line. 429 honors
+        ``parameters.retry_after`` when it exceeds the computed backoff.
+        """
+        error_code = data.get("error_code")
+        description = data.get("description") or ""
+        parameters = data.get("parameters") or {}
+        retry_after = parameters.get("retry_after")
+        delay = min(
+            self._POLL_BACKOFF_MAX_SECONDS,
+            self._POLL_BACKOFF_BASE_SECONDS * (2 ** max(0, streak - 1)),
+        )
+        if isinstance(retry_after, (int, float)) and retry_after > 0:
+            delay = max(delay, float(retry_after))
+        if error_code == 409:
+            self.log(
+                f"telegram getUpdates conflict (409): another client is polling "
+                f"this token — possible cross-instance token bleed. "
+                f"desc={description!r} streak={streak} backoff={delay:.0f}s"
+            )
+        else:
+            self.log(
+                f"telegram getUpdates not-ok error_code={error_code} "
+                f"desc={description!r} retry_after={retry_after} "
+                f"streak={streak} backoff={delay:.0f}s"
+            )
+        self._interruptible_sleep(delay, should_stop)
+
+    @staticmethod
+    def _interruptible_sleep(
+        seconds: float, should_stop: Callable[[], bool]
+    ) -> None:
+        """Sleep in 1s slices so a long backoff doesn't block shutdown."""
+        deadline = time.monotonic() + seconds
+        while not should_stop():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+
     def run(self, enqueue: EnqueueFn, should_stop: Callable[[], bool]) -> None:
         if not self.ready():
             self.log("telegram disabled: token missing")
             return
         self.log("telegram poller started")
+        # Consecutive not-ok getUpdates responses. `http_json` returns API
+        # error bodies as parsed JSON (42582e1 — required for the 400
+        # no-op-edit dedup), so a 409 (token conflict — another poller on
+        # this token, the cross-instance bleed signature) or 429 arrives
+        # here as `{"ok": false}` instead of an exception. Without an
+        # explicit check the loop re-polls instantly, invisibly, forever.
+        poll_not_ok_streak = 0
         try:
             while not should_stop():
                 try:
@@ -1227,6 +1289,13 @@ class TelegramChannel:
                         }
                     )
                     data = http_json(f"{url}?{params}", timeout=self.cfg.timeout_seconds + 5)
+                    if not data.get("ok", False):
+                        poll_not_ok_streak += 1
+                        self._handle_poll_not_ok(
+                            data, streak=poll_not_ok_streak, should_stop=should_stop
+                        )
+                        continue
+                    poll_not_ok_streak = 0
                     for update in data.get("result", []):
                         if self.bot_username is None and self.token:
                             self._resolve_bot_username()
