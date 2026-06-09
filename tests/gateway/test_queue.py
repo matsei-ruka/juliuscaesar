@@ -57,10 +57,14 @@ class ClaimBatchSameConversationTests(unittest.TestCase):
 
             ids = [e.id for e in batch]
             self.assertEqual(ids, [a.id, b.id, c.id])
+            # One fresh per-claim token, shared by the whole batch.
+            token = batch[0].locked_by
+            self.assertTrue(token.startswith("worker-test#"))
+            self.assertTrue(queue.is_claim_token(token))
             for event in batch:
                 self.assertEqual(event.status, "running")
                 self.assertEqual(event.conversation_id, "group-1")
-                self.assertEqual(event.locked_by, "worker-test")
+                self.assertEqual(event.locked_by, token)
 
             row = conn.execute(
                 "SELECT status FROM events WHERE id=?", (other.id,)
@@ -483,8 +487,10 @@ class RenewLeaseTests(unittest.TestCase):
         try:
             claimed = self._claim_one(conn, lease=60)
             original_until = claimed.locked_until
+            # Renewal matches the per-claim token (event.locked_by), not the
+            # bare worker id.
             renewed = queue.renew_lease(
-                conn, claimed.id, worker_id="w-a", lease_seconds=600
+                conn, claimed.id, worker_id=claimed.locked_by, lease_seconds=600
             )
             self.assertEqual(renewed, 1)
             row = conn.execute(
@@ -492,7 +498,7 @@ class RenewLeaseTests(unittest.TestCase):
                 (claimed.id,),
             ).fetchone()
             self.assertEqual(row["status"], "running")
-            self.assertEqual(row["locked_by"], "w-a")
+            self.assertEqual(row["locked_by"], claimed.locked_by)
             self.assertNotEqual(row["locked_until"], original_until)
             self.assertGreater(row["locked_until"], original_until)
         finally:
@@ -509,7 +515,7 @@ class RenewLeaseTests(unittest.TestCase):
             row = conn.execute(
                 "SELECT locked_by FROM events WHERE id=?", (claimed.id,)
             ).fetchone()
-            self.assertEqual(row["locked_by"], "w-a")
+            self.assertEqual(row["locked_by"], claimed.locked_by)
         finally:
             conn.close()
 
@@ -518,10 +524,10 @@ class RenewLeaseTests(unittest.TestCase):
         try:
             claimed = self._claim_one(conn)
             queue.complete(
-                conn, claimed.id, response="ok", expected_locked_by="w-a"
+                conn, claimed.id, response="ok", expected_locked_by=claimed.locked_by
             )
             renewed = queue.renew_lease(
-                conn, claimed.id, worker_id="w-a", lease_seconds=300
+                conn, claimed.id, worker_id=claimed.locked_by, lease_seconds=300
             )
             self.assertEqual(renewed, 0)
         finally:
@@ -544,15 +550,15 @@ class RenewLeaseTests(unittest.TestCase):
             self.assertIsNotNone(new_claim)
             assert new_claim is not None
             self.assertEqual(new_claim.id, claimed.id)
-            # w-a now tries to heartbeat — must be rejected.
+            # w-a now tries to heartbeat with its stale token — must be rejected.
             renewed = queue.renew_lease(
-                conn, claimed.id, worker_id="w-a", lease_seconds=300
+                conn, claimed.id, worker_id=claimed.locked_by, lease_seconds=300
             )
             self.assertEqual(renewed, 0)
             row = conn.execute(
                 "SELECT locked_by FROM events WHERE id=?", (claimed.id,)
             ).fetchone()
-            self.assertEqual(row["locked_by"], "w-b")
+            self.assertEqual(row["locked_by"], new_claim.locked_by)
         finally:
             conn.close()
 
@@ -571,13 +577,14 @@ class RenewLeaseTests(unittest.TestCase):
                 conn, worker_id="w-a", lease_seconds=60
             )
             self.assertEqual(len(batch), 2)
+            token = batch[0].locked_by
             # Hand row b to a different worker by directly mutating.
             conn.execute(
-                "UPDATE events SET locked_by='w-b' WHERE id=?", (b.id,)
+                "UPDATE events SET locked_by='w-b#other' WHERE id=?", (b.id,)
             )
             conn.commit()
             renewed = queue.renew_lease(
-                conn, [a.id, b.id], worker_id="w-a", lease_seconds=600
+                conn, [a.id, b.id], worker_id=token, lease_seconds=600
             )
             self.assertEqual(renewed, 1)
         finally:
