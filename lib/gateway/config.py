@@ -1242,8 +1242,8 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                     errors.append(f"parallel.{key}: unknown field")
             max_concurrent = parallel_raw.get("max_concurrent")
             if max_concurrent is not None:
-                if not _is_int_like(max_concurrent) or int(max_concurrent) < 1 or int(max_concurrent) > 10:
-                    errors.append("parallel.max_concurrent: must be an integer between 1 and 10")
+                if not _is_int_like(max_concurrent) or int(max_concurrent) < 1 or int(max_concurrent) > 20:
+                    errors.append("parallel.max_concurrent: must be an integer between 1 and 20")
             ctx_lines = parallel_raw.get("transcript_context_lines")
             if ctx_lines is not None:
                 _validate_nonnegative_int(
