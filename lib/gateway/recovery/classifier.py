@@ -66,7 +66,7 @@ _REGEX_RULES: list[tuple[ClassificationKind, re.Pattern[str], float]] = [
     (
         "session_missing",
         re.compile(
-            r"(no conversation found with session id|session [^\s]+ (?:not found|unknown)|failed to resume|unknown session)",
+            r"(no conversation found with session id|session [^\s]+ (?:not found|unknown)|failed to resume|unknown session|no rollout found for thread id|thread/resume failed)",
             re.IGNORECASE,
         ),
         0.97,
@@ -165,17 +165,33 @@ def _render_prompt(event: Event, stderr_tail: str) -> str:
     return template.replace("{event_content}", event_preview).replace("{stderr_tail}", stderr_tail)
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _extract_first_json_object(raw: str) -> dict[str, Any] | None:
+    """Decode the first well-formed JSON object embedded in ``raw``.
+
+    Uses ``raw_decode`` from each ``{`` candidate (same approach as
+    ``brain_output.py``) so nested objects — the mandated schema ends with
+    ``"extracted": {...}`` — parse fully. The old non-greedy regex
+    ``\\{[\\s\\S]*?\\}`` stopped at the first ``}`` and truncated every
+    well-formed reply.
+    """
+    for match in re.finditer(r"\{", raw):
+        try:
+            obj, _ = _JSON_DECODER.raw_decode(raw, match.start())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def _parse_classifier_json(raw: str) -> Classification | None:
     if not raw:
         return None
-    match = re.search(r"\{[\s\S]*?\}", raw)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
+    data = _extract_first_json_object(raw)
+    if data is None:
         return None
     kind = str(data.get("kind") or "unknown")
     if kind not in _VALID_KINDS:

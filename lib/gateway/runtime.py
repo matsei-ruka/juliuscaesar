@@ -565,17 +565,79 @@ class GatewayRuntime:
             except Exception as exc:  # noqa: BLE001
                 self.log(f"company reporter start failed: {exc}", kind="company_error")
 
-    def run_forever(self) -> None:
+    def run_forever(
+        self,
+        *,
+        poll_interval_seconds: float | None = None,
+        reload_requested: Callable[[], bool] | None = None,
+        on_tick: Callable[[], None] | None = None,
+    ) -> None:
+        """Single production dispatch loop (used by ``bin/jc-gateway run``).
+
+        Each iteration: consume a pending SIGHUP reload (``reload_requested``
+        returns-and-clears), run the caller's ``on_tick`` hook (pidfile
+        re-assert), check code drift, requeue expired leases, dispatch once.
+
+        The body is exception-guarded: a transient failure (sqlite "database
+        is locked" under contention, channel hiccups in pre-try dispatch
+        sections) logs ``loop_error`` and backs off exponentially (cap 60s)
+        instead of killing the daemon. ``SystemExit`` propagates — that is
+        the code-drift restart contract (`_check_code_drift` → exit 42 →
+        watchdog respawn with fresh modules).
+        """
+        interval = (
+            float(poll_interval_seconds)
+            if poll_interval_seconds is not None
+            else float(self.config.poll_interval_seconds)
+        )
+        error_streak = 0
         try:
             self.start_channels()
             self.log("dispatcher started")
             while not self.stop_requested():
-                self._check_code_drift()
-                self.dispatch_once()
-                time.sleep(self.config.poll_interval_seconds)
+                try:
+                    if reload_requested is not None and reload_requested():
+                        try:
+                            self.reload_config()
+                            self.log("gateway config reloaded")
+                        except Exception as exc:  # noqa: BLE001
+                            self.log(f"reload failed: {exc}", kind="reload_error")
+                    if on_tick is not None:
+                        on_tick()
+                    self._check_code_drift()
+                    self._requeue_expired_tick()
+                    self.dispatch_once()
+                    error_streak = 0
+                except SystemExit:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    error_streak += 1
+                    backoff = min(60.0, 2.0 ** min(error_streak, 6))
+                    self.log(
+                        f"dispatch loop error (streak={error_streak}): {exc!r} — "
+                        f"backing off {backoff:.0f}s",
+                        kind="loop_error",
+                    )
+                    time.sleep(backoff)
+                    continue
+                time.sleep(interval)
             self.log("dispatcher stopping")
         finally:
             self.close()
+
+    def _requeue_expired_tick(self) -> None:
+        """Requeue lease-expired events; poison rows past max_retries → failed."""
+        conn = queue.connect(self.instance_dir)
+        try:
+            requeued = queue.requeue_expired(conn, max_retries=self.config.max_retries)
+            conn.commit()
+        finally:
+            conn.close()
+        if requeued:
+            self.log(
+                f"requeued expired events count={len(requeued)} ids={requeued}",
+                kind="requeue_expired",
+            )
 
     def _check_code_drift(self) -> None:
         """Exit the process when framework code on disk is newer than startup.
@@ -655,6 +717,12 @@ class GatewayRuntime:
             return False
         from .brains import AdapterFailure
 
+        # Per-claim lease token (audit Finding: duplicate replies). All rows
+        # in a claim share one token; every guard below uses it instead of
+        # the per-process worker_id so a stale thread in THIS process cannot
+        # pass guards after the event was requeued and re-claimed.
+        claim_token = events_batch[0].locked_by or self.worker_id
+
         if len(events_batch) == 1:
             event = events_batch[0]
             batch_ids = [event.id]
@@ -677,13 +745,13 @@ class GatewayRuntime:
                             conn_t,
                             eid,
                             response="(auth token consumed)",
-                            expected_locked_by=self.worker_id,
+                            expected_locked_by=claim_token,
                         )
                     except KeyError:
                         # Lease lost (e.g. supervisor reset / re-claim). Skip.
                         self.log(
                             f"complete skipped id={eid} reason=lease_lost "
-                            f"worker={self.worker_id}"
+                            f"worker={claim_token}"
                         )
             finally:
                 conn_t.close()
@@ -706,7 +774,7 @@ class GatewayRuntime:
             self._dispatch_parallel(event)
             return True
         try:
-            with self._lease_heartbeat(batch_ids):
+            with self._lease_heartbeat(batch_ids, claim_token):
                 response = self.process_event(event)
             conn2 = queue.connect(self.instance_dir)
             try:
@@ -716,12 +784,12 @@ class GatewayRuntime:
                             conn2,
                             eid,
                             response=response,
-                            expected_locked_by=self.worker_id,
+                            expected_locked_by=claim_token,
                         )
                     except KeyError:
                         self.log(
                             f"complete skipped id={eid} reason=lease_lost "
-                            f"worker={self.worker_id}"
+                            f"worker={claim_token}"
                         )
             finally:
                 conn2.close()
@@ -742,13 +810,13 @@ class GatewayRuntime:
                             eid,
                             error=str(exc)[:1000],
                             max_retries=self.config.max_retries,
-                            expected_locked_by=self.worker_id,
+                            expected_locked_by=claim_token,
                         )
                         failed_status = failed.status
                     except KeyError:
                         self.log(
                             f"fail skipped id={eid} reason=lease_lost "
-                            f"worker={self.worker_id}"
+                            f"worker={claim_token}"
                         )
             finally:
                 conn3.close()
@@ -1419,7 +1487,9 @@ class GatewayRuntime:
             "No prose, no Markdown, no explanation."
         )
 
-    def _lease_heartbeat(self, event_ids: list[int]) -> "_LeaseHeartbeat":
+    def _lease_heartbeat(
+        self, event_ids: list[int], claim_token: str | None = None
+    ) -> "_LeaseHeartbeat":
         """Context manager that renews the SQLite queue lease for ``event_ids``
         every ``lease_seconds / 3`` while the body runs.
 
@@ -1427,15 +1497,28 @@ class GatewayRuntime:
         ``requeue_expired`` mid-call, the row flips back to ``queued``, and
         another slot claims + dispatches the same event a second time. The
         observed symptom is duplicate replies on the channel.
+
+        ``claim_token`` is the per-claim ``locked_by`` value from the claimed
+        rows; renewal must match it, not the per-process worker id, so a
+        stale claim generation can't extend a re-claimed row's lease.
         """
 
         return _LeaseHeartbeat(
             instance_dir=self.instance_dir,
             event_ids=list(event_ids),
-            worker_id=self.worker_id,
+            worker_id=claim_token or self.worker_id,
             lease_seconds=self.config.lease_seconds,
             log=self.log,
         )
+
+    def _claim_token_of(self, event: queue.Event) -> str:
+        """The per-claim lease token for a claimed event (``locked_by``).
+
+        Falls back to the per-process worker id for events that did not come
+        through ``claim_next``/``claim_batch_same_conversation`` (legacy and
+        test paths construct Events directly).
+        """
+        return event.locked_by or self.worker_id
 
     def _dispatch_parallel(self, event: queue.Event) -> None:
         """Slot-aware dispatch for a single claimed event.
@@ -1456,7 +1539,7 @@ class GatewayRuntime:
                     conn,
                     event.id,
                     available_in_seconds=1,
-                    expected_locked_by=self.worker_id,
+                    expected_locked_by=self._claim_token_of(event),
                 )
             finally:
                 conn.close()
@@ -1488,9 +1571,10 @@ class GatewayRuntime:
         """Worker-thread body: invoke the brain on `slot` and finalize the row."""
         from .brains import AdapterFailure
 
+        claim_token = self._claim_token_of(event)
         try:
             self._persist_slot_in_meta(event, slot)
-            with self._lease_heartbeat([event.id]):
+            with self._lease_heartbeat([event.id], claim_token):
                 response = self.process_event(event, slot=slot)
             conn = queue.connect(self.instance_dir)
             try:
@@ -1499,12 +1583,12 @@ class GatewayRuntime:
                         conn,
                         event.id,
                         response=response,
-                        expected_locked_by=self.worker_id,
+                        expected_locked_by=claim_token,
                     )
                 except KeyError:
                     self.log(
                         f"complete skipped (slot {slot}) id={event.id} "
-                        f"reason=lease_lost worker={self.worker_id}"
+                        f"reason=lease_lost worker={claim_token}"
                     )
             finally:
                 conn.close()
@@ -1521,12 +1605,12 @@ class GatewayRuntime:
                         event.id,
                         error=str(exc)[:1000],
                         max_retries=self.config.max_retries,
-                        expected_locked_by=self.worker_id,
+                        expected_locked_by=claim_token,
                     )
                 except KeyError:
                     self.log(
                         f"fail skipped (slot {slot}) id={event.id} "
-                        f"reason=lease_lost worker={self.worker_id}"
+                        f"reason=lease_lost worker={claim_token}"
                     )
             finally:
                 conn.close()
@@ -1559,14 +1643,17 @@ class GatewayRuntime:
             )
             conn = queue.connect(self.instance_dir)
             try:
+                # Inline (not _claim_token_of): this hook is exercised with a
+                # duck-typed runtime in tests, keep its surface minimal.
+                claim_token = event.locked_by or self.worker_id
                 for eid in batch_ids:
                     try:
                         queue.complete(
-                            conn, eid, response="(task closed)", expected_locked_by=self.worker_id
+                            conn, eid, response="(task closed)", expected_locked_by=claim_token
                         )
                     except KeyError:
                         self.log(
-                            f"complete skipped id={eid} reason=lease_lost worker={self.worker_id}"
+                            f"complete skipped id={eid} reason=lease_lost worker={claim_token}"
                         )
             finally:
                 conn.close()
@@ -1584,12 +1671,48 @@ class GatewayRuntime:
                 )
         return False
 
+    def _delivery_ownership_ok(self, event: queue.Event) -> bool:
+        """Gate channel delivery on still owning the claim (audit Finding: duplicate replies).
+
+        Delivery happens BEFORE ``complete()``; without this check a worker
+        whose lease expired mid-brain-call still sends its reply even though
+        the event was requeued and re-claimed (possibly by this same
+        process — hence per-claim tokens, not worker ids). If ANY row of the
+        claim is no longer ours, skip delivery: the fresh claimant replies.
+
+        Events that didn't come through a queue claim (``locked_by`` empty or
+        not in claim-token format — direct calls, tests) are not gated.
+        """
+        token = event.locked_by
+        if not queue.is_claim_token(token):
+            return True
+        meta = decode_meta(event)
+        raw_ids = meta.get("coalesced_ids") or [event.id]
+        try:
+            ids = sorted({int(i) for i in raw_ids} | {int(event.id)})
+        except (TypeError, ValueError):
+            ids = [int(event.id)]
+        conn = queue.connect(self.instance_dir)
+        try:
+            owned = queue.owned_count(conn, ids, locked_by=token)
+        finally:
+            conn.close()
+        if owned == len(ids):
+            return True
+        self.log(
+            f"delivery skipped id={event.id} reason=lease_lost "
+            f"owned={owned}/{len(ids)} worker={token}",
+            kind="delivery_skipped_lease_lost",
+        )
+        return False
+
     def process_event(self, event: queue.Event, *, slot: int = 0) -> str:
         monotonic_start = time.monotonic()
         meta = decode_meta(event)
         if meta.get("deliver_only"):
             response = event.content
-            self._deliver_response(event.source, response, meta)
+            if self._delivery_ownership_ok(event):
+                self._deliver_response(event.source, response, meta)
             return response
 
         channel = router.channel_name(event)
@@ -1773,6 +1896,7 @@ class GatewayRuntime:
 
         meta.setdefault("delivery_channel", channel)
         response_text = parsed.message
+        owns_delivery = self._delivery_ownership_ok(event)
         if parsed.push_message_sent or pushed_via_marker:
             reason = (
                 "canonical sender marker detected"
@@ -1797,16 +1921,17 @@ class GatewayRuntime:
             )
             message_out = parsed.message + ("\n\n" + footer if footer else "")
             response_text = message_out
-            if meta.get("was_voice"):
-                self._render_voice_reply(parsed.message, meta)
-            self._deliver_response(channel, message_out, meta)
-            self._log_outbound_transcript(event, message_out, meta, channel)
+            if owns_delivery:
+                if meta.get("was_voice"):
+                    self._render_voice_reply(parsed.message, meta)
+                self._deliver_response(channel, message_out, meta)
+                self._log_outbound_transcript(event, message_out, meta, channel)
         else:
             self.log(
                 f"dispatch silent id={event.id} brain={brain} — "
                 "brain produced no text, skipping delivery + transcript log"
             )
-        if result.image_paths and channel == "telegram":
+        if result.image_paths and channel == "telegram" and owns_delivery:
             token = env_value(self.instance_dir, "TELEGRAM_BOT_TOKEN")
             if token:
                 for img_path in result.image_paths:
@@ -2332,7 +2457,7 @@ class GatewayRuntime:
                     event.id,
                     error=message,
                     max_retries=0,
-                    expected_locked_by=self.worker_id,
+                    expected_locked_by=self._claim_token_of(event),
                 )
             except KeyError:
                 pass

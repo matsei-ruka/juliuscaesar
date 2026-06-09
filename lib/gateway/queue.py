@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,22 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = (10, 60, 300)
+
+# Per-claim lease tokens: `locked_by` is `<worker_id>#<12-hex>`, minted fresh
+# on every claim. A per-PROCESS worker id alone defeats every
+# `status='running' AND locked_by=?` guard when the same process re-claims an
+# event after lease loss (stale thread and fresh thread share the id → both
+# pass complete/fail/renew and both deliver). The token makes each claim
+# generation distinguishable; the worker-id prefix keeps log lines readable.
+CLAIM_TOKEN_SEPARATOR = "#"
+
+
+def mint_claim_token(worker_id: str) -> str:
+    return f"{worker_id}{CLAIM_TOKEN_SEPARATOR}{uuid.uuid4().hex[:12]}"
+
+
+def is_claim_token(locked_by: str | None) -> bool:
+    return bool(locked_by) and CLAIM_TOKEN_SEPARATOR in locked_by
 
 
 @dataclass(frozen=True)
@@ -239,19 +256,34 @@ def enqueue(
     return event, inserted
 
 
-def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> list[int]:
+def requeue_expired(
+    conn: sqlite3.Connection,
+    *,
+    now: str | None = None,
+    max_retries: int | None = None,
+) -> list[int]:
     """Move every `running` event whose lease has expired back to `queued`.
+
+    Each expired row's ``retry_count`` is incremented so a poison event that
+    repeatedly burns its lease cannot requeue forever. When ``max_retries`` is
+    provided, rows whose incremented count would exceed it are routed to
+    ``failed`` instead of ``queued`` (mirrors :func:`fail` semantics) and are
+    NOT included in the return value.
 
     Returns the ids of the requeued events (in id order). Caller can `len()`
     for a count, or iterate for log/audit. Snapshot the candidates first so
     the diagnostic log can name the rows that were actually moved — knowing
     `which` events expired is the key signal for debugging dispatch hangs.
+
+    Both UPDATEs re-assert ``status='running' AND locked_until <= ?`` so a
+    concurrent ``renew_lease`` between the snapshot SELECT and the UPDATE
+    keeps the row instead of losing it (TOCTOU guard).
     """
 
     now = now or now_iso()
     rows = conn.execute(
         """
-        SELECT id FROM events
+        SELECT id, retry_count FROM events
         WHERE status='running'
           AND locked_until IS NOT NULL
           AND locked_until <= ?
@@ -259,23 +291,50 @@ def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> list
         """,
         (now,),
     ).fetchall()
-    ids = [int(row["id"]) for row in rows]
-    if not ids:
+    if not rows:
         return []
-    placeholders = ",".join("?" for _ in ids)
-    conn.execute(
-        f"""
-        UPDATE events
-        SET status='queued',
-            available_at=?,
-            locked_by=NULL,
-            locked_until=NULL,
-            error=COALESCE(error, 'lease expired')
-        WHERE id IN ({placeholders})
-        """,
-        [now, *ids],
-    )
-    return ids
+    requeue_ids: list[int] = []
+    exhausted_ids: list[int] = []
+    for row in rows:
+        if max_retries is not None and int(row["retry_count"]) + 1 > max_retries:
+            exhausted_ids.append(int(row["id"]))
+        else:
+            requeue_ids.append(int(row["id"]))
+    if requeue_ids:
+        placeholders = ",".join("?" for _ in requeue_ids)
+        conn.execute(
+            f"""
+            UPDATE events
+            SET status='queued',
+                retry_count=retry_count+1,
+                available_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                error=COALESCE(error, 'lease expired')
+            WHERE id IN ({placeholders})
+              AND status='running'
+              AND locked_until <= ?
+            """,
+            [now, *requeue_ids, now],
+        )
+    if exhausted_ids:
+        placeholders = ",".join("?" for _ in exhausted_ids)
+        conn.execute(
+            f"""
+            UPDATE events
+            SET status='failed',
+                retry_count=retry_count+1,
+                finished_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                error=COALESCE(error, 'lease expired (max retries exceeded)')
+            WHERE id IN ({placeholders})
+              AND status='running'
+              AND locked_until <= ?
+            """,
+            [now, *exhausted_ids, now],
+        )
+    return requeue_ids
 
 
 def renew_lease(
@@ -327,10 +386,16 @@ def claim_next(
     lease_seconds: int = 300,
     sources: Iterable[str] | None = None,
 ) -> Event | None:
-    """Claim the next ready event with a short SQLite write transaction."""
+    """Claim the next ready event with a short SQLite write transaction.
+
+    ``locked_by`` is set to a fresh per-claim token (``mint_claim_token``),
+    NOT the bare ``worker_id``. Callers must use the returned event's
+    ``.locked_by`` for ``expected_locked_by`` guards and lease renewal.
+    """
 
     now = now_iso()
     locked_until = add_seconds(now, lease_seconds)
+    claim_token = mint_claim_token(worker_id)
     source_list = list(sources or [])
     params: list[Any] = [now]
     source_clause = ""
@@ -367,7 +432,7 @@ def claim_next(
                 error=NULL
             WHERE id=?
             """,
-            (worker_id, locked_until, now, event_id),
+            (claim_token, locked_until, now, event_id),
         )
         event = row_to_event(conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
         conn.commit()
@@ -391,11 +456,13 @@ def claim_batch_same_conversation(
     single event is claimed (NULL doesn't equal NULL in SQL, and unrelated
     NULL-conv events must not be batched together).
 
-    Empty list when nothing is claimable.
+    Empty list when nothing is claimable. All rows in the batch share one
+    fresh per-claim token in ``locked_by`` (see ``mint_claim_token``).
     """
 
     now = now_iso()
     locked_until = add_seconds(now, lease_seconds)
+    claim_token = mint_claim_token(worker_id)
     source_list = list(sources or [])
     params: list[Any] = [now]
     source_clause = ""
@@ -460,7 +527,7 @@ def claim_batch_same_conversation(
                 error=NULL
             WHERE id IN ({placeholders})
             """,
-            (worker_id, locked_until, now, *ids),
+            (claim_token, locked_until, now, *ids),
         )
         event_rows = conn.execute(
             f"SELECT * FROM events WHERE id IN ({placeholders}) ORDER BY id",
@@ -471,6 +538,36 @@ def claim_batch_same_conversation(
     except Exception:
         conn.rollback()
         raise
+
+
+def owned_count(
+    conn: sqlite3.Connection,
+    event_ids: Iterable[int],
+    *,
+    locked_by: str,
+) -> int:
+    """Count how many of ``event_ids`` are still ``running`` under ``locked_by``.
+
+    Pre-delivery ownership gate: a worker about to send a response checks
+    that every row of its claim is still its own. After a lease loss +
+    re-claim the row carries a *different* claim token (or NULL), so the
+    stale worker sees a count below ``len(event_ids)`` and must skip
+    delivery — the fresh claimant is the one that replies.
+    """
+    ids = [int(eid) for eid in event_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS n FROM events
+        WHERE id IN ({placeholders})
+          AND status='running'
+          AND locked_by=?
+        """,
+        (*ids, locked_by),
+    ).fetchone()
+    return int(row["n"])
 
 
 def complete(

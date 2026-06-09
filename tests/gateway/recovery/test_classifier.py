@@ -95,6 +95,17 @@ class RegexPrefilterTests(unittest.TestCase):
         self.assertEqual(c.kind, "bad_input")
         self.assertIn("context length", c.extracted.get("reason", ""))
 
+    def test_codex_stale_resume_classifies_session_missing(self):
+        # Real codex error from the Sofia 2026-06-05 migration incident.
+        stderr = (
+            "thread/resume failed: no rollout found for thread id "
+            "7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46"
+        )
+        c = classifier.regex_prefilter(stderr)
+        self.assertIsNotNone(c)
+        self.assertEqual(c.kind, "session_missing")
+        self.assertEqual(c.extracted["session_id"], "7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46")
+
     def test_unknown_returns_none(self):
         c = classifier.regex_prefilter("something weird and unmatched happened here")
         self.assertIsNone(c)
@@ -134,6 +145,40 @@ class LLMClassifyTests(unittest.TestCase):
             )
             self.assertIsNotNone(parsed)
             self.assertEqual(parsed.kind, kind)
+
+    def test_parses_full_schema_with_nested_extracted(self):
+        # The mandated reply schema ends with a nested object. The old
+        # non-greedy regex truncated this at the first `}` and every
+        # well-formed reply failed to parse (audit Finding 3).
+        raw = (
+            '{"kind": "session_missing", "confidence": 0.92, '
+            '"extracted": {"session_id": "7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46"}}'
+        )
+        parsed = classifier._parse_classifier_json(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.kind, "session_missing")
+        self.assertAlmostEqual(parsed.confidence, 0.92)
+        self.assertEqual(
+            parsed.extracted.get("session_id"),
+            "7d5ec0b5-47a6-4ff3-ae5f-2a6a6657cf46",
+        )
+
+    def test_parses_object_with_surrounding_prose_and_fence(self):
+        raw = (
+            "Here is my classification:\n```json\n"
+            '{"kind": "transient", "confidence": 0.8, "extracted": {}}\n'
+            "```\nLet me know if you need more."
+        )
+        parsed = classifier._parse_classifier_json(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.kind, "transient")
+
+    def test_unparseable_reply_returns_none(self):
+        self.assertIsNone(classifier._parse_classifier_json("no json here {broken"))
+        self.assertIsNone(classifier._parse_classifier_json(""))
+
+    def test_non_dict_json_returns_none(self):
+        self.assertIsNone(classifier._parse_classifier_json("[1, 2, 3]"))
 
     def test_llm_low_confidence_demoted_to_unknown(self):
         with mock.patch.object(classifier, "regex_prefilter", return_value=None), \

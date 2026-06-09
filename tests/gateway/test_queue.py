@@ -57,10 +57,14 @@ class ClaimBatchSameConversationTests(unittest.TestCase):
 
             ids = [e.id for e in batch]
             self.assertEqual(ids, [a.id, b.id, c.id])
+            # One fresh per-claim token, shared by the whole batch.
+            token = batch[0].locked_by
+            self.assertTrue(token.startswith("worker-test#"))
+            self.assertTrue(queue.is_claim_token(token))
             for event in batch:
                 self.assertEqual(event.status, "running")
                 self.assertEqual(event.conversation_id, "group-1")
-                self.assertEqual(event.locked_by, "worker-test")
+                self.assertEqual(event.locked_by, token)
 
             row = conn.execute(
                 "SELECT status FROM events WHERE id=?", (other.id,)
@@ -483,8 +487,10 @@ class RenewLeaseTests(unittest.TestCase):
         try:
             claimed = self._claim_one(conn, lease=60)
             original_until = claimed.locked_until
+            # Renewal matches the per-claim token (event.locked_by), not the
+            # bare worker id.
             renewed = queue.renew_lease(
-                conn, claimed.id, worker_id="w-a", lease_seconds=600
+                conn, claimed.id, worker_id=claimed.locked_by, lease_seconds=600
             )
             self.assertEqual(renewed, 1)
             row = conn.execute(
@@ -492,7 +498,7 @@ class RenewLeaseTests(unittest.TestCase):
                 (claimed.id,),
             ).fetchone()
             self.assertEqual(row["status"], "running")
-            self.assertEqual(row["locked_by"], "w-a")
+            self.assertEqual(row["locked_by"], claimed.locked_by)
             self.assertNotEqual(row["locked_until"], original_until)
             self.assertGreater(row["locked_until"], original_until)
         finally:
@@ -509,7 +515,7 @@ class RenewLeaseTests(unittest.TestCase):
             row = conn.execute(
                 "SELECT locked_by FROM events WHERE id=?", (claimed.id,)
             ).fetchone()
-            self.assertEqual(row["locked_by"], "w-a")
+            self.assertEqual(row["locked_by"], claimed.locked_by)
         finally:
             conn.close()
 
@@ -518,10 +524,10 @@ class RenewLeaseTests(unittest.TestCase):
         try:
             claimed = self._claim_one(conn)
             queue.complete(
-                conn, claimed.id, response="ok", expected_locked_by="w-a"
+                conn, claimed.id, response="ok", expected_locked_by=claimed.locked_by
             )
             renewed = queue.renew_lease(
-                conn, claimed.id, worker_id="w-a", lease_seconds=300
+                conn, claimed.id, worker_id=claimed.locked_by, lease_seconds=300
             )
             self.assertEqual(renewed, 0)
         finally:
@@ -544,15 +550,15 @@ class RenewLeaseTests(unittest.TestCase):
             self.assertIsNotNone(new_claim)
             assert new_claim is not None
             self.assertEqual(new_claim.id, claimed.id)
-            # w-a now tries to heartbeat — must be rejected.
+            # w-a now tries to heartbeat with its stale token — must be rejected.
             renewed = queue.renew_lease(
-                conn, claimed.id, worker_id="w-a", lease_seconds=300
+                conn, claimed.id, worker_id=claimed.locked_by, lease_seconds=300
             )
             self.assertEqual(renewed, 0)
             row = conn.execute(
                 "SELECT locked_by FROM events WHERE id=?", (claimed.id,)
             ).fetchone()
-            self.assertEqual(row["locked_by"], "w-b")
+            self.assertEqual(row["locked_by"], new_claim.locked_by)
         finally:
             conn.close()
 
@@ -571,13 +577,14 @@ class RenewLeaseTests(unittest.TestCase):
                 conn, worker_id="w-a", lease_seconds=60
             )
             self.assertEqual(len(batch), 2)
+            token = batch[0].locked_by
             # Hand row b to a different worker by directly mutating.
             conn.execute(
-                "UPDATE events SET locked_by='w-b' WHERE id=?", (b.id,)
+                "UPDATE events SET locked_by='w-b#other' WHERE id=?", (b.id,)
             )
             conn.commit()
             renewed = queue.renew_lease(
-                conn, [a.id, b.id], worker_id="w-a", lease_seconds=600
+                conn, [a.id, b.id], worker_id=token, lease_seconds=600
             )
             self.assertEqual(renewed, 1)
         finally:
@@ -590,6 +597,104 @@ class RenewLeaseTests(unittest.TestCase):
                 queue.renew_lease(conn, [], worker_id="w", lease_seconds=300),
                 0,
             )
+        finally:
+            conn.close()
+
+
+class RequeueExpiredTests(unittest.TestCase):
+    """Lease-expiry requeue must count retries so poison events can't loop
+    forever (audit: crash→respawn→re-claim with ~lease_seconds period)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-requeue-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _expired_event(self, conn, *, retry_count: int = 0) -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, status, received_at, available_at, started_at,
+               locked_by, locked_until, retry_count)
+            VALUES ('telegram', 'x', 'running', '2026-05-17T10:00:00Z',
+                    '2026-05-17T10:00:00Z', '2026-05-17T10:00:00Z',
+                    'worker-1#deadbeef', '2026-05-17T10:05:00Z', ?)
+            """,
+            (retry_count,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_requeue_increments_retry_count(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=0)
+            requeued = queue.requeue_expired(conn)
+            conn.commit()
+            self.assertEqual(requeued, [eid])
+            row = conn.execute(
+                "SELECT status, retry_count, locked_by, error FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["retry_count"], 1)
+            self.assertIsNone(row["locked_by"])
+            self.assertEqual(row["error"], "lease expired")
+        finally:
+            conn.close()
+
+    def test_poison_event_routed_to_failed_past_max_retries(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=3)
+            requeued = queue.requeue_expired(conn, max_retries=3)
+            conn.commit()
+            self.assertEqual(requeued, [])
+            row = conn.execute(
+                "SELECT status, retry_count, finished_at FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["retry_count"], 4)
+            self.assertIsNotNone(row["finished_at"])
+        finally:
+            conn.close()
+
+    def test_below_max_retries_still_requeues(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=1)
+            requeued = queue.requeue_expired(conn, max_retries=3)
+            conn.commit()
+            self.assertEqual(requeued, [eid])
+            row = conn.execute(
+                "SELECT status, retry_count FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["retry_count"], 2)
+        finally:
+            conn.close()
+
+    def test_unexpired_lease_untouched(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO events
+                  (source, content, status, received_at, available_at, started_at,
+                   locked_by, locked_until, retry_count)
+                VALUES ('telegram', 'x', 'running', '2026-05-17T10:00:00Z',
+                        '2026-05-17T10:00:00Z', '2026-05-17T10:00:00Z',
+                        'worker-1', '2099-01-01T00:00:00Z', 0)
+                """,
+            )
+            conn.commit()
+            eid = cur.lastrowid
+            self.assertEqual(queue.requeue_expired(conn), [])
+            row = conn.execute(
+                "SELECT status, retry_count FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertEqual(row["retry_count"], 0)
         finally:
             conn.close()
 
