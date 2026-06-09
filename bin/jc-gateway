@@ -272,35 +272,28 @@ def cmd_run(args: argparse.Namespace) -> int:
     install_signal_handlers()
     log_line(instance, f"gateway daemon started pid={os.getpid()}")
     runtime = GatewayRuntime(instance, log_path=log_path(instance), stop_requested=lambda: not RUNNING)
-    runtime.start_channels()
-    runtime.start_heartbeat()
-    try:
+
+    def _consume_reload_request() -> bool:
         global RELOAD_REQUESTED
-        while RUNNING:
-            if RELOAD_REQUESTED:
-                RELOAD_REQUESTED = False
-                try:
-                    runtime.reload_config()
-                    log_line(instance, "gateway config reloaded")
-                except Exception as exc:  # noqa: BLE001
-                    log_line(instance, f"reload failed: {exc}")
-            if not pid_path(instance).exists():
-                pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
-            conn = queue.connect(instance)
-            try:
-                requeued = queue.requeue_expired(conn)
-                conn.commit()
-            finally:
-                conn.close()
-            if requeued:
-                log_line(
-                    instance,
-                    f"requeued expired events count={len(requeued)} ids={requeued}",
-                )
-            runtime.dispatch_once()
-            time.sleep(args.interval_seconds)
+        if RELOAD_REQUESTED:
+            RELOAD_REQUESTED = False
+            return True
+        return False
+
+    def _ensure_pidfile() -> None:
+        if not pid_path(instance).exists():
+            pid_path(instance).write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    # The loop itself lives in GatewayRuntime.run_forever — single
+    # crash-guarded implementation with code-drift detection wired in
+    # (SystemExit(42) propagates so the watchdog respawns fresh modules).
+    try:
+        runtime.run_forever(
+            poll_interval_seconds=args.interval_seconds,
+            reload_requested=_consume_reload_request,
+            on_tick=_ensure_pidfile,
+        )
     finally:
-        runtime.close()
         pid_path(instance).unlink(missing_ok=True)
         log_line(instance, "gateway daemon stopped")
     return 0

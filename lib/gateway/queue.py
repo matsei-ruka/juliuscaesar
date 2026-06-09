@@ -239,19 +239,34 @@ def enqueue(
     return event, inserted
 
 
-def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> list[int]:
+def requeue_expired(
+    conn: sqlite3.Connection,
+    *,
+    now: str | None = None,
+    max_retries: int | None = None,
+) -> list[int]:
     """Move every `running` event whose lease has expired back to `queued`.
+
+    Each expired row's ``retry_count`` is incremented so a poison event that
+    repeatedly burns its lease cannot requeue forever. When ``max_retries`` is
+    provided, rows whose incremented count would exceed it are routed to
+    ``failed`` instead of ``queued`` (mirrors :func:`fail` semantics) and are
+    NOT included in the return value.
 
     Returns the ids of the requeued events (in id order). Caller can `len()`
     for a count, or iterate for log/audit. Snapshot the candidates first so
     the diagnostic log can name the rows that were actually moved — knowing
     `which` events expired is the key signal for debugging dispatch hangs.
+
+    Both UPDATEs re-assert ``status='running' AND locked_until <= ?`` so a
+    concurrent ``renew_lease`` between the snapshot SELECT and the UPDATE
+    keeps the row instead of losing it (TOCTOU guard).
     """
 
     now = now or now_iso()
     rows = conn.execute(
         """
-        SELECT id FROM events
+        SELECT id, retry_count FROM events
         WHERE status='running'
           AND locked_until IS NOT NULL
           AND locked_until <= ?
@@ -259,23 +274,50 @@ def requeue_expired(conn: sqlite3.Connection, *, now: str | None = None) -> list
         """,
         (now,),
     ).fetchall()
-    ids = [int(row["id"]) for row in rows]
-    if not ids:
+    if not rows:
         return []
-    placeholders = ",".join("?" for _ in ids)
-    conn.execute(
-        f"""
-        UPDATE events
-        SET status='queued',
-            available_at=?,
-            locked_by=NULL,
-            locked_until=NULL,
-            error=COALESCE(error, 'lease expired')
-        WHERE id IN ({placeholders})
-        """,
-        [now, *ids],
-    )
-    return ids
+    requeue_ids: list[int] = []
+    exhausted_ids: list[int] = []
+    for row in rows:
+        if max_retries is not None and int(row["retry_count"]) + 1 > max_retries:
+            exhausted_ids.append(int(row["id"]))
+        else:
+            requeue_ids.append(int(row["id"]))
+    if requeue_ids:
+        placeholders = ",".join("?" for _ in requeue_ids)
+        conn.execute(
+            f"""
+            UPDATE events
+            SET status='queued',
+                retry_count=retry_count+1,
+                available_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                error=COALESCE(error, 'lease expired')
+            WHERE id IN ({placeholders})
+              AND status='running'
+              AND locked_until <= ?
+            """,
+            [now, *requeue_ids, now],
+        )
+    if exhausted_ids:
+        placeholders = ",".join("?" for _ in exhausted_ids)
+        conn.execute(
+            f"""
+            UPDATE events
+            SET status='failed',
+                retry_count=retry_count+1,
+                finished_at=?,
+                locked_by=NULL,
+                locked_until=NULL,
+                error=COALESCE(error, 'lease expired (max retries exceeded)')
+            WHERE id IN ({placeholders})
+              AND status='running'
+              AND locked_until <= ?
+            """,
+            [now, *exhausted_ids, now],
+        )
+    return requeue_ids
 
 
 def renew_lease(

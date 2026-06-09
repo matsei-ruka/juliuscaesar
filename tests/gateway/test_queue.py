@@ -594,5 +594,103 @@ class RenewLeaseTests(unittest.TestCase):
             conn.close()
 
 
+class RequeueExpiredTests(unittest.TestCase):
+    """Lease-expiry requeue must count retries so poison events can't loop
+    forever (audit: crash→respawn→re-claim with ~lease_seconds period)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-requeue-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _expired_event(self, conn, *, retry_count: int = 0) -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, status, received_at, available_at, started_at,
+               locked_by, locked_until, retry_count)
+            VALUES ('telegram', 'x', 'running', '2026-05-17T10:00:00Z',
+                    '2026-05-17T10:00:00Z', '2026-05-17T10:00:00Z',
+                    'worker-1#deadbeef', '2026-05-17T10:05:00Z', ?)
+            """,
+            (retry_count,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_requeue_increments_retry_count(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=0)
+            requeued = queue.requeue_expired(conn)
+            conn.commit()
+            self.assertEqual(requeued, [eid])
+            row = conn.execute(
+                "SELECT status, retry_count, locked_by, error FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["retry_count"], 1)
+            self.assertIsNone(row["locked_by"])
+            self.assertEqual(row["error"], "lease expired")
+        finally:
+            conn.close()
+
+    def test_poison_event_routed_to_failed_past_max_retries(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=3)
+            requeued = queue.requeue_expired(conn, max_retries=3)
+            conn.commit()
+            self.assertEqual(requeued, [])
+            row = conn.execute(
+                "SELECT status, retry_count, finished_at FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["retry_count"], 4)
+            self.assertIsNotNone(row["finished_at"])
+        finally:
+            conn.close()
+
+    def test_below_max_retries_still_requeues(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=1)
+            requeued = queue.requeue_expired(conn, max_retries=3)
+            conn.commit()
+            self.assertEqual(requeued, [eid])
+            row = conn.execute(
+                "SELECT status, retry_count FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["retry_count"], 2)
+        finally:
+            conn.close()
+
+    def test_unexpired_lease_untouched(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO events
+                  (source, content, status, received_at, available_at, started_at,
+                   locked_by, locked_until, retry_count)
+                VALUES ('telegram', 'x', 'running', '2026-05-17T10:00:00Z',
+                        '2026-05-17T10:00:00Z', '2026-05-17T10:00:00Z',
+                        'worker-1', '2099-01-01T00:00:00Z', 0)
+                """,
+            )
+            conn.commit()
+            eid = cur.lastrowid
+            self.assertEqual(queue.requeue_expired(conn), [])
+            row = conn.execute(
+                "SELECT status, retry_count FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "running")
+            self.assertEqual(row["retry_count"], 0)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

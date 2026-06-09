@@ -565,17 +565,79 @@ class GatewayRuntime:
             except Exception as exc:  # noqa: BLE001
                 self.log(f"company reporter start failed: {exc}", kind="company_error")
 
-    def run_forever(self) -> None:
+    def run_forever(
+        self,
+        *,
+        poll_interval_seconds: float | None = None,
+        reload_requested: Callable[[], bool] | None = None,
+        on_tick: Callable[[], None] | None = None,
+    ) -> None:
+        """Single production dispatch loop (used by ``bin/jc-gateway run``).
+
+        Each iteration: consume a pending SIGHUP reload (``reload_requested``
+        returns-and-clears), run the caller's ``on_tick`` hook (pidfile
+        re-assert), check code drift, requeue expired leases, dispatch once.
+
+        The body is exception-guarded: a transient failure (sqlite "database
+        is locked" under contention, channel hiccups in pre-try dispatch
+        sections) logs ``loop_error`` and backs off exponentially (cap 60s)
+        instead of killing the daemon. ``SystemExit`` propagates — that is
+        the code-drift restart contract (`_check_code_drift` → exit 42 →
+        watchdog respawn with fresh modules).
+        """
+        interval = (
+            float(poll_interval_seconds)
+            if poll_interval_seconds is not None
+            else float(self.config.poll_interval_seconds)
+        )
+        error_streak = 0
         try:
             self.start_channels()
             self.log("dispatcher started")
             while not self.stop_requested():
-                self._check_code_drift()
-                self.dispatch_once()
-                time.sleep(self.config.poll_interval_seconds)
+                try:
+                    if reload_requested is not None and reload_requested():
+                        try:
+                            self.reload_config()
+                            self.log("gateway config reloaded")
+                        except Exception as exc:  # noqa: BLE001
+                            self.log(f"reload failed: {exc}", kind="reload_error")
+                    if on_tick is not None:
+                        on_tick()
+                    self._check_code_drift()
+                    self._requeue_expired_tick()
+                    self.dispatch_once()
+                    error_streak = 0
+                except SystemExit:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    error_streak += 1
+                    backoff = min(60.0, 2.0 ** min(error_streak, 6))
+                    self.log(
+                        f"dispatch loop error (streak={error_streak}): {exc!r} — "
+                        f"backing off {backoff:.0f}s",
+                        kind="loop_error",
+                    )
+                    time.sleep(backoff)
+                    continue
+                time.sleep(interval)
             self.log("dispatcher stopping")
         finally:
             self.close()
+
+    def _requeue_expired_tick(self) -> None:
+        """Requeue lease-expired events; poison rows past max_retries → failed."""
+        conn = queue.connect(self.instance_dir)
+        try:
+            requeued = queue.requeue_expired(conn, max_retries=self.config.max_retries)
+            conn.commit()
+        finally:
+            conn.close()
+        if requeued:
+            self.log(
+                f"requeued expired events count={len(requeued)} ids={requeued}",
+                kind="requeue_expired",
+            )
 
     def _check_code_drift(self) -> None:
         """Exit the process when framework code on disk is newer than startup.
