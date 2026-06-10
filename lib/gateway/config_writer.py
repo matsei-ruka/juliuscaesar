@@ -140,13 +140,20 @@ def update_env_chat_ids(
 def _load_yaml_text(text: str) -> dict[str, Any]:
     try:
         import yaml  # type: ignore
-
-        data = yaml.safe_load(text) or {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
+    except ImportError:
         from .config import _parse_simple_yaml
 
         return _parse_simple_yaml(text)
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        # Same contract as config._load_raw (audit feature 7): a syntax
+        # error must not silently degrade to the naive parser — a writer
+        # would then re-emit a config the operator never wrote.
+        from .config import ConfigError
+
+        raise ConfigError(f"invalid YAML: {exc}") from exc
+    return data if isinstance(data, dict) else {}
 
 
 def _dump_yaml(data: dict[str, Any]) -> str:
@@ -305,3 +312,39 @@ def _apply_set_mutation(
             out.append(cid)
             seen.add(cid)
     return [cid for cid in out if cid not in remove]
+
+
+# ─────────────────────── supervisor toggle ───────────────────────
+
+
+def set_supervisor_enabled(instance_dir: Path, enabled: bool) -> bool:
+    """Flip ``supervisor.enabled`` in gateway.yaml — validated + atomic.
+
+    Replaces ``jc-supervisor``'s former bare ``yaml.safe_dump`` +
+    ``write_text`` (non-atomic, unvalidated — the incident-2 pattern,
+    audit feature 7). The mutated document is validated with the gateway
+    validator BEFORE anything touches disk; on validation failure nothing
+    is written and ``ConfigError`` propagates. Returns True iff the file
+    changed.
+    """
+    from .config import _validate_raw_config
+
+    yaml_path = config_path(instance_dir)
+    text = yaml_path.read_text(encoding="utf-8") if yaml_path.exists() else ""
+    data = _load_yaml_text(text) if text else {}
+
+    sup = data.get("supervisor")
+    if not isinstance(sup, dict):
+        sup = {}
+        data["supervisor"] = sup
+    if sup.get("enabled") is enabled:
+        return False
+    sup["enabled"] = enabled
+
+    _validate_raw_config(data)
+
+    new_text = _dump_yaml(data)
+    if new_text == text:
+        return False
+    atomic_write_text(yaml_path, new_text)
+    return True
