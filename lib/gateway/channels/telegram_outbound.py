@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -90,6 +91,170 @@ def set_message_reaction(
             )
 
 
+
+TELEGRAM_TEXT_LIMIT = 4096
+
+# 429 send handling (audit F-P2 / feature 6): max attempts and the cap on
+# how long a single honor-retry_after sleep may block the dispatch thread.
+_SEND_RETRY_ATTEMPTS = 3
+_SEND_RETRY_AFTER_CAP_SECONDS = 60.0
+
+
+def _is_fence_line(line: str) -> bool:
+    return line.lstrip().startswith("```")
+
+
+def _blocks(text: str) -> list[str]:
+    """Split text into paragraph blocks; a code fence is one atomic block."""
+    blocks: list[str] = []
+    current: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if _is_fence_line(line):
+            if not in_fence:
+                # Flush any paragraph running straight into the fence so the
+                # fence stays an atomic block of its own.
+                if current:
+                    blocks.append("\n".join(current))
+                    current = []
+                in_fence = True
+                current.append(line)
+                continue
+            current.append(line)
+            in_fence = False
+            blocks.append("\n".join(current))
+            current = []
+            continue
+        if in_fence:
+            current.append(line)
+            continue
+        if not line.strip():
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def _escaped_fits(text: str, limit: int) -> bool:
+    return len(to_markdown_v2(text)) <= limit
+
+
+def _split_oversize_block(block: str, limit: int) -> list[str]:
+    """Split a single block that doesn't fit even alone.
+
+    Fence blocks are split by lines and each piece re-wrapped with the
+    original opening fence (language tag preserved) + a closing fence, so a
+    chunk never ends inside an open fence. A single oversize line falls back
+    to hard slices of ``limit // 2`` raw chars (MarkdownV2 escaping at most
+    doubles length, so the escaped slice always fits).
+    """
+    lines = block.split("\n")
+    is_fence = bool(lines) and _is_fence_line(lines[0])
+    header = ""
+    footer = ""
+    if is_fence:
+        header = lines[0]
+        body = lines[1:]
+        if body and _is_fence_line(body[-1]):
+            body = body[:-1]
+        footer = "```"
+        lines = body
+
+    def wrap(piece_lines: list[str]) -> str:
+        if is_fence:
+            return "\n".join([header, *piece_lines, footer])
+        return "\n".join(piece_lines)
+
+    pieces: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        candidate = current + [line]
+        if _escaped_fits(wrap(candidate), limit):
+            current = candidate
+            continue
+        if current:
+            pieces.append(wrap(current))
+            current = []
+        if _escaped_fits(wrap([line]), limit):
+            current = [line]
+            continue
+        # Single line too long even alone — hard-slice the raw text.
+        step = max(1, limit // 2)
+        for i in range(0, len(line), step):
+            pieces.append(wrap([line[i : i + step]]))
+    if current:
+        pieces.append(wrap(current))
+    return pieces or [block[: limit // 2]]
+
+
+def split_for_telegram(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """Split raw reply text so each chunk's MarkdownV2 escape fits ``limit``.
+
+    Audit feature 6: ``response[:4096]`` silently truncated long replies —
+    the footer (appended before the slice) was cut first and the slice could
+    land mid-entity. Splits on paragraph boundaries, fence-aware; the caller
+    sends chunks in order so the footer survives in the final chunk.
+    """
+    if _escaped_fits(text, limit):
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for block in _blocks(text):
+        candidate = f"{current}\n\n{block}" if current else block
+        if _escaped_fits(candidate, limit):
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if _escaped_fits(block, limit):
+            current = block
+            continue
+        chunks.extend(_split_oversize_block(block, limit))
+    if current:
+        chunks.append(current)
+    return chunks or [text[: limit // 2]]
+
+
+def _post_with_retry(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: int,
+    log: LogFn | None = None,
+) -> dict[str, Any]:
+    """``http_json`` with 429 handling (audit feature 6).
+
+    A 429 body arrives as ``{"ok": false, "error_code": 429}`` (http_json
+    returns 4xx JSON bodies since 42582e1). Honor ``parameters.retry_after``
+    (capped) and retry up to ``_SEND_RETRY_ATTEMPTS`` times; rate-limited
+    replies used to be lost outright.
+    """
+    data: dict[str, Any] = {}
+    for attempt in range(1, _SEND_RETRY_ATTEMPTS + 1):
+        data = http_json(url, data=payload, timeout=timeout)
+        if data.get("ok") or data.get("error_code") != 429:
+            return data
+        retry_after = (data.get("parameters") or {}).get("retry_after")
+        delay = min(
+            _SEND_RETRY_AFTER_CAP_SECONDS,
+            float(retry_after) if isinstance(retry_after, (int, float)) and retry_after > 0 else 5.0,
+        )
+        if log:
+            log(
+                f"telegram send rate-limited (429) attempt={attempt}/"
+                f"{_SEND_RETRY_ATTEMPTS} retry_after={retry_after} — "
+                f"sleeping {delay:.0f}s"
+            )
+        if attempt < _SEND_RETRY_ATTEMPTS:
+            time.sleep(delay)
+    return data
+
+
 def send_text(
     *,
     instance_dir: Path,
@@ -127,8 +292,37 @@ def send_text(
     )
     if not chat_id:
         return None
-    original = response[:4096]
-    escaped = to_markdown_v2(original)
+    # 4096 chunked sends (audit feature 6): long replies used to be silently
+    # truncated (`response[:4096]`) — footer cut first, slice mid-entity.
+    chunks = split_for_telegram(response)
+    if len(chunks) > 1:
+        log(f"telegram.send.chunked parts={len(chunks)} total_chars={len(response)}")
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    message_id: str | None = None
+    for index, chunk in enumerate(chunks):
+        message_id = _send_text_chunk(
+            url=url,
+            chat_id=chat_id,
+            chunk=chunk,
+            meta=meta,
+            log=log,
+            # Native reply threading only on the first chunk; follow-up
+            # chunks read as a continuation, not N replies to one message.
+            include_reply=index == 0,
+        )
+    return message_id
+
+
+def _send_text_chunk(
+    *,
+    url: str,
+    chat_id: str,
+    chunk: str,
+    meta: dict[str, Any],
+    log: LogFn,
+    include_reply: bool,
+) -> str | None:
+    escaped = to_markdown_v2(chunk)
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": escaped,
@@ -137,14 +331,13 @@ def send_text(
     }
     if meta.get("message_thread_id"):
         payload["message_thread_id"] = meta["message_thread_id"]
-    if meta.get("message_id"):
-        # Native reply threading. `allow_sending_without_reply` keeps the send
-        # working if the original was deleted between ingest and response.
+    if include_reply and meta.get("message_id"):
+        # `allow_sending_without_reply` keeps the send working if the
+        # original was deleted between ingest and response.
         payload["reply_to_message_id"] = meta["message_id"]
         payload["allow_sending_without_reply"] = True
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        data = http_json(url, data=payload, timeout=15)
+        data = _post_with_retry(url, payload, timeout=15, log=log)
         parse_error = (
             not data.get("ok")
             and "parse" in str(data.get("description") or "").lower()
@@ -167,15 +360,15 @@ def send_text(
         log(f"telegram.send.parse_error retrying without parse_mode err={error_desc!r}")
         fallback: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": original,
+            "text": chunk,
             "disable_web_page_preview": True,
         }
         if meta.get("message_thread_id"):
             fallback["message_thread_id"] = meta["message_thread_id"]
-        if meta.get("message_id"):
+        if include_reply and meta.get("message_id"):
             fallback["reply_to_message_id"] = meta["message_id"]
             fallback["allow_sending_without_reply"] = True
-        data = http_json(url, data=fallback, timeout=15)
+        data = _post_with_retry(url, fallback, timeout=15, log=log)
     if not data.get("ok"):
         raise RuntimeError(f"telegram send failed: {data}")
     result = data.get("result") or {}
@@ -212,7 +405,14 @@ def send_voice(
         fields.append(("reply_to_message_id", str(meta["message_id"])))
         fields.append(("allow_sending_without_reply", "true"))
     if caption:
-        escaped_caption = to_markdown_v2(caption)[:1024]
+        # Truncate the raw caption, then escape (audit F-P2): slicing the
+        # escaped form could cut an escape pair mid-entity → 400 → the
+        # whole voice message lost. Shrink until the escaped form fits.
+        caption_src = caption[:1024]
+        escaped_caption = to_markdown_v2(caption_src)
+        while len(escaped_caption) > 1024 and caption_src:
+            caption_src = caption_src[: max(0, len(caption_src) - 64)]
+            escaped_caption = to_markdown_v2(caption_src)
         fields.append(("caption", escaped_caption))
         fields.append(("parse_mode", "MarkdownV2"))
     files: list[tuple[str, str, bytes, str]] = [
@@ -240,8 +440,15 @@ def send_photo(
     image_path: str,
     meta: dict[str, Any],
     caption: str = "",
+    log: LogFn | None = None,
 ) -> str | None:
-    """Upload a local image file and post it as a Telegram photo message."""
+    """Upload a local image file and post it as a Telegram photo message.
+
+    Returns the message_id on success, None on failure. Failures are logged
+    when ``log`` is provided (audit feature 6 — errors used to be swallowed
+    and the caller logged "image sent" unconditionally).
+    """
+    _log = log or (lambda _msg: None)
     if not token:
         return None
     chat_id = str(
@@ -274,10 +481,16 @@ def send_photo(
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _log(f"telegram sendPhoto transport error path={image_path}: {exc}")
         return None
-    data = json.loads(raw) if raw else {}
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, ValueError):
+        _log(f"telegram sendPhoto non-JSON response path={image_path}: {raw[:200]!r}")
+        return None
     if not data.get("ok"):
+        _log(f"telegram sendPhoto failed path={image_path}: {data}")
         return None
     result = data.get("result") or {}
     return str(result.get("message_id")) if result.get("message_id") is not None else None

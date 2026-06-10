@@ -401,6 +401,12 @@ def parse_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
+        # Shell-style dotenvs prefix lines with `export ` — without this the
+        # key fails the identifier regex and the entry is silently dropped,
+        # which the parent-env fallback then resolves from a sibling shell
+        # (formatting quirk → token-leak vector, audit G-P2).
+        if key.startswith("export ") or key.startswith("export\t"):
+            key = key[len("export") :].strip()
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
             continue
         try:
@@ -446,10 +452,26 @@ def safe_instance_env_values(instance_dir: Path) -> dict[str, str]:
     }
 
 
+# Identity-class keys that must NEVER resolve from the parent process env: a
+# sibling instance's shell exporting TELEGRAM_BOT_TOKEN is the cross-instance
+# impersonation vector (409 conflicts + session bleed — the CRITICAL known
+# nuisance). For these, `.env` is the only source of truth — absent means
+# empty, and the call sites log the missing-token condition loudly.
+# Deliberately NOT the generic API keys: triage backends resolve operator-
+# named keys via `api_key_env`/`openrouter_api_key_env` from the process env
+# by design, and a leaked API key mis-bills but cannot impersonate the bot.
+# Audit feature 8 (env allowlisting).
+_SECRET_ENV_KEYS: frozenset[str] = frozenset({
+    "TELEGRAM_BOT_TOKEN",
+})
+
+
 def env_value(instance_dir: Path, name: str) -> str:
     values = env_values(instance_dir)
     if name in values and is_instance_env_key_allowed(name):
         return values[name]
+    if name in _SECRET_ENV_KEYS:
+        return ""
     return os.environ.get(name, "")
 
 
@@ -535,11 +557,18 @@ def _load_raw(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     try:
         import yaml  # type: ignore
-
-        data = yaml.safe_load(text) or {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
+    except ImportError:
+        # PyYAML genuinely absent — the naive parser is the documented
+        # degraded mode for minimal installs.
         return _parse_simple_yaml(text)
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        # Audit G-P1 (feature 7): swallowing real YAML syntax errors into the
+        # naive fallback parser silently validated a DIFFERENT config than
+        # the operator wrote (lines dropped). Fail loud instead.
+        raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
+    return data if isinstance(data, dict) else {}
 
 
 def _is_int_like(value: Any) -> bool:
@@ -600,6 +629,7 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
         "default_fallback_brain",
         "triage_unsafe_fallback_brain",
         "triage_unsafe_fallback_timeout_seconds",
+        "triage_cache_ttl_seconds",
         "sticky_brain_idle_timeout_seconds",
         "triage_routing",
         "reply_footer",
@@ -757,6 +787,22 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
     triage_max_tokens = _triage_opt("triage_max_tokens", "max_tokens")
     unsafe_fallback_brain = _triage_opt("triage_unsafe_fallback_brain")
     unsafe_fallback_timeout = _triage_opt("triage_unsafe_fallback_timeout_seconds")
+    # Nested values must obey the same range checks as their top-level
+    # twins — `triage: {triage_confidence_threshold: 7}` used to load and
+    # route everything to the fallback forever (audit G-P2 / feature 7).
+    threshold_any = _triage_opt("triage_confidence_threshold")
+    if threshold_any is not None and (
+        not _is_number_like(threshold_any) or not 0 <= float(threshold_any) <= 1
+    ):
+        errors.append("triage_confidence_threshold: must be between 0 and 1")
+    if isinstance(triage_raw, dict) and data.get("default_fallback_brain") is None:
+        nested_fallback = triage_raw.get("default_fallback_brain")
+        if nested_fallback is not None:
+            _validate_brain_spec(errors, "triage.default_fallback_brain", nested_fallback)
+    for _int_key in ("triage_cache_ttl_seconds", "sticky_brain_idle_timeout_seconds"):
+        _int_val = _triage_opt(_int_key)
+        if _int_val is not None:
+            _validate_nonnegative_int(errors, _int_key, _int_val)
     if unsafe_fallback_brain is not None:
         _validate_brain_spec(
             errors,
@@ -842,10 +888,54 @@ def _validate_raw_config(data: dict[str, Any]) -> None:
                 or int(session_chars) > 64
             ):
                 errors.append("reply_footer.session_chars: must be an integer between 3 and 64")
-    if data.get("triage_confidence_threshold") is not None:
-        threshold = data["triage_confidence_threshold"]
-        if not _is_number_like(threshold) or not 0 <= float(threshold) <= 1:
-            errors.append("triage_confidence_threshold: must be between 0 and 1")
+    # triage_confidence_threshold (top-level and nested) is validated in the
+    # triage section above via _triage_opt.
+
+    # `supervisor:` used to be accepted as a key with contents validated by
+    # nobody — the inverse of the incident-2 failure (audit G-P2 / feature 7).
+    # Allowed keys mirror lib/supervisor/config.py:_parse — keep in sync.
+    sup_raw = data.get("supervisor")
+    if sup_raw is not None and not isinstance(sup_raw, dict):
+        errors.append("supervisor: must be a mapping")
+    elif isinstance(sup_raw, dict):
+        _sup_allowed = {
+            "enabled",
+            "tick_interval_seconds",
+            "notice_threshold_seconds",
+            "min_card_interval_seconds",
+            "max_cards_per_event",
+            "narrator_brain",
+            "narrator_calls_per_tick_max",
+            "narrator_calls_per_event_max",
+            "stderr_tail_bytes",
+            "phases_table",
+            "recovery_patterns",
+            "recovery",
+            "groups",
+            "channels",
+        }
+        for key in sup_raw:
+            if key not in _sup_allowed:
+                errors.append(f"supervisor.{key}: unknown field")
+        if sup_raw.get("enabled") is not None and not isinstance(sup_raw["enabled"], bool):
+            errors.append("supervisor.enabled: must be a boolean")
+        _narrator = sup_raw.get("narrator_brain")
+        if _narrator:
+            _validate_brain_spec(
+                errors,
+                "supervisor.narrator_brain",
+                _narrator,
+                supported=SUPPORTED_UNSAFE_FALLBACK_BRAINS,
+            )
+        _sup_recovery = sup_raw.get("recovery")
+        if _sup_recovery is not None and not isinstance(_sup_recovery, dict):
+            errors.append("supervisor.recovery: must be a mapping")
+        elif isinstance(_sup_recovery, dict):
+            _sup_rfb = _sup_recovery.get("fallback_brain")
+            if _sup_rfb:
+                _validate_brain_spec(
+                    errors, "supervisor.recovery.fallback_brain", _sup_rfb
+                )
     if data.get("sticky_brain_idle_timeout_seconds") is not None:
         _validate_nonnegative_int(
             errors,
@@ -1794,7 +1884,9 @@ def _load_reliability(data: dict[str, Any]) -> ReliabilityConfig:
     return ReliabilityConfig(
         max_queue_depth=int(raw.get("max_queue_depth") or data.get("max_queue_depth") or 100),
         log_max_bytes=int(raw.get("log_max_bytes") or 50 * 1024 * 1024),
-        log_backups=int(raw.get("log_backups") or 5),
+        # None-check, not `or`: an explicit `log_backups: 0` is a valid
+        # operator choice and must not silently become 5 (audit G-P2).
+        log_backups=int(raw.get("log_backups")) if raw.get("log_backups") is not None else 5,
         backoff_seconds=backoff_tuple,
         coalesce_same_conversation=bool(raw.get("coalesce_same_conversation", False)),
     )
@@ -1881,7 +1973,13 @@ def load_config(instance_dir: Path) -> GatewayConfig:
         pin_to_default_brain=bool(data.get("pin_to_default_brain", False)),
         poll_interval_seconds=float(gateway.get("poll_interval_seconds") or DEFAULT_CONFIG.poll_interval_seconds),
         lease_seconds=int(gateway.get("lease_seconds") or DEFAULT_CONFIG.lease_seconds),
-        max_retries=int(gateway.get("max_retries") or DEFAULT_CONFIG.max_retries),
+        # None-check, not `or`: `max_retries: 0` means "no retries" — the
+        # `or` default turned it into 3 and triple-fired (audit G-P2).
+        max_retries=(
+            int(gateway.get("max_retries"))
+            if gateway.get("max_retries") is not None
+            else DEFAULT_CONFIG.max_retries
+        ),
         adapter_timeout_seconds=int(
             gateway.get("adapter_timeout_seconds") or DEFAULT_CONFIG.adapter_timeout_seconds
         ),

@@ -297,50 +297,29 @@ PYEOF
 
     enable|disable)
         enabled_val="$([[ "$CMD" == "enable" ]] && echo "true" || echo "false")"
-        YAML="$INSTANCE_DIR/ops/gateway.yaml"
-        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$YAML" "$enabled_val" <<'PYEOF'
+        # Routed through config_writer.set_supervisor_enabled: validated
+        # against the gateway schema BEFORE writing, atomic tmp+rename,
+        # nothing written on validation failure (audit feature 7 — the
+        # incident-2 unvalidated-write pattern).
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$INSTANCE_DIR" "$enabled_val" <<'PYEOF'
 import sys
 from pathlib import Path
 
-try:
-    import yaml  # PyYAML
-except ImportError:
-    sys.stderr.write(
-        "error: PyYAML required for jc-supervisor enable|disable "
-        "(pip install pyyaml)\n"
-    )
-    sys.exit(1)
+from gateway.config import ConfigError
+from gateway.config_writer import set_supervisor_enabled
 
-yaml_path = Path(sys.argv[1])
+instance_dir = Path(sys.argv[1])
 enabled = sys.argv[2] == "true"
-
-if yaml_path.exists():
-    text = yaml_path.read_text(encoding="utf-8")
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        sys.stderr.write(f"error: cannot parse {yaml_path}: {exc}\n")
-        sys.exit(1)
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        sys.stderr.write(f"error: {yaml_path} root is not a mapping\n")
-        sys.exit(1)
-else:
-    data = {}
-
-sup = data.get("supervisor")
-if not isinstance(sup, dict):
-    sup = {}
-    data["supervisor"] = sup
-sup["enabled"] = enabled
-
-yaml_path.parent.mkdir(parents=True, exist_ok=True)
-yaml_path.write_text(
-    yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
-    encoding="utf-8",
+try:
+    changed = set_supervisor_enabled(instance_dir, enabled)
+except ConfigError as exc:
+    sys.stderr.write(f"error: refusing to write invalid config: {exc}\n")
+    sys.exit(1)
+state = "" if changed else " (already set)"
+print(
+    f"supervisor.enabled → {str(enabled).lower()} in "
+    f"{instance_dir / 'ops' / 'gateway.yaml'}{state}"
 )
-print(f"supervisor.enabled → {str(enabled).lower()} in {yaml_path}")
 PYEOF
         ;;
 

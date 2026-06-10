@@ -28,6 +28,7 @@ fi
 
 FAIL=0
 FIX=0
+JSON_MODE=0
 
 usage() {
     cat <<'EOF'
@@ -38,6 +39,8 @@ Usage:
 
 Options:
   --instance-dir <path>  Override instance dir.
+  --json                 Machine-readable snapshot (queue metrics, liveness,
+                         brain failures, channel health) and exit.
   --fix                  Apply conservative local repairs.
   -h, --help             Show this help.
 EOF
@@ -129,6 +132,7 @@ while (( $# )); do
     case "$1" in
         -h|--help|help) usage; exit 0 ;;
         --fix) FIX=1; shift ;;
+        --json) JSON_MODE=1; shift ;;
         --instance-dir) INSTANCE_DIR="${2:-}"; shift 2 ;;
         --instance-dir=*) INSTANCE_DIR="${1#*=}"; shift ;;
         *) shift ;;
@@ -148,6 +152,27 @@ if [[ -z "$INSTANCE_DIR" ]]; then
         done
         [[ -z "$INSTANCE_DIR" && -d "$(pwd)/memory" ]] && INSTANCE_DIR="$(pwd)"
     fi
+fi
+
+# --- JSON mode (audit feature 10) ---
+# Machine-readable snapshot for fleet tooling (fleet-health skill): queue
+# depth/oldest-age, heartbeat + liveness, brain failure store, channel
+# health. Emitted INSTEAD of the human checks — stdout is pure JSON.
+if [[ "$JSON_MODE" == "1" ]]; then
+    if [[ -z "$INSTANCE_DIR" || ! -d "$INSTANCE_DIR" ]]; then
+        echo '{"error": "no instance dir found"}'
+        exit 1
+    fi
+    INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
+    PYTHONPATH="$FRAMEWORK_ROOT/lib" exec "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+from gateway.observability import snapshot
+
+print(json.dumps(snapshot(Path(sys.argv[1])), indent=2))
+PY
 fi
 
 # --- Environment checks ---
@@ -683,6 +708,115 @@ while IFS= read -r line; do
         Traceback*) fail "liveness check crashed: $line" ;;
     esac
 done <<<"$LIVENESS_REPORT"
+
+# --- Brain health ---
+# Static probes per configured brain spec (default, channel defaults,
+# fallback chain, triage backups, supervisor brains). Fallback-role
+# failures are RED: a fallback runs exactly when the primary is broken.
+# See docs/specs/jc-audit-phase4-remaining.md (feature 5).
+
+section "Brain health"
+
+BRAIN_HEALTH_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from gateway.brain_health import probe_all
+from gateway.config import load_config
+
+instance = Path(sys.argv[1])
+try:
+    cfg = load_config(instance)
+except Exception as exc:
+    print(f"WARN:brain health skipped — config unreadable: {exc}")
+    raise SystemExit(0)
+results = probe_all(instance, cfg)
+if not results:
+    print("INFO:no brain specs configured")
+for res in results:
+    print(f"{res.level.upper()}:{res.summary()}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+        Traceback*) fail "brain health check crashed: $line" ;;
+    esac
+done <<<"$BRAIN_HEALTH_REPORT"
+
+# --- Ownership ---
+# Root-contamination guards (audit feature 9, doctor side): gateway process
+# uid vs instance owner, state/ file ownership, JC-WATCHDOG in root's
+# crontab. See feedback_watchdog_install_as_jc (2026-06-05, 3 hosts).
+
+section "Ownership"
+
+OWNERSHIP_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from gateway.liveness import ownership_findings
+
+for f in ownership_findings(Path(sys.argv[1])):
+    print(f"{f.level.upper()}:{f.message}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+        Traceback*) fail "ownership check crashed: $line" ;;
+    esac
+done <<<"$OWNERSHIP_REPORT"
+
+# --- Queue health ---
+# Queue depth / oldest-queued age / failed rows from queue.db (read-only).
+
+section "Queue"
+
+QUEUE_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from gateway.observability import queue_metrics
+
+m = queue_metrics(Path(sys.argv[1]))
+if not m["db_present"]:
+    print("INFO:queue.db not present (gateway never started here?)")
+    raise SystemExit(0)
+if m.get("error"):
+    print(f"WARN:queue.db unreadable: {m['error']}")
+    raise SystemExit(0)
+depth = m["depth_by_status"]
+queued = depth.get("queued", 0)
+running = depth.get("running", 0)
+failed = m["failed_count"]
+print(f"INFO:depth queued={queued} running={running} failed={failed}")
+age = m["oldest_queued_age_seconds"]
+if age is not None and age > 600:
+    print(f"WARN:oldest queued event is {int(age)}s old — dispatch may be stalled")
+elif age is not None:
+    print(f"OK:oldest queued event age {int(age)}s")
+else:
+    print("OK:no queued events waiting")
+if failed:
+    print(f"WARN:{failed} failed event(s) in queue — triage with `jc-gateway list`")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+        Traceback*) fail "queue check crashed: $line" ;;
+    esac
+done <<<"$QUEUE_REPORT"
 
 # --- Codex readiness ---
 # Per docs/specs/codex-main-brain-hardening.md §Phase 6.

@@ -20,7 +20,7 @@ if _LIB.exists() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from gateway import queue  # type: ignore  # noqa: E402
-from gateway.config import ConfigError, config_path, load_config, parse_env_file, validate_config  # type: ignore  # noqa: E402
+from gateway.config import ConfigError, config_path, is_instance_env_key_allowed, load_config, parse_env_file, validate_config  # type: ignore  # noqa: E402
 from gateway.env_isolation import sanitize as _sanitize_env  # type: ignore  # noqa: E402
 from gateway.runtime import GatewayRuntime  # type: ignore  # noqa: E402
 from jc_paths import InstanceResolutionError, resolve_instance_dir as _resolve_instance_dir  # type: ignore  # noqa: E402
@@ -360,7 +360,7 @@ def _build_child_env(
     if getattr(args, "no_env_isolation", False):
         return None, "gateway env-isolated: skipped (--no-env-isolation)"
     dotenv = parse_env_file(instance / ".env")
-    clean, stripped = _sanitize_env(os.environ, dotenv)
+    clean, stripped = _sanitize_env(os.environ, dotenv, key_allowed=is_instance_env_key_allowed)
     # Keep PYTHONPATH so the daemon can still import its own libs when
     # launched from a non-installed checkout (CI, dev shells).
     if "PYTHONPATH" in os.environ and "PYTHONPATH" not in clean:

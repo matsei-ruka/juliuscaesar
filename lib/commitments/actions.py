@@ -31,7 +31,9 @@ def telegram_send(instance_dir: Path, commitment: Commitment) -> DispatchResult:
     from gateway.config import env_value  # type: ignore
     from heartbeat.lib.send_telegram import send  # type: ignore
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
+    # .env-only resolution via env_value (secret-strict) — os.environ-first
+    # here was a residual cross-instance impersonation site (audit G-P1).
+    token = env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
     chat_id = commitment.chat_id or env_value(instance_dir, "TELEGRAM_CHAT_ID")
     if not token:
         return DispatchResult(False, retryable=True, message="TELEGRAM_BOT_TOKEN not set")

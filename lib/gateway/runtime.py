@@ -264,12 +264,14 @@ class _LeaseHeartbeat:
         worker_id: str,
         lease_seconds: int,
         log: Callable[..., None],
+        on_renew: Callable[[], None] | None = None,
     ) -> None:
         self._instance_dir = instance_dir
         self._event_ids = list(event_ids)
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._log = log
+        self._on_renew = on_renew
         self._interval = max(30.0, float(lease_seconds) / 3.0)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -316,10 +318,24 @@ class _LeaseHeartbeat:
                     kind="lease_hb_lost",
                 )
                 return
+            # Successful renewal = the gateway is actively working an event:
+            # counts as dispatch progress for real-liveness (feature 10).
+            if self._on_renew is not None:
+                try:
+                    self._on_renew()
+                except Exception:  # noqa: BLE001 — observability only
+                    pass
 
 
 class GatewayRuntime:
     HEARTBEAT_INTERVAL_SECONDS = 5.0
+    # Real liveness (audit feature 10): when neither the dispatch loop nor a
+    # lease renewal has made progress for this long, the heartbeat ticker
+    # stops refreshing the heartbeat file so the watchdog's existing
+    # stale-heartbeat detection can see a wedged-but-alive gateway. Generous
+    # vs. the ~100s lease-renew cadence (lease/3) and the per-poll loop tick:
+    # a healthy gateway, even mid-300s adapter call, never trips this.
+    LIVENESS_STALL_SECONDS = 600.0
     TRIAGE_REJECTION_MESSAGE = (
         "I can't help with that request. It looks outside the assistant's "
         "safety policy, so I did not pass it to a brain."
@@ -369,6 +385,9 @@ class GatewayRuntime:
         self._heartbeat_path = queue.queue_dir(self.instance_dir) / "heartbeat"
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
+        self._liveness_path = queue.queue_dir(self.instance_dir) / "liveness.json"
+        self._last_progress = time.monotonic()
+        self._liveness_stall_logged = 0.0
         self._recovery = RecoveryIntegration(self)
         self._brain_failure = BrainFailureStore(self.instance_dir)
         self._company_reporter = self._init_company_reporter()
@@ -401,14 +420,56 @@ class GatewayRuntime:
         except Exception:  # noqa: BLE001
             return None
 
+    def _note_progress(self) -> None:
+        """Mark dispatch progress — called by the run_forever loop each
+        iteration and by lease renewals (a serial-mode gateway legitimately
+        blocked inside a long adapter call still renews its lease)."""
+        self._last_progress = time.monotonic()
+
+    def _progress_age_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self._last_progress)
+
     def _touch_heartbeat(self) -> None:
         """Bump the heartbeat file mtime — supervisor reads this for liveness.
 
+        Audit feature 10: the ticker used to free-run regardless of dispatch
+        progress, so a deadlocked loop passed every watchdog probe forever
+        (PID-up ≠ serving). When no progress has been observed for
+        ``LIVENESS_STALL_SECONDS`` the touch is SKIPPED — the heartbeat file
+        goes genuinely stale and the watchdog's existing stale detection can
+        remediate. Also writes ``liveness.json`` for `jc doctor --json`.
+
         Also update the process session heartbeat for orphan detection.
         """
+        progress_age = self._progress_age_seconds()
+        if progress_age > self.LIVENESS_STALL_SECONDS:
+            now = time.monotonic()
+            if now - self._liveness_stall_logged > 300.0:
+                self._liveness_stall_logged = now
+                self.log(
+                    f"dispatch loop stalled — no progress for "
+                    f"{progress_age:.0f}s; suppressing heartbeat so the "
+                    "watchdog can see it",
+                    kind="liveness_stall",
+                )
+            return
         try:
             self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
             self._heartbeat_path.touch(exist_ok=True)
+        except OSError:
+            pass
+        try:
+            tmp = self._liveness_path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "progress_age_seconds": round(progress_age, 1),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            tmp.replace(self._liveness_path)
         except OSError:
             pass
         try:
@@ -593,8 +654,10 @@ class GatewayRuntime:
         error_streak = 0
         try:
             self.start_channels()
+            self._probe_configured_brains()
             self.log("dispatcher started")
             while not self.stop_requested():
+                self._note_progress()
                 try:
                     if reload_requested is not None and reload_requested():
                         try:
@@ -638,6 +701,32 @@ class GatewayRuntime:
                 f"requeued expired events count={len(requeued)} ids={requeued}",
                 kind="requeue_expired",
             )
+
+    def _probe_configured_brains(self) -> None:
+        """Startup static probe of every configured brain spec.
+
+        Audit feature 5: a fallback brain that cannot run (missing CLI,
+        missing auth) used to be discovered only at runtime, as a 300s hang,
+        exactly when the primary was already broken. Boot proceeds either
+        way — a broken fallback must not take down the primary path — but
+        the failure is now loud at start instead of silent until needed.
+        """
+        try:
+            from .brain_health import probe_all
+
+            for res in probe_all(self.instance_dir, self.config):
+                if res.level == "fail":
+                    self.log(
+                        f"brain probe FAILED {res.summary()}",
+                        kind="brain_probe_failed",
+                    )
+                elif res.level == "warn":
+                    self.log(
+                        f"brain probe warning {res.summary()}",
+                        kind="brain_probe_warn",
+                    )
+        except Exception as exc:  # noqa: BLE001 — probes must never block boot
+            self.log(f"brain probe error: {exc}", kind="brain_probe_error")
 
     def _check_code_drift(self) -> None:
         """Exit the process when framework code on disk is newer than startup.
@@ -1512,6 +1601,7 @@ class GatewayRuntime:
             worker_id=claim_token or self.worker_id,
             lease_seconds=self.config.lease_seconds,
             log=self.log,
+            on_renew=self._note_progress,
         )
 
     def _claim_token_of(self, event: queue.Event) -> str:
@@ -1832,6 +1922,13 @@ class GatewayRuntime:
         finally:
             typing_stop.set()
         self.log(f"dispatch ok id={event.id} brain={brain}")
+        # Clear-on-recovery (audit feature 5): one successful invocation
+        # proves the brain works again — drop any persisted failure mark so
+        # routing stops diverting to backups.
+        try:
+            self._brain_failure.clear(brain)
+        except Exception:  # noqa: BLE001 — bookkeeping must not fail dispatch
+            pass
 
         # Phase 2 — Background interception: when the brain subprocess was
         # demoted to background mid-flight, the reply must not flow through
@@ -1939,15 +2036,24 @@ class GatewayRuntime:
             if token:
                 for img_path in result.image_paths:
                     try:
-                        telegram_send_photo(
+                        photo_message_id = telegram_send_photo(
                             instance_dir=self.instance_dir,
                             token=token,
                             image_path=img_path,
                             meta=meta,
+                            log=self.log,
                         )
-                        self.log(
-                            f"image sent id={event.id} brain={brain} path={img_path}"
-                        )
+                        # send_photo returns None on API failure — don't log
+                        # success unconditionally (audit F-P2 / feature 6).
+                        if photo_message_id is not None:
+                            self.log(
+                                f"image sent id={event.id} brain={brain} path={img_path}"
+                            )
+                        else:
+                            self.log(
+                                f"image send failed (api) id={event.id} "
+                                f"brain={brain} path={img_path}"
+                            )
                     except Exception as exc:  # noqa: BLE001
                         self.log(
                             f"image send failed id={event.id} brain={brain} "

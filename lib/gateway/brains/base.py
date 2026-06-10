@@ -334,6 +334,41 @@ Your reply is only the text the user reads.
     # Number of transcript lines to inject as priming context on resume.
     TRANSCRIPT_PRIMING_LINES = 10
 
+    # Parent-env prefixes intentionally passed through to adapter
+    # subprocesses on top of the env_isolation whitelist. JC_* is
+    # framework-internal plumbing (recursion guards, markers); XDG_* keeps
+    # CLI config discovery working on customized hosts.
+    _ADAPTER_ENV_PASSTHROUGH_PREFIXES: tuple = ("JC_", "XDG_")
+
+    def _build_adapter_env(self) -> dict:
+        """Allowlisted environment for the adapter subprocess.
+
+        Replaces the previous ``os.environ.copy()`` (audit C-P2 / feature 8):
+        copying the full gateway env handed every token in the parent shell —
+        including a sibling instance's TELEGRAM_BOT_TOKEN after a manual
+        sibling-shell start — to every brain subprocess. Build instead from:
+        whitelisted parent keys (PATH/HOME/LANG/TERM/...), JC_*/XDG_*
+        passthrough, and the instance ``.env`` (minus reserved keys). The
+        caller layers the per-invocation JC_* vars and ``extra_env()`` on
+        top, exactly as before.
+        """
+        from .. import env_isolation
+        from ..config import safe_instance_env_values
+
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if env_isolation.is_whitelisted(key)
+            or key.startswith(self._ADAPTER_ENV_PASSTHROUGH_PREFIXES)
+        }
+        # PYTHONPATH keeps non-installed checkouts (CI, dev shells) able to
+        # spawn python helpers from adapters; same carve-out as jc-gateway's
+        # _build_child_env.
+        if "PYTHONPATH" in os.environ:
+            env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+        env.update(safe_instance_env_values(self.instance_dir))
+        return env
+
     def invoke(
         self,
         *,
@@ -363,7 +398,7 @@ Your reply is only the text the user reads.
         goal = goal_cache.goal_text(self.instance_dir, event.conversation_id or "")
         if goal and self.goal_delivery != "system_prompt" and resume_session is None:
             prompt = f"<goal>\n{goal}\n</goal>\n\n" + prompt
-        env = os.environ.copy()
+        env = self._build_adapter_env()
         env["JC_INSTANCE_DIR"] = str(self.instance_dir)
         env["JC_EVENT_SOURCE"] = event.source or ""
         push_marker_path = (

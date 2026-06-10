@@ -41,6 +41,11 @@ def supported_brains() -> tuple[str, ...]:
     return tuple(_BRAIN_REGISTRY.keys())
 
 
+def brain_class(name: str) -> type[Brain] | None:
+    """Registry lookup for health probes (audit feature 5)."""
+    return _BRAIN_REGISTRY.get(name)
+
+
 def invoke_brain(
     *,
     instance_dir: Path,
