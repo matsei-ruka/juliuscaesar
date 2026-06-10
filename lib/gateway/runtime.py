@@ -696,6 +696,7 @@ class GatewayRuntime:
                     conn,
                     worker_id=self.worker_id,
                     lease_seconds=self.config.lease_seconds,
+                    max_retries=self.config.max_retries,
                 )
                 events_batch = [single] if single is not None else []
             elif self.config.reliability.coalesce_same_conversation:
@@ -703,12 +704,14 @@ class GatewayRuntime:
                     conn,
                     worker_id=self.worker_id,
                     lease_seconds=self.config.lease_seconds,
+                    max_retries=self.config.max_retries,
                 )
             else:
                 single = queue.claim_next(
                     conn,
                     worker_id=self.worker_id,
                     lease_seconds=self.config.lease_seconds,
+                    max_retries=self.config.max_retries,
                 )
                 events_batch = [single] if single is not None else []
         finally:
