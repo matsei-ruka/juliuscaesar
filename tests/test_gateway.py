@@ -310,7 +310,7 @@ class GatewayTests(unittest.TestCase):
             schema_version = conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()["value"]
-            self.assertEqual(schema_version, "4")
+            self.assertEqual(schema_version, str(queue.SCHEMA_VERSION))
         finally:
             conn.close()
 

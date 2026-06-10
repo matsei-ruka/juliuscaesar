@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_RETRY_BACKOFF_SECONDS = (10, 60, 300)
 
 # Per-claim lease tokens: `locked_by` is `<worker_id>#<12-hex>`, minted fresh
@@ -159,6 +159,17 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_chats_last_seen
         ON chats(channel, last_seen DESC);
+
+        CREATE TABLE IF NOT EXISTS deliveries (
+            event_id     INTEGER NOT NULL,
+            channel      TEXT    NOT NULL,
+            status       TEXT    NOT NULL,
+            message_id   TEXT,
+            locked_by    TEXT,
+            attempted_at TEXT    NOT NULL,
+            sent_at      TEXT,
+            PRIMARY KEY (event_id, channel)
+        );
         """
     )
     add_column_if_missing(
@@ -568,6 +579,122 @@ def owned_count(
         (*ids, locked_by),
     ).fetchone()
     return int(row["n"])
+
+
+def begin_delivery(
+    conn: sqlite3.Connection,
+    *,
+    event_id: int,
+    channel: str,
+    locked_by: str,
+) -> tuple[str, str | None]:
+    """Reserve the right to send the reply for ``(event_id, channel)``.
+
+    Outbound idempotency ledger (audit Phase 2 #1/#2 — duplicate replies).
+    Delivery happens BEFORE ``complete()``; a crash (or lease loss) between
+    the channel send and the status flip leaves the row ``running``, so the
+    re-claim re-runs the brain and would send a second reply. The ledger row
+    is the durable delivered-marker that survives process restarts.
+
+    Returns ``(verdict, message_id)``:
+      - ``("proceed", None)`` — no prior attempt (row inserted as
+        ``sending``), or a ``sending`` row from THIS claim (same-claim
+        re-entry). Caller sends, then calls :func:`finish_delivery` on
+        success or :func:`clear_delivery` on a provably-undelivered failure.
+      - ``("already_sent", message_id)`` — a previous claim confirmed the
+        send. Skip the send; complete the event with the stored id.
+      - ``("ambiguous", None)`` — a ``sending`` row from a DIFFERENT claim:
+        that attempt crashed mid-send or timed out post-accept, outcome
+        unknown. At-most-once: skip the send and complete. A possibly-lost
+        reply beats a duplicate.
+    """
+    ts = now_iso()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, message_id, locked_by FROM deliveries "
+            "WHERE event_id=? AND channel=?",
+            (event_id, channel),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO deliveries(event_id, channel, status, locked_by, attempted_at)
+                VALUES (?, ?, 'sending', ?, ?)
+                """,
+                (event_id, channel, locked_by, ts),
+            )
+            conn.commit()
+            return ("proceed", None)
+        conn.commit()
+        if row["status"] == "sent":
+            return ("already_sent", row["message_id"])
+        if row["locked_by"] == locked_by:
+            return ("proceed", None)
+        return ("ambiguous", None)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def finish_delivery(
+    conn: sqlite3.Connection,
+    *,
+    event_id: int,
+    channel: str,
+    message_id: str | None,
+) -> None:
+    """Confirm the send for ``(event_id, channel)`` (``sending`` → ``sent``)."""
+    conn.execute(
+        """
+        UPDATE deliveries
+        SET status='sent', message_id=?, sent_at=?
+        WHERE event_id=? AND channel=?
+        """,
+        (message_id, now_iso(), event_id, channel),
+    )
+    conn.commit()
+
+
+def clear_delivery(
+    conn: sqlite3.Connection,
+    *,
+    event_id: int,
+    channel: str,
+    locked_by: str,
+) -> bool:
+    """Release a reservation after a PROVABLY-undelivered send failure.
+
+    Only the claim that made the reservation may clear it, and only while it
+    is still ``sending`` — a ``sent`` row is permanent. Returns True iff the
+    row was removed (a later retry may then deliver).
+
+    Callers must NOT clear after an ambiguous failure (exception that may
+    have fired post-accept): the surviving ``sending`` row is what blocks
+    the duplicate.
+    """
+    cur = conn.execute(
+        """
+        DELETE FROM deliveries
+        WHERE event_id=? AND channel=? AND status='sending' AND locked_by=?
+        """,
+        (event_id, channel, locked_by),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delivery_record(
+    conn: sqlite3.Connection,
+    *,
+    event_id: int,
+    channel: str,
+) -> sqlite3.Row | None:
+    """Read the ledger row for ``(event_id, channel)`` (tests / doctor)."""
+    return conn.execute(
+        "SELECT * FROM deliveries WHERE event_id=? AND channel=?",
+        (event_id, channel),
+    ).fetchone()
 
 
 def complete(
