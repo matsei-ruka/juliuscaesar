@@ -250,16 +250,20 @@ def _send_draft_with_buttons(
 ) -> None:
     """Send draft approval notification with Approve/Reject inline keyboard buttons."""
     _log = log or (lambda _: None)
-    # Resolve token + chat_id from env (same precedence as send_telegram.py).
+    # Token resolves via env_value (.env-first, secret-strict) — the previous
+    # os.environ-first read was one of the residual cross-instance
+    # impersonation sites (audit G-P1 / feature 8).
     from ..config import env_value
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
+    token = env_value(instance_dir, "TELEGRAM_BOT_TOKEN")
     if not token:
         _log("telegram draft buttons skipped — no TELEGRAM_BOT_TOKEN")
         return
     chat_id = (
         chat_id_override
+        # Per-invocation routing override set by the gateway itself — kept.
+        # The bare os.environ TELEGRAM_CHAT_ID rung is gone (sibling-shell
+        # misroute vector); .env resolution via env_value covers it.
         or os.environ.get("TELEGRAM_CHAT_ID_OVERRIDE")
-        or os.environ.get("TELEGRAM_CHAT_ID")
         or env_value(instance_dir, "TELEGRAM_CHAT_ID")
     )
     if not chat_id:

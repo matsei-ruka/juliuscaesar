@@ -7,7 +7,7 @@ on top. See ``docs/specs/gateway-env-isolation.md``.
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Callable, Mapping
 
 
 DANGEROUS_PREFIXES: tuple[str, ...] = ("CODEX_", "CLAUDE_")
@@ -51,12 +51,21 @@ def is_whitelisted(key: str) -> bool:
 def sanitize(
     parent_env: Mapping[str, str],
     dotenv: Mapping[str, str],
+    *,
+    key_allowed: Callable[[str], bool] | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Return ``(clean_env, stripped_keys)``.
 
-    ``clean_env`` = whitelisted parent keys + everything in ``dotenv``.
-    ``stripped_keys`` = parent keys that matched ``is_dangerous`` and are
-    not being re-supplied by ``dotenv`` (sorted, for stable logging).
+    ``clean_env`` = whitelisted parent keys + ``dotenv`` entries passing
+    ``key_allowed``. ``stripped_keys`` = parent keys that matched
+    ``is_dangerous`` and are not being re-supplied by ``dotenv`` (sorted,
+    for stable logging).
+
+    ``key_allowed`` (audit G-P2 / feature 8): without it, ``.env`` was
+    layered wholesale and could inject PATH/LD_PRELOAD/JC_INSTANCE_DIR over
+    the whitelisted parent env. ``bin/jc-gateway`` passes
+    ``config.is_instance_env_key_allowed`` (the reserved-key predicate the
+    rest of the framework already uses for .env values).
     """
     clean: dict[str, str] = {
         key: value for key, value in parent_env.items() if is_whitelisted(key)
@@ -67,5 +76,7 @@ def sanitize(
         if is_dangerous(key) and key not in dotenv
     )
     for key, value in dotenv.items():
+        if key_allowed is not None and not key_allowed(key):
+            continue
         clean[key] = value
     return clean, stripped

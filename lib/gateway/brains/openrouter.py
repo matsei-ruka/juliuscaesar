@@ -28,10 +28,9 @@ class OpenRouterBrain(Brain):
     name = "openrouter"
 
     def validate(self) -> None:
-        api_key = os.environ.get("OPENROUTER_API_KEY") or env_value(
-            self.instance_dir,
-            "OPENROUTER_API_KEY",
-        )
+        # .env-first, secret-strict (audit G-P1 / feature 8): never resolve
+        # the key from a sibling shell's exported environment.
+        api_key = env_value(self.instance_dir, "OPENROUTER_API_KEY")
         if not api_key:
             raise RuntimeError("OPENROUTER_API_KEY missing")
 
@@ -51,10 +50,9 @@ class OpenRouterBrain(Brain):
         timeout = self.override.timeout_seconds or cfg.triage.unsafe_fallback_timeout_seconds
         timeout = timeout or timeout_seconds
         prompt = self.prompt_for_event(event)
-        api_key = os.environ.get("OPENROUTER_API_KEY") or env_value(
-            self.instance_dir,
-            "OPENROUTER_API_KEY",
-        )
+        # .env-first, secret-strict (audit G-P1 / feature 8): never resolve
+        # the key from a sibling shell's exported environment.
+        api_key = env_value(self.instance_dir, "OPENROUTER_API_KEY")
         log = log_event or (lambda _msg: None)
         start = now_iso()
         wall_start = time.monotonic()

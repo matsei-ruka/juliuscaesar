@@ -46,19 +46,52 @@ class ConfigEnvBoundaryTests(unittest.TestCase):
                     "instance-token",
                 )
 
-    def test_env_value_falls_back_to_process_env_when_key_absent(self):
+    def test_env_value_falls_back_to_process_env_for_non_secret_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             (instance / ".env").write_text("OTHER=value\n", encoding="utf-8")
             with mock.patch.dict(
                 os.environ,
-                {"TELEGRAM_BOT_TOKEN": "process-token"},
+                {"SOME_PLAIN_SETTING": "process-value"},
                 clear=False,
             ):
                 self.assertEqual(
-                    env_value(instance, "TELEGRAM_BOT_TOKEN"),
-                    "process-token",
+                    env_value(instance, "SOME_PLAIN_SETTING"),
+                    "process-value",
                 )
+
+    def test_env_value_never_resolves_secret_keys_from_process_env(self):
+        # Audit feature 8: a sibling shell's exported token must not leak in.
+        # Absent from .env → empty, even when os.environ carries a value.
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".env").write_text("OTHER=value\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_BOT_TOKEN": "sibling-token",
+                    "OPENROUTER_API_KEY": "sibling-key",
+                },
+                clear=False,
+            ):
+                self.assertEqual(env_value(instance, "TELEGRAM_BOT_TOKEN"), "")
+                self.assertEqual(env_value(instance, "OPENROUTER_API_KEY"), "")
+
+    def test_parse_env_file_accepts_export_prefix(self):
+        # `export FOO=bar` lines used to be silently dropped (key fails the
+        # identifier regex) — converting a shell-style dotenv into missing
+        # keys that the parent-env fallback then resolved from a sibling.
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".env").write_text(
+                "export TELEGRAM_BOT_TOKEN=exported-token\n"
+                "export\tTABBED_KEY=tab-value\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                env_value(instance, "TELEGRAM_BOT_TOKEN"), "exported-token"
+            )
+            self.assertEqual(env_value(instance, "TABBED_KEY"), "tab-value")
 
     def test_two_instances_under_same_user_resolve_their_own_env(self):
         with tempfile.TemporaryDirectory() as tmp:

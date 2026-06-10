@@ -275,11 +275,12 @@ def main() -> int:
     env_path = instance / ".env"
     env = _load_env_file(env_path, ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
 
-    token = (
-        args.bot_token
-        or os.environ.get("TELEGRAM_BOT_TOKEN")
-        or env.get("TELEGRAM_BOT_TOKEN")
-    )
+    # No os.environ rung for the bot token: a sibling instance's exported
+    # TELEGRAM_BOT_TOKEN is the cross-instance impersonation vector (audit
+    # G-P1 / feature 8). Explicit --bot-token and the instance .env are the
+    # only sources. The chat-id ladder below keeps its env rungs — those are
+    # per-invocation routing set by the gateway itself, not auth.
+    token = args.bot_token or env.get("TELEGRAM_BOT_TOKEN")
     if not token:
         sys.exit(f"send_telegram: TELEGRAM_BOT_TOKEN not set (define in {env_path})")
 

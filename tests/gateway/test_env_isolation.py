@@ -113,3 +113,75 @@ class SanitizeTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class SanitizeKeyAllowedTests(unittest.TestCase):
+    """Audit feature 8 — dotenv must not inject reserved runtime keys."""
+
+    def _allowed(self, key: str) -> bool:
+        from gateway.config import is_instance_env_key_allowed
+
+        return is_instance_env_key_allowed(key)
+
+    def test_reserved_dotenv_keys_filtered(self):
+        clean, _ = sanitize(
+            {"PATH": "/usr/bin:/bin", "HOME": "/home/jc"},
+            {
+                "PATH": "/evil",
+                "LD_PRELOAD": "/evil/lib.so",
+                "JC_INSTANCE_DIR": "/other/instance",
+                "TELEGRAM_BOT_TOKEN": "tok",
+            },
+            key_allowed=self._allowed,
+        )
+        self.assertEqual(clean["PATH"], "/usr/bin:/bin")
+        self.assertNotIn("LD_PRELOAD", clean)
+        self.assertNotIn("JC_INSTANCE_DIR", clean)
+        self.assertEqual(clean["TELEGRAM_BOT_TOKEN"], "tok")
+
+    def test_no_filter_keeps_legacy_behavior(self):
+        clean, _ = sanitize({"PATH": "/usr/bin"}, {"PATH": "/custom"})
+        self.assertEqual(clean["PATH"], "/custom")
+
+
+class AdapterEnvAllowlistTests(unittest.TestCase):
+    """Audit feature 8 — brain subprocess env built from allowlist."""
+
+    def test_build_adapter_env_drops_sibling_token_keeps_basics(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        from gateway.brains.base import Brain
+        from gateway.config import clear_env_cache
+
+        class _Probe(Brain):
+            name = "probe"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / ".env").write_text(
+                "MINIMAX_API_KEY=from-dotenv\n", encoding="utf-8"
+            )
+            clear_env_cache()
+            brain = _Probe.__new__(_Probe)
+            brain.instance_dir = instance
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_BOT_TOKEN": "sibling-token",
+                    "RANDOM_PARENT_SECRET": "leak-me",
+                    "JC_IN_WORKER": "1",
+                    "XDG_CONFIG_HOME": "/home/jc/.config",
+                },
+                clear=False,
+            ):
+                env = brain._build_adapter_env()
+            clear_env_cache()
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", env)
+        self.assertNotIn("RANDOM_PARENT_SECRET", env)
+        self.assertIn("PATH", env)
+        self.assertIn("HOME", env)
+        self.assertEqual(env.get("JC_IN_WORKER"), "1")
+        self.assertEqual(env.get("XDG_CONFIG_HOME"), "/home/jc/.config")
+        self.assertEqual(env.get("MINIMAX_API_KEY"), "from-dotenv")

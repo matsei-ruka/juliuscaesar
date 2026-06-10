@@ -401,6 +401,12 @@ def parse_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
+        # Shell-style dotenvs prefix lines with `export ` — without this the
+        # key fails the identifier regex and the entry is silently dropped,
+        # which the parent-env fallback then resolves from a sibling shell
+        # (formatting quirk → token-leak vector, audit G-P2).
+        if key.startswith("export ") or key.startswith("export\t"):
+            key = key[len("export") :].strip()
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
             continue
         try:
@@ -446,10 +452,28 @@ def safe_instance_env_values(instance_dir: Path) -> dict[str, str]:
     }
 
 
+# Token-class keys that must NEVER resolve from the parent process env: a
+# sibling instance's shell exporting TELEGRAM_BOT_TOKEN is the cross-instance
+# impersonation vector (409 conflicts + session bleed). For these, `.env` is
+# the only source of truth — absent means empty, and the call sites log the
+# missing-token condition loudly. Audit feature 8 (env allowlisting).
+_SECRET_ENV_KEYS: frozenset[str] = frozenset({
+    "TELEGRAM_BOT_TOKEN",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "COMPANY_API_KEY",
+    "MINIMAX_API_KEY",
+})
+
+
 def env_value(instance_dir: Path, name: str) -> str:
     values = env_values(instance_dir)
     if name in values and is_instance_env_key_allowed(name):
         return values[name]
+    if name in _SECRET_ENV_KEYS:
+        return ""
     return os.environ.get(name, "")
 
 
