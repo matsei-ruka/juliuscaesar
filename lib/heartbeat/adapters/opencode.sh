@@ -63,6 +63,44 @@ fi
 
 ARGS+=("$PROMPT")
 
+OPENCODE_DB="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+if [[ ! -f "$OPENCODE_DB" ]] && [[ -f "$HOME/Library/Application Support/opencode/opencode.db" ]]; then
+    OPENCODE_DB="$HOME/Library/Application Support/opencode/opencode.db"
+fi
+
+# Stale-reply guard (resumed sessions only): snapshot the id of the latest
+# assistant message BEFORE the run. If the post-run "latest assistant
+# message" still carries this id, opencode wrote no new reply and the DB
+# query would return the PREVIOUS turn's text as fresh — a duplicate-reply
+# source the queue/delivery layers cannot see. An id-equality check beats a
+# time_created floor: the column's epoch unit is an opencode internal, the
+# row id is not.
+PREV_MSG_ID=""
+if [[ -n "$RESUME" && -f "$OPENCODE_DB" ]]; then
+    PREV_MSG_ID=$(python3 - "$OPENCODE_DB" "$RESUME" <<'PYEOF'
+import sqlite3
+import sys
+
+db_path, session_id = sys.argv[1:3]
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+    try:
+        row = conn.execute(
+            "SELECT id FROM message "
+            "WHERE session_id=? AND json_extract(data,'$.role')='assistant' "
+            "ORDER BY time_created DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is not None:
+            sys.stdout.write(str(row[0]))
+    finally:
+        conn.close()
+except sqlite3.Error as exc:
+    sys.stderr.write(f"opencode adapter: pre-run snapshot failed: {exc}\n")
+PYEOF
+) || PREV_MSG_ID=""
+fi
+
 NDJSON_TMP=$(mktemp -t opencode-ndjson.XXXXXX)
 trap 'rm -f "$NDJSON_TMP"' EXIT
 
@@ -75,14 +113,9 @@ if [[ "$RC" != "0" ]]; then
     exit "$RC"
 fi
 
-OPENCODE_DB="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
-if [[ ! -f "$OPENCODE_DB" ]] && [[ -f "$HOME/Library/Application Support/opencode/opencode.db" ]]; then
-    OPENCODE_DB="$HOME/Library/Application Support/opencode/opencode.db"
-fi
-
 SIDECAR="${JC_USAGE_SIDECAR_PATH:-}"
 
-python3 - "$NDJSON_TMP" "$OPENCODE_DB" "$SIDECAR" "$RESUME" <<'PYEOF'
+python3 - "$NDJSON_TMP" "$OPENCODE_DB" "$SIDECAR" "$RESUME" "$PREV_MSG_ID" <<'PYEOF'
 import json
 import os
 import sqlite3
@@ -90,7 +123,7 @@ import sys
 from pathlib import Path
 
 
-ndjson_path, db_path, sidecar_path, resume_session = sys.argv[1:5]
+ndjson_path, db_path, sidecar_path, resume_session, prev_msg_id = sys.argv[1:6]
 
 session_id = None
 with open(ndjson_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -111,9 +144,9 @@ if not session_id and resume_session:
     session_id = resume_session
 
 
-def query_db(sid: str) -> tuple[str, dict | None]:
+def query_db(sid: str) -> tuple[str, dict | None, str | None]:
     if not sid or not Path(db_path).is_file():
-        return "", None
+        return "", None, None
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     try:
         row = conn.execute(
@@ -123,7 +156,7 @@ def query_db(sid: str) -> tuple[str, dict | None]:
             (sid,),
         ).fetchone()
         if row is None:
-            return "", None
+            return "", None, None
         message_id, raw = row
         try:
             payload = json.loads(raw)
@@ -144,7 +177,8 @@ def query_db(sid: str) -> tuple[str, dict | None]:
                 text = part.get("text", "")
                 if isinstance(text, str):
                     chunks.append(text)
-        return "".join(chunks).strip(), tokens if isinstance(tokens, dict) else None
+        text = "".join(chunks).strip()
+        return text, tokens if isinstance(tokens, dict) else None, str(message_id)
     finally:
         conn.close()
 
@@ -152,10 +186,34 @@ def query_db(sid: str) -> tuple[str, dict | None]:
 reply_text = ""
 tokens_payload: dict | None = None
 db_error: str | None = None
+stale_suppressed = False
 try:
-    reply_text, tokens_payload = query_db(session_id) if session_id else ("", None)
+    if session_id:
+        reply_text, tokens_payload, latest_msg_id = query_db(session_id)
+    else:
+        latest_msg_id = None
 except sqlite3.Error as exc:
     db_error = f"sqlite: {exc}"
+    latest_msg_id = None
+
+# Stale-reply guard: the run resumed an existing session, the pre-run
+# snapshot saw an assistant message, and the post-run "latest assistant
+# message" is STILL that row — opencode wrote no new reply this turn.
+# Emitting the row would replay the previous turn's reply as fresh
+# (duplicate-reply source independent of the queue/delivery layers).
+if (
+    reply_text
+    and prev_msg_id
+    and session_id == resume_session
+    and latest_msg_id == prev_msg_id
+):
+    stale_suppressed = True
+    reply_text = ""
+    tokens_payload = None
+    sys.stderr.write(
+        "opencode adapter: stale reply suppressed — no new assistant message "
+        f"after run (session={session_id} message={latest_msg_id})\n"
+    )
 
 if not reply_text:
     fallback_lines: list[str] = []
@@ -197,7 +255,11 @@ if sidecar_path:
                 usage["cache_read_input_tokens"] = cache.get("read")
     if usage:
         payload["usage"] = usage
-    if db_error and not usage:
+    if stale_suppressed and not reply_text:
+        payload["error"] = (
+            "stale reply suppressed — no new assistant message after run"
+        )
+    elif db_error and not usage:
         payload["error"] = db_error
     if payload:
         tmp = sidecar_path + ".tmp"
