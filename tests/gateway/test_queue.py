@@ -699,5 +699,116 @@ class RequeueExpiredTests(unittest.TestCase):
             conn.close()
 
 
+class ClaimPathPoisonEscalationTests(unittest.TestCase):
+    """Phase 3: the inline requeue inside the claim transaction must honor
+    ``max_retries``. Without it, an expired poison row flips back to
+    ``queued`` and is re-claimed in the SAME transaction, forever — the
+    runtime's periodic requeue tick (which does pass ``max_retries``)
+    never gets a look at it."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-claimpoison-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def _expired_event(
+        self, conn, *, retry_count: int = 0, conversation_id: str = "conv-1"
+    ) -> int:
+        cur = conn.execute(
+            """
+            INSERT INTO events
+              (source, content, status, received_at, available_at, started_at,
+               locked_by, locked_until, retry_count, conversation_id)
+            VALUES ('telegram', 'x', 'running', '2026-05-17T10:00:00Z',
+                    '2026-05-17T10:00:00Z', '2026-05-17T10:00:00Z',
+                    'worker-1#deadbeef', '2026-05-17T10:05:00Z', ?, ?)
+            """,
+            (retry_count, conversation_id),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_claim_next_escalates_poison_row_to_failed(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=3)
+            event = queue.claim_next(conn, worker_id="w", max_retries=3)
+            self.assertIsNone(event)  # NOT re-claimed
+            row = conn.execute(
+                "SELECT status, retry_count, error FROM events WHERE id=?",
+                (eid,),
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["retry_count"], 4)
+            self.assertIn("max retries exceeded", row["error"])
+        finally:
+            conn.close()
+
+    def test_claim_next_below_cap_requeues_and_reclaims(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=1)
+            event = queue.claim_next(conn, worker_id="w", max_retries=3)
+            self.assertIsNotNone(event)
+            self.assertEqual(event.id, eid)
+            self.assertEqual(event.retry_count, 2)
+            self.assertEqual(event.status, "running")
+        finally:
+            conn.close()
+
+    def test_claim_next_without_max_retries_keeps_legacy_behavior(self) -> None:
+        """CLI debug claims (cmd_claim/cmd_work_once) pass no max_retries —
+        increment-only, never escalate."""
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=99)
+            event = queue.claim_next(conn, worker_id="w")
+            self.assertIsNotNone(event)
+            self.assertEqual(event.id, eid)
+            self.assertEqual(event.retry_count, 100)
+        finally:
+            conn.close()
+
+    def test_claim_batch_escalates_poison_row_to_failed(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            eid = self._expired_event(conn, retry_count=3)
+            batch = queue.claim_batch_same_conversation(
+                conn, worker_id="w", max_retries=3
+            )
+            self.assertEqual(batch, [])
+            row = conn.execute(
+                "SELECT status, retry_count FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["retry_count"], 4)
+        finally:
+            conn.close()
+
+    def test_claim_batch_poison_does_not_block_healthy_event(self) -> None:
+        """A poison row routed to failed must not stop the claim from
+        picking up the next healthy queued event in the same call."""
+        conn = queue.connect(self.tmp)
+        try:
+            poison = self._expired_event(conn, retry_count=3)
+            healthy, _ = queue.enqueue(
+                conn,
+                source="telegram",
+                source_message_id="m-healthy",
+                conversation_id="conv-2",
+                content="hello",
+            )
+            conn.commit()
+            batch = queue.claim_batch_same_conversation(
+                conn, worker_id="w", max_retries=3
+            )
+            self.assertEqual([ev.id for ev in batch], [healthy.id])
+            row = conn.execute(
+                "SELECT status FROM events WHERE id=?", (poison,)
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

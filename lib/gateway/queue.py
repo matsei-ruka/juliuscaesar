@@ -396,12 +396,19 @@ def claim_next(
     worker_id: str,
     lease_seconds: int = 300,
     sources: Iterable[str] | None = None,
+    max_retries: int | None = None,
 ) -> Event | None:
     """Claim the next ready event with a short SQLite write transaction.
 
     ``locked_by`` is set to a fresh per-claim token (``mint_claim_token``),
     NOT the bare ``worker_id``. Callers must use the returned event's
     ``.locked_by`` for ``expected_locked_by`` guards and lease renewal.
+
+    ``max_retries`` is forwarded to the inline ``requeue_expired`` so a
+    poison row whose lease expired is escalated to ``failed`` *before* the
+    claim SELECT runs — without it, the expired row flips back to ``queued``
+    and is re-claimed in this same transaction, forever (the runtime's
+    periodic requeue tick never sees it).
     """
 
     now = now_iso()
@@ -416,7 +423,7 @@ def claim_next(
 
     try:
         conn.execute("BEGIN IMMEDIATE")
-        requeue_expired(conn, now=now)
+        requeue_expired(conn, now=now, max_retries=max_retries)
         row = conn.execute(
             f"""
             SELECT id FROM events
@@ -459,6 +466,7 @@ def claim_batch_same_conversation(
     worker_id: str,
     lease_seconds: int = 300,
     sources: Iterable[str] | None = None,
+    max_retries: int | None = None,
 ) -> list[Event]:
     """Claim the oldest queued event and every other queued event sharing its
     `conversation_id`. Returned events are ordered by id ascending.
@@ -469,6 +477,7 @@ def claim_batch_same_conversation(
 
     Empty list when nothing is claimable. All rows in the batch share one
     fresh per-claim token in ``locked_by`` (see ``mint_claim_token``).
+    ``max_retries``: see :func:`claim_next`.
     """
 
     now = now_iso()
@@ -483,7 +492,7 @@ def claim_batch_same_conversation(
 
     try:
         conn.execute("BEGIN IMMEDIATE")
-        requeue_expired(conn, now=now)
+        requeue_expired(conn, now=now, max_retries=max_retries)
         head = conn.execute(
             f"""
             SELECT id, conversation_id FROM events

@@ -203,17 +203,93 @@ def _fake_opencode_script(stub_dir: Path, session_id: str) -> Path:
     return path
 
 
+def _insert_assistant_message(
+    path: Path,
+    session_id: str,
+    *,
+    msg_id: str,
+    time_created: int,
+    reply: str,
+    tokens: dict | None = None,
+) -> None:
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        (
+            msg_id,
+            session_id,
+            time_created,
+            time_created,
+            json.dumps({"role": "assistant", "tokens": tokens or {}}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            f"prt_{msg_id}",
+            msg_id,
+            session_id,
+            time_created,
+            time_created,
+            json.dumps({"type": "text", "text": reply}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _fake_opencode_script_writing_reply(
+    stub_dir: Path, session_id: str, db: Path, *, msg_id: str, reply: str
+) -> Path:
+    """Stub that mimics a real turn: inserts a fresh assistant row (via a
+    pre-written .sql file — sidesteps shell quoting of JSON), then emits the
+    step_start NDJSON line."""
+    path = stub_dir / "opencode"
+    payload = json.dumps({"type": "step_start", "sessionID": session_id})
+    message_data = json.dumps({"role": "assistant", "tokens": {"input": 1, "output": 2}})
+    part_data = json.dumps({"type": "text", "text": reply})
+    sql_path = stub_dir / "insert_reply.sql"
+    sql_path.write_text(
+        "INSERT INTO message VALUES ("
+        f"'{msg_id}','{session_id}',2,2,'{message_data}');\n"
+        "INSERT INTO part VALUES ("
+        f"'prt_{msg_id}','{msg_id}','{session_id}',2,2,'{part_data}');\n",
+        encoding="utf-8",
+    )
+    script = textwrap.dedent(
+        f"""\
+        #!/usr/bin/env bash
+        sqlite3 "{db}" < "{sql_path}"
+        echo '{payload}'
+        exit 0
+        """
+    )
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 @unittest.skipUnless(ADAPTER.exists() and shutil.which("sqlite3"), "adapter or sqlite3 missing")
 class OpencodeAdapterShellTests(unittest.TestCase):
     """Drive opencode.sh end-to-end with a stub `opencode` and a real SQLite DB."""
 
-    def _run(self, *, db: Path, sidecar: Path, stub_dir: Path, prompt: str = "hi") -> subprocess.CompletedProcess:
+    def _run(
+        self,
+        *,
+        db: Path,
+        sidecar: Path,
+        stub_dir: Path,
+        prompt: str = "hi",
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess:
         env = {
             "HOME": str(stub_dir),
             "PATH": f"{stub_dir}:/usr/bin:/bin",
             "OPENCODE_DB": str(db),
             "JC_USAGE_SIDECAR_PATH": str(sidecar),
         }
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [str(ADAPTER), "anthropic/claude-haiku-4.5"],
             input=prompt,
@@ -266,6 +342,77 @@ class OpencodeAdapterShellTests(unittest.TestCase):
             payload = json.loads(sidecar.read_text(encoding="utf-8"))
             self.assertEqual(payload.get("session_id"), "ses_test2")
             self.assertNotIn("usage", payload)
+
+    def test_resumed_session_without_new_row_suppresses_stale_reply(self) -> None:
+        """Audit C-P2: rc=0 + no new assistant row must NOT replay the
+        previous turn's reply as fresh."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            db = Path(tmp) / "opencode.db"
+            sidecar = Path(tmp) / "usage.json"
+            session_id = "ses_stale"
+            _make_opencode_db(db, session_id, "previous turn reply", {"input": 5, "output": 7})
+            _fake_opencode_script(stub, session_id)  # writes NO new row
+
+            res = self._run(
+                db=db,
+                sidecar=sidecar,
+                stub_dir=stub,
+                extra_env={"JC_RESUME_SESSION": session_id},
+            )
+
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            self.assertEqual(res.stdout, "")
+            self.assertIn("stale reply suppressed", res.stderr)
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("session_id"), session_id)
+            self.assertNotIn("usage", payload)
+            self.assertIn("stale reply suppressed", payload.get("error", ""))
+
+    def test_resumed_session_with_new_row_emits_fresh_reply(self) -> None:
+        """Guard must not over-suppress: a genuinely fresh assistant row on a
+        resumed session is emitted normally."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            db = Path(tmp) / "opencode.db"
+            sidecar = Path(tmp) / "usage.json"
+            session_id = "ses_fresh"
+            _make_opencode_db(db, session_id, "previous turn reply", {"input": 5, "output": 7})
+            _fake_opencode_script_writing_reply(
+                stub, session_id, db, msg_id="msg_new", reply="fresh reply"
+            )
+
+            res = self._run(
+                db=db,
+                sidecar=sidecar,
+                stub_dir=stub,
+                extra_env={"JC_RESUME_SESSION": session_id},
+            )
+
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            self.assertEqual(res.stdout, "fresh reply")
+            self.assertNotIn("stale reply suppressed", res.stderr)
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("session_id"), session_id)
+            self.assertNotIn("error", payload)
+
+    def test_fresh_session_with_prior_rows_unaffected(self) -> None:
+        """No $JC_RESUME_SESSION → no snapshot → legacy behavior intact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            db = Path(tmp) / "opencode.db"
+            sidecar = Path(tmp) / "usage.json"
+            session_id = "ses_nores"
+            _make_opencode_db(db, session_id, "only reply", {"input": 1, "output": 2})
+            _fake_opencode_script(stub, session_id)
+
+            res = self._run(db=db, sidecar=sidecar, stub_dir=stub)
+
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            self.assertEqual(res.stdout, "only reply")
 
 
 class OpencodeSidecarBaseReadTests(unittest.TestCase):

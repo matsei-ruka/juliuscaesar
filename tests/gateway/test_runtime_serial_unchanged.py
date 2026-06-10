@@ -205,5 +205,86 @@ class SerialCardUnchangedTests(unittest.TestCase):
         self.assertTrue(legacy.text.startswith("🛠️"))
 
 
+class DispatchClaimPoisonEscalationTests(unittest.TestCase):
+    """Phase 3 wire-up: config.max_retries must reach the inline requeue in
+    the claim path, so dispatch_once escalates an expired poison row to
+    `failed` instead of re-claiming it in the same transaction."""
+
+    def _poison_row(self, instance: Path, *, retry_count: int) -> int:
+        conn = queue.connect(instance)
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO events
+                  (source, content, status, received_at, available_at,
+                   started_at, locked_by, locked_until, retry_count,
+                   conversation_id)
+                VALUES ('telegram', 'poison', 'running', '2026-05-17T10:00:00Z',
+                        '2026-05-17T10:00:00Z', '2026-05-17T10:00:00Z',
+                        'worker-1#deadbeef', '2026-05-17T10:05:00Z', ?, '28547271')
+                """,
+                (retry_count,),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def test_dispatch_once_fails_poison_row_past_config_max_retries(self) -> None:
+        instance = _instance()
+        runtime = GatewayRuntime(
+            instance,
+            log_path=queue.queue_dir(instance) / "test.log",
+            stop_requested=lambda: True,
+        )
+        try:
+            self.assertEqual(runtime.config.max_retries, 3)  # default
+            eid = self._poison_row(instance, retry_count=3)
+            with mock.patch(
+                "gateway.runtime.invoke_brain",
+                side_effect=AssertionError("poison row must not reach the brain"),
+            ):
+                self.assertFalse(runtime.dispatch_once())
+            conn = queue.connect(instance)
+            try:
+                row = conn.execute(
+                    "SELECT status, retry_count, error FROM events WHERE id=?",
+                    (eid,),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["retry_count"], 4)
+            self.assertIn("max retries exceeded", row["error"])
+        finally:
+            runtime.close()
+
+    def test_dispatch_once_still_retries_below_cap(self) -> None:
+        instance = _instance()
+        runtime = GatewayRuntime(
+            instance,
+            log_path=queue.queue_dir(instance) / "test.log",
+            stop_requested=lambda: True,
+        )
+        try:
+            eid = self._poison_row(instance, retry_count=0)
+            with mock.patch(
+                "gateway.runtime.invoke_brain",
+                return_value=BrainResult("recovered", "sess-p"),
+            ), mock.patch("gateway.runtime.deliver_response", return_value="m-out"):
+                self.assertTrue(runtime.dispatch_once())
+            conn = queue.connect(instance)
+            try:
+                row = conn.execute(
+                    "SELECT status, retry_count FROM events WHERE id=?", (eid,)
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(row["status"], "done")
+            self.assertEqual(row["retry_count"], 1)
+        finally:
+            runtime.close()
+
+
 if __name__ == "__main__":
     unittest.main()
