@@ -154,6 +154,27 @@ if [[ -z "$INSTANCE_DIR" ]]; then
     fi
 fi
 
+# --- JSON mode (audit feature 10) ---
+# Machine-readable snapshot for fleet tooling (fleet-health skill): queue
+# depth/oldest-age, heartbeat + liveness, brain failure store, channel
+# health. Emitted INSTEAD of the human checks — stdout is pure JSON.
+if [[ "$JSON_MODE" == "1" ]]; then
+    if [[ -z "$INSTANCE_DIR" || ! -d "$INSTANCE_DIR" ]]; then
+        echo '{"error": "no instance dir found"}'
+        exit 1
+    fi
+    INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
+    PYTHONPATH="$FRAMEWORK_ROOT/lib" exec "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+from gateway.observability import snapshot
+
+print(json.dumps(snapshot(Path(sys.argv[1])), indent=2))
+PY
+fi
+
 # --- Environment checks ---
 
 section "Environment"
@@ -220,23 +241,6 @@ if [[ -z "$INSTANCE_DIR" ]]; then
     [[ $FAIL -gt 0 ]] && exit 1 || exit 0
 fi
 INSTANCE_DIR="$(cd "$INSTANCE_DIR" && pwd)"
-
-# --- JSON mode (audit feature 10) ---
-# Machine-readable subset for fleet tooling (fleet-health skill): queue
-# depth/oldest-age, heartbeat + liveness, brain failure store, channel
-# health. Human checks stay in the default mode.
-if [[ "$JSON_MODE" == "1" ]]; then
-    PYTHONPATH="$FRAMEWORK_ROOT/lib" exec "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-from gateway.observability import snapshot
-
-print(json.dumps(snapshot(Path(sys.argv[1])), indent=2))
-PY
-fi
-
 ok "instance: $INSTANCE_DIR"
 
 if [[ -f "$INSTANCE_DIR/.jc" ]]; then
