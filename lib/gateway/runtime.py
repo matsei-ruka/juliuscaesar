@@ -593,6 +593,7 @@ class GatewayRuntime:
         error_streak = 0
         try:
             self.start_channels()
+            self._probe_configured_brains()
             self.log("dispatcher started")
             while not self.stop_requested():
                 try:
@@ -638,6 +639,32 @@ class GatewayRuntime:
                 f"requeued expired events count={len(requeued)} ids={requeued}",
                 kind="requeue_expired",
             )
+
+    def _probe_configured_brains(self) -> None:
+        """Startup static probe of every configured brain spec.
+
+        Audit feature 5: a fallback brain that cannot run (missing CLI,
+        missing auth) used to be discovered only at runtime, as a 300s hang,
+        exactly when the primary was already broken. Boot proceeds either
+        way — a broken fallback must not take down the primary path — but
+        the failure is now loud at start instead of silent until needed.
+        """
+        try:
+            from .brain_health import probe_all
+
+            for res in probe_all(self.instance_dir, self.config):
+                if res.level == "fail":
+                    self.log(
+                        f"brain probe FAILED {res.summary()}",
+                        kind="brain_probe_failed",
+                    )
+                elif res.level == "warn":
+                    self.log(
+                        f"brain probe warning {res.summary()}",
+                        kind="brain_probe_warn",
+                    )
+        except Exception as exc:  # noqa: BLE001 — probes must never block boot
+            self.log(f"brain probe error: {exc}", kind="brain_probe_error")
 
     def _check_code_drift(self) -> None:
         """Exit the process when framework code on disk is newer than startup.
@@ -1832,6 +1859,13 @@ class GatewayRuntime:
         finally:
             typing_stop.set()
         self.log(f"dispatch ok id={event.id} brain={brain}")
+        # Clear-on-recovery (audit feature 5): one successful invocation
+        # proves the brain works again — drop any persisted failure mark so
+        # routing stops diverting to backups.
+        try:
+            self._brain_failure.clear(brain)
+        except Exception:  # noqa: BLE001 — bookkeeping must not fail dispatch
+            pass
 
         # Phase 2 — Background interception: when the brain subprocess was
         # demoted to background mid-flight, the reply must not flow through

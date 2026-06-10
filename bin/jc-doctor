@@ -684,6 +684,44 @@ while IFS= read -r line; do
     esac
 done <<<"$LIVENESS_REPORT"
 
+# --- Brain health ---
+# Static probes per configured brain spec (default, channel defaults,
+# fallback chain, triage backups, supervisor brains). Fallback-role
+# failures are RED: a fallback runs exactly when the primary is broken.
+# See docs/specs/jc-audit-phase4-remaining.md (feature 5).
+
+section "Brain health"
+
+BRAIN_HEALTH_REPORT=$(PYTHONPATH="$FRAMEWORK_ROOT/lib" "$JC_PYTHON" - "$INSTANCE_DIR" <<'PY' 2>&1
+from pathlib import Path
+import sys
+
+from gateway.brain_health import probe_all
+from gateway.config import load_config
+
+instance = Path(sys.argv[1])
+try:
+    cfg = load_config(instance)
+except Exception as exc:
+    print(f"WARN:brain health skipped — config unreadable: {exc}")
+    raise SystemExit(0)
+results = probe_all(instance, cfg)
+if not results:
+    print("INFO:no brain specs configured")
+for res in results:
+    print(f"{res.level.upper()}:{res.summary()}")
+PY
+)
+while IFS= read -r line; do
+    case "$line" in
+        OK:*) ok "${line#OK:}" ;;
+        WARN:*) warn "${line#WARN:}" ;;
+        INFO:*) info "${line#INFO:}" ;;
+        FAIL:*) fail "${line#FAIL:}" ;;
+        Traceback*) fail "brain health check crashed: $line" ;;
+    esac
+done <<<"$BRAIN_HEALTH_REPORT"
+
 # --- Codex readiness ---
 # Per docs/specs/codex-main-brain-hardening.md §Phase 6.
 

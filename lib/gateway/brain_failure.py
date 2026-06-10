@@ -18,9 +18,21 @@ from pathlib import Path
 _STORE_FILENAME = "brain_failure.json"
 
 
+# Failure marks expire after this long by default. The store used to be
+# permanent with no .clear() call site anywhere — one auth blip diverted
+# routing forever, surviving restarts (audit D-P2 / feature 5).
+DEFAULT_FAILURE_TTL_SECONDS = 6 * 3600.0
+
+
 class BrainFailureStore:
-    def __init__(self, instance_dir: Path) -> None:
+    def __init__(
+        self,
+        instance_dir: Path,
+        *,
+        ttl_seconds: float = DEFAULT_FAILURE_TTL_SECONDS,
+    ) -> None:
         self._path = instance_dir / "state" / "gateway" / _STORE_FILENAME
+        self._ttl_seconds = float(ttl_seconds)
         self._failed: dict[str, float] = {}
         self._load()
 
@@ -51,7 +63,15 @@ class BrainFailureStore:
         self._save()
 
     def is_failed(self, brain: str) -> bool:
-        return brain in self._failed
+        marked_at = self._failed.get(brain)
+        if marked_at is None:
+            return False
+        if self._ttl_seconds > 0 and time.time() - marked_at > self._ttl_seconds:
+            # Expired — give the brain another chance and persist the drop.
+            del self._failed[brain]
+            self._save()
+            return False
+        return True
 
     def clear(self, brain: str) -> None:
         """Remove brain from the failed set and persist."""
