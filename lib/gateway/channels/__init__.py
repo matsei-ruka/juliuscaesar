@@ -13,7 +13,7 @@ from .cron import CronChannel
 from .discord import DiscordChannel
 from .email import EmailChannel
 from .jc_events import JcEventsChannel
-from .registry import build_enabled_channels, deliver
+from .registry import build_enabled_channels, deliver, enabled_channel_factories
 from .slack import SlackSocketModeChannel
 from .telegram import TelegramChannel
 from .voice import VoiceChannel
@@ -32,5 +32,6 @@ __all__ = [
     "TelegramChannel",
     "VoiceChannel",
     "build_enabled_channels",
+    "enabled_channel_factories",
     "deliver",
 ]

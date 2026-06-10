@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import ChannelConfig, GatewayConfig
 from .base import Channel, LogFn
@@ -31,19 +32,42 @@ _CHANNEL_FACTORIES = {
 }
 
 
+def enabled_channel_factories(
+    instance_dir: Path,
+    config: GatewayConfig,
+    log: LogFn,
+) -> dict[str, "Callable[[], Channel]"]:
+    """Zero-arg rebuild closure per enabled channel (audit feature 4).
+
+    The supervisor in ``channel_lifecycle`` rebuilds a crashed channel from
+    its factory before restarting it, so a wedged instance never gets reused.
+    """
+    factories: dict[str, Callable[[], Channel]] = {}
+    for name, cls in _CHANNEL_FACTORIES.items():
+        cfg = config.channel(name)
+        if not cfg.enabled:
+            continue
+        factories[name] = partial(cls, instance_dir, cfg, log)
+    return factories
+
+
 def build_enabled_channels(
     instance_dir: Path,
     config: GatewayConfig,
     log: LogFn,
 ) -> list[Channel]:
-    """Return live Channel instances for every enabled channel."""
+    """Return live Channel instances for every enabled channel.
+
+    Constructor failures are isolated per channel (audit feature 4 / B-P1):
+    one bad channel no longer kills the gateway at boot.
+    """
 
     channels: list[Channel] = []
-    for name, factory in _CHANNEL_FACTORIES.items():
-        cfg = config.channel(name)
-        if not cfg.enabled:
-            continue
-        channels.append(factory(instance_dir, cfg, log))
+    for name, factory in enabled_channel_factories(instance_dir, config, log).items():
+        try:
+            channels.append(factory())
+        except Exception as exc:  # noqa: BLE001 — per-channel isolation
+            log(f"channel build failed name={name}: {exc!r} — skipped")
     return channels
 
 
