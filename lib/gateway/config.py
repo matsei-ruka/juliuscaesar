@@ -452,19 +452,17 @@ def safe_instance_env_values(instance_dir: Path) -> dict[str, str]:
     }
 
 
-# Token-class keys that must NEVER resolve from the parent process env: a
+# Identity-class keys that must NEVER resolve from the parent process env: a
 # sibling instance's shell exporting TELEGRAM_BOT_TOKEN is the cross-instance
-# impersonation vector (409 conflicts + session bleed). For these, `.env` is
-# the only source of truth — absent means empty, and the call sites log the
-# missing-token condition loudly. Audit feature 8 (env allowlisting).
+# impersonation vector (409 conflicts + session bleed — the CRITICAL known
+# nuisance). For these, `.env` is the only source of truth — absent means
+# empty, and the call sites log the missing-token condition loudly.
+# Deliberately NOT the generic API keys: triage backends resolve operator-
+# named keys via `api_key_env`/`openrouter_api_key_env` from the process env
+# by design, and a leaked API key mis-bills but cannot impersonate the bot.
+# Audit feature 8 (env allowlisting).
 _SECRET_ENV_KEYS: frozenset[str] = frozenset({
     "TELEGRAM_BOT_TOKEN",
-    "OPENROUTER_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "DASHSCOPE_API_KEY",
-    "COMPANY_API_KEY",
-    "MINIMAX_API_KEY",
 })
 
 

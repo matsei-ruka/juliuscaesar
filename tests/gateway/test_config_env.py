@@ -75,7 +75,12 @@ class ConfigEnvBoundaryTests(unittest.TestCase):
                 clear=False,
             ):
                 self.assertEqual(env_value(instance, "TELEGRAM_BOT_TOKEN"), "")
-                self.assertEqual(env_value(instance, "OPENROUTER_API_KEY"), "")
+                # Generic API keys keep the process-env fallback by design
+                # (triage api_key_env feature); only the bot identity is
+                # .env-strict.
+                self.assertEqual(
+                    env_value(instance, "OPENROUTER_API_KEY"), "sibling-key"
+                )
 
     def test_parse_env_file_accepts_export_prefix(self):
         # `export FOO=bar` lines used to be silently dropped (key fails the
