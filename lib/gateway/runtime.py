@@ -1973,15 +1973,24 @@ class GatewayRuntime:
             if token:
                 for img_path in result.image_paths:
                     try:
-                        telegram_send_photo(
+                        photo_message_id = telegram_send_photo(
                             instance_dir=self.instance_dir,
                             token=token,
                             image_path=img_path,
                             meta=meta,
+                            log=self.log,
                         )
-                        self.log(
-                            f"image sent id={event.id} brain={brain} path={img_path}"
-                        )
+                        # send_photo returns None on API failure — don't log
+                        # success unconditionally (audit F-P2 / feature 6).
+                        if photo_message_id is not None:
+                            self.log(
+                                f"image sent id={event.id} brain={brain} path={img_path}"
+                            )
+                        else:
+                            self.log(
+                                f"image send failed (api) id={event.id} "
+                                f"brain={brain} path={img_path}"
+                            )
                     except Exception as exc:  # noqa: BLE001
                         self.log(
                             f"image send failed id={event.id} brain={brain} "

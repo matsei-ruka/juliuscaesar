@@ -1134,7 +1134,7 @@ class TelegramChannel:
         if not chat_id or not message_id or not self.token:
             return
         try:
-            http_json(
+            data = http_json(
                 f"https://api.telegram.org/bot{self.token}/editMessageText",
                 data={
                     "chat_id": str(chat_id),
@@ -1145,6 +1145,16 @@ class TelegramChannel:
                 },
                 timeout=10,
             )
+            # The API response used to be discarded (audit F-P2): a not-ok
+            # edit means an approval card can keep live buttons after the
+            # decision was applied. "message is not modified" is benign.
+            if isinstance(data, dict) and not data.get("ok"):
+                desc = str(data.get("description") or "")
+                if "not modified" not in desc.lower():
+                    self.log(
+                        f"telegram editMessageText not-ok chat_id={chat_id} "
+                        f"message_id={message_id}: {data}"
+                    )
         except Exception as exc:  # noqa: BLE001
             self.log(f"telegram editMessageText failed: {exc}")
 
@@ -1530,14 +1540,43 @@ class TelegramChannel:
                                 log=self.log,
                             )
                             continue
-                        enqueue(
-                            source="telegram",
-                            source_message_id=str(update.get("update_id")),
-                            user_id=str((message.get("from") or {}).get("id", "")) or None,
-                            conversation_id=conversation_id,
-                            content=text,
-                            meta=meta,
-                        )
+                        try:
+                            enqueue(
+                                source="telegram",
+                                source_message_id=str(update.get("update_id")),
+                                user_id=str((message.get("from") or {}).get("id", "")) or None,
+                                conversation_id=conversation_id,
+                                content=text,
+                                meta=meta,
+                            )
+                            self._enqueue_failures = {}
+                        except Exception as enq_exc:  # noqa: BLE001
+                            # Offset was advanced at the top of this loop —
+                            # without a rewind a transient enqueue error
+                            # (sqlite "database is locked") permanently
+                            # drops this inbound message (audit F-P2 /
+                            # feature 6). Rewind + break so the update is
+                            # re-fetched next poll. Poison guard: after 3
+                            # consecutive failures on the same update_id,
+                            # advance past it with a loud drop log so a
+                            # poisonous update can't wedge inbound forever.
+                            uid = int(update.get("update_id", 0) or 0)
+                            failures = getattr(self, "_enqueue_failures", {})
+                            count = int(failures.get(uid, 0)) + 1
+                            self._enqueue_failures = {uid: count}
+                            if count >= 3:
+                                self.log(
+                                    f"telegram enqueue failed {count}x "
+                                    f"update_id={uid} — DROPPING message: {enq_exc}"
+                                )
+                                continue
+                            self.log(
+                                f"telegram enqueue failed update_id={uid} "
+                                f"(attempt {count}/3): {enq_exc} — offset "
+                                "rewound, will re-poll"
+                            )
+                            self.offset = uid
+                            break
                         # Busy acknowledgement: react if another event is running.
                         _chat_id = str(meta.get("chat_id", ""))
                         _msg_id = meta.get("message_id")
