@@ -6,7 +6,7 @@ Spec acceptance (docs/specs/parallel-slots.md):
     path must produce byte-identical behavior to today.
 
 These tests pin down the observable side-effects we care about:
-- the classifier is NEVER invoked when N=1;
+- the parallel slot path is NEVER engaged when N=1;
 - the footer rendering does NOT include `slot N`;
 - the supervisor card has phase emoji as leading char (no slot keycap);
 - the telegram busy reaction draws from `_BUSY_EMOJIS` (random pick), not the
@@ -76,7 +76,11 @@ class SerialDispatchUnchangedTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_classifier_not_called_for_n1(self) -> None:
+    def test_parallel_slot_path_not_engaged_for_n1(self) -> None:
+        # Was `test_classifier_not_called_for_n1`. The relatedness classifier
+        # is deleted (docs/specs/deterministic-slot-routing.md), so the
+        # invariant is now strictly stronger: the parallel dispatch path
+        # itself must never be engaged when max_concurrent=1.
         instance = _instance()
         runtime = GatewayRuntime(
             instance,
@@ -84,6 +88,7 @@ class SerialDispatchUnchangedTests(unittest.TestCase):
             stop_requested=lambda: True,
         )
         try:
+            self.assertFalse(hasattr(runtime, "_classify_slot_affinity"))
             _enqueue(instance)
             with mock.patch(
                 "gateway.runtime.invoke_brain",
@@ -92,9 +97,9 @@ class SerialDispatchUnchangedTests(unittest.TestCase):
                 "gateway.runtime.deliver_response", return_value="m-out"
             ), mock.patch.object(
                 runtime,
-                "_classify_slot_affinity",
+                "_dispatch_parallel",
                 side_effect=AssertionError(
-                    "classifier must NOT be invoked when max_concurrent=1"
+                    "parallel slot dispatch must NOT be engaged when max_concurrent=1"
                 ),
             ):
                 self.assertTrue(runtime.dispatch_once())
