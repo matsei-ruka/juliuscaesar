@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_RETRY_BACKOFF_SECONDS = (10, 60, 300)
 
 # Per-claim lease tokens: `locked_by` is `<worker_id>#<12-hex>`, minted fresh
@@ -170,6 +170,18 @@ def init_db(conn: sqlite3.Connection) -> None:
             sent_at      TEXT,
             PRIMARY KEY (event_id, channel)
         );
+
+        CREATE TABLE IF NOT EXISTS message_slots (
+            channel          TEXT NOT NULL,
+            conversation_id  TEXT NOT NULL,
+            message_id       TEXT NOT NULL,
+            slot             INTEGER NOT NULL,
+            created_at       TEXT NOT NULL,
+            PRIMARY KEY (channel, message_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_message_slots_conv
+        ON message_slots(channel, conversation_id, created_at DESC);
         """
     )
     add_column_if_missing(
@@ -1069,3 +1081,112 @@ def recent(conn: sqlite3.Connection, *, limit: int = 20) -> list[Event]:
 
 def get(conn: sqlite3.Connection, event_id: int) -> Event | None:
     return row_to_event(conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
+
+
+# --- message → slot map (deterministic slot routing) -----------------------
+#
+# Persists which parallel slot handled each inbound message so the dispatcher
+# can resolve Telegram reply-to chains (rule 1) and a conversation's current
+# slot (rule 2) deterministically. See docs/specs/deterministic-slot-routing.md.
+
+
+def record_message_slot(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    conversation_id: str,
+    message_id: str,
+    slot: int,
+) -> None:
+    """Upsert the slot assignment for an inbound message.
+
+    Keyed on (channel, message_id); a re-dispatch of the same message (lease
+    requeue, retry) overwrites with the latest assignment.
+    """
+    conn.execute(
+        """
+        INSERT INTO message_slots(channel, conversation_id, message_id, slot, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(channel, message_id) DO UPDATE SET
+            conversation_id=excluded.conversation_id,
+            slot=excluded.slot,
+            created_at=excluded.created_at
+        """,
+        (channel, conversation_id, str(message_id), int(slot), now_iso()),
+    )
+    conn.commit()
+
+
+def slot_for_message(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    message_id: str,
+) -> int | None:
+    """The slot that handled `message_id`, or None when unrecorded."""
+    row = conn.execute(
+        "SELECT slot FROM message_slots WHERE channel=? AND message_id=?",
+        (channel, str(message_id)),
+    ).fetchone()
+    return int(row["slot"]) if row is not None else None
+
+
+def latest_slot_for_conversation(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    conversation_id: str,
+) -> int | None:
+    """The conversation's most recently assigned slot, or None when cold.
+
+    Tie-break on rowid: `created_at` has seconds precision, so two
+    assignments in the same second resolve to the later insert.
+    """
+    row = conn.execute(
+        """
+        SELECT slot FROM message_slots
+        WHERE channel=? AND conversation_id=?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (channel, conversation_id),
+    ).fetchone()
+    return int(row["slot"]) if row is not None else None
+
+
+def prune_message_slots(
+    conn: sqlite3.Connection,
+    *,
+    max_age_seconds: int = 7 * 24 * 3600,
+    keep_per_conversation: int = 200,
+) -> int:
+    """Bound the message_slots table; returns the number of rows removed.
+
+    Two criteria, both applied: rows older than `max_age_seconds`, and rows
+    beyond the newest `keep_per_conversation` per (channel, conversation_id).
+    Keeps the map from growing unbounded like the dedup index would.
+    """
+    cutoff = add_seconds(now_iso(), -max_age_seconds)
+    cur = conn.execute(
+        "DELETE FROM message_slots WHERE created_at < ?",
+        (cutoff,),
+    )
+    removed = cur.rowcount
+    cur = conn.execute(
+        """
+        DELETE FROM message_slots WHERE rowid IN (
+            SELECT rowid FROM (
+                SELECT rowid,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY channel, conversation_id
+                           ORDER BY created_at DESC, rowid DESC
+                       ) AS rn
+                FROM message_slots
+            ) WHERE rn > ?
+        )
+        """,
+        (int(keep_per_conversation),),
+    )
+    removed += cur.rowcount
+    conn.commit()
+    return removed

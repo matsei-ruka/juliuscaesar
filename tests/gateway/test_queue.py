@@ -810,5 +810,173 @@ class ClaimPathPoisonEscalationTests(unittest.TestCase):
             conn.close()
 
 
+class MessageSlotsTests(unittest.TestCase):
+    """message_slots map for deterministic slot routing
+    (docs/specs/deterministic-slot-routing.md)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jc-queue-test-"))
+        (self.tmp / ".jc").write_text("", encoding="utf-8")
+
+    def test_schema_version_bumped(self) -> None:
+        self.assertEqual(queue.SCHEMA_VERSION, 6)
+        conn = queue.connect(self.tmp)
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+            self.assertEqual(row["value"], str(queue.SCHEMA_VERSION))
+        finally:
+            conn.close()
+
+    def test_record_and_lookup_by_message(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m1", slot=2,
+            )
+            self.assertEqual(
+                queue.slot_for_message(conn, channel="telegram", message_id="m1"), 2
+            )
+            self.assertIsNone(
+                queue.slot_for_message(conn, channel="telegram", message_id="m-unknown")
+            )
+            # Channel is part of the key — no cross-channel bleed.
+            self.assertIsNone(
+                queue.slot_for_message(conn, channel="slack", message_id="m1")
+            )
+        finally:
+            conn.close()
+
+    def test_record_upserts_on_redispatch(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m1", slot=1,
+            )
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m1", slot=3,
+            )
+            self.assertEqual(
+                queue.slot_for_message(conn, channel="telegram", message_id="m1"), 3
+            )
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM message_slots"
+            ).fetchone()["n"]
+            self.assertEqual(count, 1)
+        finally:
+            conn.close()
+
+    def test_latest_slot_for_conversation(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            self.assertIsNone(
+                queue.latest_slot_for_conversation(
+                    conn, channel="telegram", conversation_id="c1"
+                )
+            )
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m1", slot=0,
+            )
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m2", slot=4,
+            )
+            # Same-second created_at — rowid tie-break picks the later insert.
+            self.assertEqual(
+                queue.latest_slot_for_conversation(
+                    conn, channel="telegram", conversation_id="c1"
+                ),
+                4,
+            )
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c2",
+                message_id="m3", slot=1,
+            )
+            self.assertEqual(
+                queue.latest_slot_for_conversation(
+                    conn, channel="telegram", conversation_id="c1"
+                ),
+                4,
+            )
+        finally:
+            conn.close()
+
+    def test_prune_drops_old_rows(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m-old", slot=0,
+            )
+            conn.execute(
+                "UPDATE message_slots SET created_at='2026-01-01T00:00:00Z' "
+                "WHERE message_id='m-old'"
+            )
+            conn.commit()
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m-new", slot=1,
+            )
+            removed = queue.prune_message_slots(conn, max_age_seconds=24 * 3600)
+            self.assertEqual(removed, 1)
+            self.assertIsNone(
+                queue.slot_for_message(conn, channel="telegram", message_id="m-old")
+            )
+            self.assertEqual(
+                queue.slot_for_message(conn, channel="telegram", message_id="m-new"), 1
+            )
+        finally:
+            conn.close()
+
+    def test_prune_caps_rows_per_conversation(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            for i in range(6):
+                queue.record_message_slot(
+                    conn, channel="telegram", conversation_id="c1",
+                    message_id=f"m{i}", slot=i % 2,
+                )
+            # Other conversation stays untouched by c1's cap.
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c2",
+                message_id="other", slot=0,
+            )
+            removed = queue.prune_message_slots(conn, keep_per_conversation=2)
+            self.assertEqual(removed, 4)
+            remaining = [
+                row["message_id"]
+                for row in conn.execute(
+                    "SELECT message_id FROM message_slots "
+                    "WHERE conversation_id='c1' ORDER BY rowid"
+                ).fetchall()
+            ]
+            # Newest 2 survive (same-second timestamps → rowid order).
+            self.assertEqual(remaining, ["m4", "m5"])
+            self.assertEqual(
+                queue.slot_for_message(conn, channel="telegram", message_id="other"), 0
+            )
+        finally:
+            conn.close()
+
+    def test_prune_noop_when_within_bounds(self) -> None:
+        conn = queue.connect(self.tmp)
+        try:
+            queue.record_message_slot(
+                conn, channel="telegram", conversation_id="c1",
+                message_id="m1", slot=0,
+            )
+            self.assertEqual(queue.prune_message_slots(conn), 0)
+            self.assertEqual(
+                queue.slot_for_message(conn, channel="telegram", message_id="m1"), 0
+            )
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
