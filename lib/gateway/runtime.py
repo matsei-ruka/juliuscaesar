@@ -5,12 +5,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import re
-import string
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,6 +96,19 @@ def decode_meta(event: queue.Event) -> dict[str, Any]:
         return {}
 
 
+def _reply_to_message_id(event: queue.Event) -> str | None:
+    """The inbound's reply-to message id from event meta, normalized to str.
+
+    Telegram sets `reply_to_message_id` on explicit replies; channels without
+    a reply signal simply return None and fall through to rules 2–4 of
+    `_pick_slot`.
+    """
+    raw = decode_meta(event).get("reply_to_message_id")
+    if raw is None or raw == "":
+        return None
+    return str(raw)
+
+
 def _seconds_since(ts: str) -> float | None:
     try:
         received = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -123,105 +132,6 @@ def _estimate_prompt_tokens(content: str | None) -> int:
     if not content:
         return 0
     return max(1, len(content) // 4)
-
-
-_STOPWORDS: frozenset[str] = frozenset({
-    "a", "an", "the", "is", "in", "on", "at", "to", "for", "of", "and", "or", "but",
-    "it", "its", "this", "that", "i", "you", "we", "they", "he", "she", "what", "how",
-    "do", "did", "can", "could", "will", "would", "please", "ok", "yes", "no", "not",
-    "about", "with", "from", "by", "as", "be", "are", "was", "were", "have", "has",
-    "had", "so", "then", "when", "where", "which", "who", "also", "just", "still",
-    "now", "there", "here", "up", "down", "out", "get", "set", "all", "any", "one",
-    "more", "my", "your", "our", "their", "me", "him", "her", "us", "them", "let",
-    "cosa", "che", "di", "il", "la", "lo", "le", "gli", "un", "una", "come", "hai",
-    "ho", "ha", "sei", "si", "sono", "era", "non", "per", "con", "su", "da",
-})
-
-_JACCARD_LOW = 0.05
-_JACCARD_HIGH = 0.35
-
-# Common imperative verbs / sentence starters that look like proper nouns when
-# title-cased. Used to filter entity extraction so "Check Florian" → {"Florian"}.
-_COMMON_VERBS: frozenset[str] = frozenset({
-    "check", "restart", "run", "stop", "start", "verify", "fix", "reset",
-    "test", "send", "show", "look", "tell", "help", "try", "use", "create",
-    "open", "close", "add", "remove", "delete", "move", "copy", "read",
-    "write", "update", "make", "give", "take", "status", "ping", "build",
-    "deploy", "kill", "spawn", "list", "find", "post", "ship", "review",
-    "controlla", "riavvia", "verifica", "ferma", "avvia", "mostra", "fai",
-})
-
-_TOKEN_RE = re.compile(r"[^\s" + re.escape(string.punctuation) + r"]+")
-_ENTITY_TITLE_RE = re.compile(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)*\b")
-_ENTITY_ALLCAPS_RE = re.compile(r"\b[A-Z]{2,}\b")
-_ENTITY_VMIP_RE = re.compile(r"\b(?:[Vv][Mm]\d+|\d{1,3}(?:\.\d{1,3}){1,3})\b")
-
-
-def _tokenize(text: str) -> frozenset[str]:
-    """Lowercase content-word token set: strips punctuation, stopwords, numbers."""
-    if not text:
-        return frozenset()
-    lowered = text.lower()
-    raw = _TOKEN_RE.findall(lowered)
-    cleaned: set[str] = set()
-    for tok in raw:
-        tok = tok.strip(string.punctuation)
-        if not tok or tok in _STOPWORDS:
-            continue
-        if tok.isdigit():
-            continue
-        cleaned.add(tok)
-    return frozenset(cleaned)
-
-
-def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
-    """Jaccard similarity |A∩B|/|A∪B|. Returns 0.0 for empty sets."""
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    if union == 0:
-        return 0.0
-    return inter / union
-
-
-def _extract_entities(text: str) -> frozenset[str]:
-    """Title-cased tokens, ALL-CAPS (>=2 chars), and VM/IP patterns.
-
-    Common imperative verbs and stopwords are filtered out of the title-case
-    pass so sentence-initial words like "Check" or "Restart" don't pollute
-    entity sets.
-    """
-    if not text:
-        return frozenset()
-    out: set[str] = set()
-    for tok in _ENTITY_TITLE_RE.findall(text):
-        low = tok.lower()
-        if low in _STOPWORDS or low in _COMMON_VERBS:
-            continue
-        out.add(tok)
-    out.update(_ENTITY_ALLCAPS_RE.findall(text))
-    out.update(_ENTITY_VMIP_RE.findall(text))
-    return frozenset(out)
-
-
-def _parse_slot_verdict(text: str) -> int | None:
-    """Decode the classifier reply (`related:<N>` or `unrelated`).
-
-    Tolerant of surrounding whitespace, code-fence backticks, and quoted
-    output. Returns None for `unrelated`, an unparseable verdict, or a
-    non-integer slot id.
-    """
-    raw = (text or "").strip().strip("`'\"").lower()
-    if not raw or raw.startswith("unrelated"):
-        return None
-    if raw.startswith("related:"):
-        tail = raw.split(":", 1)[1].strip().strip("`'\"")
-        try:
-            return int(tail)
-        except (TypeError, ValueError):
-            return None
-    return None
 
 
 def _lib_dir_newest_mtime(lib_dir: Path) -> tuple[float, str]:
@@ -398,10 +308,6 @@ class GatewayRuntime:
         self._slot_busy_lock = threading.Lock()
         self._busy_slots: dict[tuple[str, str], set[int]] = {}
         self._slot_active_threads: set[threading.Thread] = set()
-        # Memoize classifier verdicts per (event content, slot summary tuple)
-        # so the same message doesn't pay the openrouter call twice. TTL is
-        # config-driven (`parallel.classifier.cache_ttl_seconds`).
-        self._slot_classifier_cache: dict[tuple[str, str], tuple[float, str]] = {}
 
     def _init_company_reporter(self) -> Any:
         """Build a company.Reporter iff company integration is configured.
@@ -1225,13 +1131,14 @@ class GatewayRuntime:
     def _pick_slot(self, event: queue.Event) -> tuple[int, bool]:
         """Return `(slot, should_queue)` for `event` under parallel dispatch.
 
-        - For `max_concurrent <= 1` always returns `(0, False)` — serial path.
-        - Otherwise asks the relatedness classifier (best-effort) and follows
-          the spec rules (docs/specs/parallel-slots.md §Dispatch logic):
-            related→busy  → enqueue behind that slot
-            related→free  → resume that slot
-            unrelated+free → pick LRU free slot (tie-break: lowest id)
-            all busy      → queue on slot 0 (main lane)
+        - For `max_concurrent <= 1` always returns `(0, False)` — serial path,
+          byte-identical with the pre-parallel-slots gateway.
+        - Otherwise applies the deterministic rules
+          (docs/specs/deterministic-slot-routing.md), in order:
+            1. reply & slot(reply_to) known → reuse that slot (queue if busy)
+            2. conversation's current slot free → resume it (continuity)
+            3. free slot exists → next progressive free slot (lowest free id)
+            4. all busy → queue on slot 0 (main lane)
         """
         max_concurrent = self.config.parallel.max_concurrent
         if max_concurrent <= 1:
@@ -1239,128 +1146,90 @@ class GatewayRuntime:
         channel = router.channel_name(event)
         conv = event.conversation_id or ""
         if not conv:
-            # No conversation_id → no slot affinity to compute. Run on slot 0.
+            # No conversation_id → no continuity to preserve. Run on slot 0.
             return 0, False
         with self._slot_busy_lock:
             busy = set(self._busy_slots.get((channel, conv), set()))
-        free = [i for i in range(max_concurrent) if i not in busy]
 
-        # Classifier hint (None = unrelated / no opinion).
-        related: int | None = None
+        reply_to = _reply_to_message_id(event)
+        conn = queue.connect(self.instance_dir)
         try:
-            summaries = self._slot_summaries(channel, conv, max_concurrent)
-            if summaries:
-                related = self._classify_slot_affinity(event, summaries)
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"slot classifier error id={event.id}: {exc}", kind="slot_classifier_error")
-            related = None
-
-        if related is not None and 0 <= related < max_concurrent:
-            if related in busy:
-                # When the busy related slot holds a backgrounded session, the new
-                # inbound is a fresh primary — route it to a free slot instead of
-                # queuing behind the background task indefinitely.
-                if free and self.config.actions.enabled and actions_registry.has_backgrounded_for_conversation(conv):
-                    picked = self._lru_free_slot(channel, conv, free)
+            # Rule 1 — explicit reply forces the original message's slot.
+            if reply_to is not None:
+                slot = queue.slot_for_message(
+                    conn, channel=channel, message_id=reply_to
+                )
+                if slot is not None and 0 <= slot < max_concurrent:
+                    if slot in busy:
+                        # Queue behind it — a reply never starts on another slot.
+                        self.log(
+                            f"slot pick id={event.id} reply_to={reply_to} "
+                            f"slot={slot} busy → queue",
+                            kind="slot_pick",
+                        )
+                        return slot, True
                     self.log(
-                        f"slot pick id={event.id} related={related} busy=yes backgrounded → free={picked}",
+                        f"slot pick id={event.id} reply_to={reply_to} → reuse slot={slot}",
                         kind="slot_pick",
                     )
-                    return picked, False
-                self.log(
-                    f"slot pick id={event.id} related={related} busy=yes → queue",
-                    kind="slot_pick",
-                )
-                return related, True
+                    return slot, False
+            # Rule 2 — sequential continuity: resume the conversation's
+            # current slot when it is free.
+            current = queue.latest_slot_for_conversation(
+                conn, channel=channel, conversation_id=conv
+            )
+        finally:
+            conn.close()
+        if current is not None and 0 <= current < max_concurrent and current not in busy:
             self.log(
-                f"slot pick id={event.id} related={related} busy=no → resume",
+                f"slot pick id={event.id} → resume current slot={current}",
                 kind="slot_pick",
             )
-            return related, False
+            return current, False
 
+        # Rule 3 — genuine overlap (current slot busy or unknown): next
+        # progressive free slot, lowest id first.
+        free = [i for i in range(max_concurrent) if i not in busy]
         if free:
-            picked = self._lru_free_slot(channel, conv, free)
+            picked = free[0]
             self.log(
-                f"slot pick id={event.id} unrelated → lru-free={picked}",
+                f"slot pick id={event.id} current={current} busy → progressive free={picked}",
                 kind="slot_pick",
             )
             return picked, False
 
+        # Rule 4 — all busy: queue on the main lane.
         self.log(
             f"slot pick id={event.id} all-busy → queue slot 0",
             kind="slot_pick",
         )
         return 0, True
 
-    def _lru_free_slot(self, channel: str, conv: str, free: list[int]) -> int:
-        """Pick the free slot with the oldest `sessions.updated_at`.
+    def _record_message_slot(self, event: queue.Event, slot: int) -> None:
+        """Persist (inbound message_id → slot) after a slot assignment.
 
-        Tie-break: lowest slot id. Falls back to lowest free id when no slot
-        row exists yet (cold conversation). Mirrors spec rule
-        "unrelated + free → LRU".
+        Feeds rules 1 and 2 of `_pick_slot` on later messages. Best-effort:
+        a write failure only costs routing continuity, never the dispatch.
         """
+        if not event.source_message_id or not event.conversation_id:
+            return
+        channel = router.channel_name(event)
         conn = queue.connect(self.instance_dir)
         try:
-            brain = self.config.default_brain
-            rows = sessions.list_sessions_for_conversation(
+            queue.record_message_slot(
                 conn,
                 channel=channel,
-                conversation_id=conv,
-                brain=brain,
+                conversation_id=event.conversation_id,
+                message_id=str(event.source_message_id),
+                slot=slot,
+            )
+            queue.prune_message_slots(conn)
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                f"record_message_slot failed id={event.id} slot={slot}: {exc}"
             )
         finally:
             conn.close()
-        updated_by_slot = {r.slot: r.updated_at for r in rows}
-        # Slot with no row counts as oldest (never used); pick that first.
-        candidates = sorted(
-            free,
-            key=lambda s: (updated_by_slot.get(s, ""), s),
-        )
-        return candidates[0]
-
-    def _slot_summaries(
-        self,
-        channel: str,
-        conv: str,
-        max_concurrent: int,
-    ) -> dict[int, str]:
-        """Recent activity summary per slot (last ~3 user turns), for classifier.
-
-        Reads the per-conversation transcript JSONL once and walks it from the
-        tail, attaching user turns to slot ids in `sessions` order. Returns an
-        empty mapping when the transcript file does not yet exist.
-        """
-        path = transcripts.transcript_path(self.instance_dir, conv)
-        if not path.exists():
-            return {}
-        # Per spec, slots only exist on brains we've actually invoked. Pull
-        # the slot map from `sessions` rows for context.
-        conn = queue.connect(self.instance_dir)
-        try:
-            brain = self.config.default_brain
-            rows = sessions.list_sessions_for_conversation(
-                conn, channel=channel, conversation_id=conv, brain=brain
-            )
-        finally:
-            conn.close()
-        # Without slot rows we have no per-slot history; the classifier
-        # bypasses cleanly (returns None) on an empty input.
-        active_slots = sorted({r.slot for r in rows} | {0})
-        active_slots = [s for s in active_slots if s < max_concurrent]
-        if not active_slots:
-            return {}
-        # Approximation: slots share the transcript file. We use the last 3
-        # user turns as a global summary, attributed to all known slots, so
-        # the classifier can decide which is closest in topic. Per-slot
-        # attribution would require slot stamps on each transcript line —
-        # left as a follow-up (see spec Open Questions).
-        events = transcripts.tail(path, lines=12)
-        recent_user_turns = [ev.text for ev in events if ev.role == "user"][-3:]
-        if not recent_user_turns:
-            return {}
-        joined = "\n- ".join(recent_user_turns)
-        joined = "- " + joined
-        return {s: joined for s in active_slots}
 
     def _build_global_transcript_context(self, event: queue.Event) -> str:
         """Render the last N transcript lines as a context block for parallel mode.
@@ -1384,200 +1253,6 @@ class GatewayRuntime:
         if not body:
             return ""
         return "[recent conversation context]\n" + body
-
-    def _prefilter_slot_affinity(
-        self,
-        message: str,
-        slot_summaries: dict[int, str],
-    ) -> tuple[str, int | None]:
-        """Deterministic pre-filter before the LLM classifier.
-
-        Returns:
-          ("unrelated", None)  — skip LLM, route as unrelated (new slot)
-          ("related", slot_id) — currently unused; reserved for strong signal
-          ("ambiguous", None)  — fall through to LLM
-
-        See docs/specs/parallel-slots-smart-classifier.md.
-        """
-        if not slot_summaries:
-            return ("ambiguous", None)
-
-        msg_tokens = _tokenize(message)
-        slot_tokens: dict[int, frozenset[str]] = {
-            s: _tokenize(summary or "") for s, summary in slot_summaries.items()
-        }
-
-        if len(msg_tokens) < 2:
-            # Short messages are noisy under Jaccard. Use token-or-entity
-            # overlap against any slot; no overlap anywhere → unrelated.
-            msg_entities = _extract_entities(message)
-            signals: set[str] = set(msg_tokens) | {e.lower() for e in msg_entities}
-            if not signals:
-                return ("ambiguous", None)
-            for slot_id, toks in slot_tokens.items():
-                summary_lower = (slot_summaries.get(slot_id) or "").lower()
-                for sig in signals:
-                    if sig in toks or sig in summary_lower:
-                        return ("ambiguous", None)
-            return ("unrelated", None)
-
-        max_j = 0.0
-        for toks in slot_tokens.values():
-            j = _jaccard(msg_tokens, toks)
-            if j > max_j:
-                max_j = j
-
-        if max_j < _JACCARD_LOW:
-            return ("unrelated", None)
-        if max_j >= _JACCARD_HIGH:
-            return ("ambiguous", None)
-
-        # Mid-range Jaccard — entity check decides.
-        msg_entities = _extract_entities(message)
-        if not msg_entities:
-            return ("ambiguous", None)
-        all_slot_signals: set[str] = set()
-        for summary in slot_summaries.values():
-            text = summary or ""
-            all_slot_signals.update(_extract_entities(text))
-            all_slot_signals.update(_tokenize(text))
-            all_slot_signals.add(text.lower())
-        for ent in msg_entities:
-            ent_lower = ent.lower()
-            in_any = False
-            for sig in all_slot_signals:
-                if ent == sig or ent_lower == sig or ent_lower in sig:
-                    in_any = True
-                    break
-            if not in_any:
-                return ("unrelated", None)
-        return ("ambiguous", None)
-
-    def _classify_slot_affinity(
-        self,
-        event: queue.Event,
-        slot_summaries: dict[int, str],
-    ) -> int | None:
-        """Ask openrouter whether `event` is related to a known slot.
-
-        Returns the slot id when the model emits `related:<N>`, None
-        otherwise. Best-effort: any HTTP / parsing error returns None
-        (fall through to LRU free slot). Results are memoized for the
-        configured TTL to dedupe repeat lookups.
-        """
-        verdict, _ = self._prefilter_slot_affinity(event.content, slot_summaries)
-        if verdict == "unrelated":
-            self.log(
-                f"slot prefilter id={event.id} verdict=unrelated — skipping LLM",
-                kind="slot_prefilter",
-            )
-            return None
-        # "ambiguous" → continue to LLM. "related" path reserved for future
-        # strong-signal short-circuit; today only "unrelated" fast-paths.
-
-        cfg = self.config.parallel.classifier
-        if cfg.backend != "openrouter":
-            return None
-        api_key = env_value(self.instance_dir, "OPENROUTER_API_KEY")
-        if not api_key:
-            return None
-        slots_repr = "|".join(
-            f"{s}:{(slot_summaries.get(s) or '').strip()[:200]}"
-            for s in sorted(slot_summaries)
-        )
-        cache_key = (event.content[:400], slots_repr)
-        now = time.time()
-        cached = self._slot_classifier_cache.get(cache_key)
-        if cached is not None and cached[0] > now:
-            return _parse_slot_verdict(cached[1])
-        prompt = self._slot_affinity_prompt(event.content, slot_summaries)
-        body = {
-            "model": cfg.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "max_tokens": 16,
-        }
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/matsei-ruka/juliuscaesar",
-                "X-Title": "JuliusCaesar Gateway parallel-slots",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-            self.log(f"slot classifier unreachable: {exc}", kind="slot_classifier_error")
-            return None
-        try:
-            payload = json.loads(raw)
-            text = (
-                payload.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content")
-                or ""
-            ).strip().lower()
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
-            self.log(f"slot classifier bad payload: {exc}", kind="slot_classifier_error")
-            return None
-        expires_at = now + max(1, cfg.cache_ttl_seconds)
-        self._slot_classifier_cache[cache_key] = (expires_at, text)
-        return _parse_slot_verdict(text)
-
-    @staticmethod
-    def _slot_affinity_prompt(
-        message: str,
-        slot_summaries: dict[int, str],
-    ) -> str:
-        """Build the classifier prompt for slot affinity.
-
-        Output format: a single line — `related:<slot>` or `unrelated`. No
-        explanation, no Markdown. Slot summaries are the last ~3 user turns
-        per slot.
-        """
-        slot_blocks: list[str] = []
-        for slot_id in sorted(slot_summaries):
-            summary = slot_summaries[slot_id].strip() or "(no recent activity)"
-            slot_blocks.append(f"--- slot {slot_id} ---\n{summary}")
-        slots_text = "\n\n".join(slot_blocks)
-        return (
-            "You route a new chat message to a parallel work slot. Each slot "
-            "is a long-lived thread of conversation. Your job: decide if the "
-            "new message is a *direct continuation* of an existing slot, or a "
-            "*new topic* that should run in a fresh parallel slot.\n\n"
-            "DEFAULT TO `unrelated`. Only emit `related:<N>` when the new "
-            "message is unmistakably continuing slot N's specific thread "
-            "(answering a question slot N just asked, referencing a noun "
-            "phrase from slot N's last turn, finishing a task slot N started).\n\n"
-            "Treat as UNRELATED:\n"
-            "  - A new question about a different person, system, file, or topic\n"
-            "  - 'what about X', 'how about Y', 'altro?', 'cambio', 'next:', "
-            "'btw', 'separately', 'aside from this' — these mark topic shifts\n"
-            "  - A short imperative on a new subject ('check Daniel', "
-            "'restart Florian', 'meteo dubai')\n"
-            "  - A status query on a different entity than slot N's current focus\n"
-            "  - A request that does not depend on any answer slot N is producing\n\n"
-            "Treat as `related:N` ONLY when:\n"
-            "  - The new message directly answers a question slot N just asked\n"
-            "  - It references 'it', 'that', 'the X' where X was named in slot N\n"
-            "  - It is a clear edit/follow-up ('and also do Y', 'one more thing on X')\n"
-            "  - It corrects or clarifies slot N's last turn\n\n"
-            "When in doubt → `unrelated`. False positives on `related` block "
-            "parallelism; false positives on `unrelated` only cost a bit of "
-            "context. Prefer the cheaper failure mode.\n\n"
-            "Existing slot histories (last ~3 user turns each):\n\n"
-            f"{slots_text}\n\n"
-            "New message:\n"
-            f"{message.strip()[:1500]}\n\n"
-            "Reply with EXACTLY one token on a single line:\n"
-            "  - `related:<N>` where <N> is the slot id the message continues\n"
-            "  - `unrelated` if it starts a fresh topic\n"
-            "No prose, no Markdown, no explanation."
-        )
 
     def _lease_heartbeat(
         self, event_ids: list[int], claim_token: str | None = None
@@ -1645,6 +1320,9 @@ class GatewayRuntime:
             return
         with self._slot_busy_lock:
             self._busy_slots.setdefault(key, set()).add(slot)
+        # Persist the assignment before the brain runs so the very next
+        # inbound already resolves reply-to (rule 1) and continuity (rule 2).
+        self._record_message_slot(event, slot)
         thread = threading.Thread(
             target=self._run_in_slot,
             args=(event, slot, key),

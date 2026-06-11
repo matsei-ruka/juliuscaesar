@@ -1,10 +1,11 @@
 """Integration tests for parallel-slot dispatch in the gateway runtime.
 
-Covers:
-- two unrelated events on the same conversation run concurrently when N=2
+Covers (deterministic routing — docs/specs/deterministic-slot-routing.md):
+- two overlapping events on the same conversation run concurrently when N=2
   (asserted by overlap of the mocked brain's sleep windows);
-- a related follow-up arriving while a slot is busy is requeued (status
-  flips back to `queued`) so it can resume when the slot frees.
+- an explicit reply arriving while its original slot is busy is requeued
+  (status flips back to `queued`) so it resumes on that slot when it frees;
+- slot assignments are persisted to the message_slots map.
 """
 
 from __future__ import annotations
@@ -45,7 +46,12 @@ def _instance(max_concurrent: int) -> Path:
     return root
 
 
-def _enqueue(instance: Path, *, content: str, message_id: str) -> int:
+def _enqueue(
+    instance: Path, *, content: str, message_id: str, reply_to: str | None = None
+) -> int:
+    meta: dict = {"chat_id": "28547271"}
+    if reply_to is not None:
+        meta["reply_to_message_id"] = reply_to
     conn = queue.connect(instance)
     try:
         event, _ = queue.enqueue(
@@ -54,7 +60,7 @@ def _enqueue(instance: Path, *, content: str, message_id: str) -> int:
             source_message_id=message_id,
             conversation_id="28547271",
             content=content,
-            meta={"chat_id": "28547271"},
+            meta=meta,
         )
     finally:
         conn.close()
@@ -73,7 +79,7 @@ def _wait_for_threads(runtime: GatewayRuntime, timeout: float = 10.0) -> None:
 
 
 class ParallelDispatchTests(unittest.TestCase):
-    def test_two_unrelated_events_run_concurrently(self) -> None:
+    def test_two_overlapping_events_run_concurrently(self) -> None:
         instance = _instance(max_concurrent=2)
         runtime = GatewayRuntime(
             instance,
@@ -96,13 +102,25 @@ class ParallelDispatchTests(unittest.TestCase):
             _enqueue(instance, content="first message", message_id="m1")
             _enqueue(instance, content="second message", message_id="m2")
             with mock.patch("gateway.runtime.invoke_brain", side_effect=fake_invoke), \
-                 mock.patch("gateway.runtime.deliver_response", return_value="m-out"), \
-                 mock.patch.object(runtime, "_classify_slot_affinity", return_value=None):
+                 mock.patch("gateway.runtime.deliver_response", return_value="m-out"):
                 # Claim + dispatch each event individually. Parallel path
                 # spawns a worker thread per event and returns immediately.
+                # m1 → slot 0 (rule 3, cold conversation); m2 arrives while
+                # slot 0 is busy → rule 3 → slot 1, no requeue.
                 self.assertTrue(runtime.dispatch_once())
                 self.assertTrue(runtime.dispatch_once())
                 _wait_for_threads(runtime)
+
+            # Both assignments persisted to the message→slot map.
+            conn = queue.connect(instance)
+            try:
+                slots = {
+                    queue.slot_for_message(conn, channel="telegram", message_id="m1"),
+                    queue.slot_for_message(conn, channel="telegram", message_id="m2"),
+                }
+            finally:
+                conn.close()
+            self.assertEqual(slots, {0, 1})
 
             self.assertEqual(len(starts), 2)
             self.assertEqual(len(ends), 2)
@@ -120,7 +138,7 @@ class ParallelDispatchTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_related_follow_up_to_busy_slot_is_requeued(self) -> None:
+    def test_reply_to_busy_slot_is_requeued(self) -> None:
         instance = _instance(max_concurrent=2)
         runtime = GatewayRuntime(
             instance,
@@ -138,21 +156,16 @@ class ParallelDispatchTests(unittest.TestCase):
         try:
             id_first = _enqueue(instance, content="kick off slot 0", message_id="m1")
             with mock.patch("gateway.runtime.invoke_brain", side_effect=slow_invoke), \
-                 mock.patch("gateway.runtime.deliver_response", return_value="m-out"), \
-                 mock.patch.object(runtime, "_classify_slot_affinity", return_value=None):
+                 mock.patch("gateway.runtime.deliver_response", return_value="m-out"):
                 self.assertTrue(runtime.dispatch_once())
                 # Wait until slot worker has started.
                 invoked.wait(timeout=2.0)
-                # Now classifier reports the next message is related → slot 0
-                # is busy → must requeue. _slot_summaries returns empty when
-                # there's no transcript yet, which would short-circuit the
-                # classifier path — patch it to surface our mocked verdict.
+                # Explicit reply to m1 while m1's slot (0) is busy → rule 1
+                # queues it behind that slot; it must NOT start on slot 1.
                 id_followup = _enqueue(
-                    instance, content="follow-up", message_id="m2"
+                    instance, content="follow-up", message_id="m2", reply_to="m1"
                 )
-                with mock.patch.object(runtime, "_classify_slot_affinity", return_value=0), \
-                     mock.patch.object(runtime, "_slot_summaries", return_value={0: "kick off"}):
-                    self.assertTrue(runtime.dispatch_once())
+                self.assertTrue(runtime.dispatch_once())
 
                 conn = queue.connect(instance)
                 try:
