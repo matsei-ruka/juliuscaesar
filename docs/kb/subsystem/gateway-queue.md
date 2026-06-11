@@ -11,8 +11,8 @@ code_anchors:
     symbol: "class GatewayRuntime:"
   - path: lib/gateway/recovery_integration.py
     symbol: "class RecoveryIntegration:"
-last_verified: 2026-05-13
-verified_by: Matsei Ruka
+last_verified: 2026-06-11
+verified_by: Rachel Zane
 related:
   - subsystem/installation-and-cli-routing.md
   - contract/instance-layout-and-resolution.md
@@ -78,6 +78,7 @@ The production runtime supports Telegram long polling, Slack Socket Mode, queue-
   This prevents deferred auth/session repair from racing the lease requeue path.
 - Dedup uses `(source, source_message_id)` when the source provides a stable message id.
 - Sessions are stored by `(channel, conversation_id, brain)` so later messages resume the same native brain conversation when an adapter exposes a session id.
+- Parallel dispatch (`parallel.max_concurrent > 1`) routes slots deterministically (`docs/specs/deterministic-slot-routing.md`): reply-to reuses the original message's slot (queueing behind it if busy), a non-reply resumes the conversation's current slot when free, otherwise the lowest free slot id; all-busy queues on slot 0. Assignments persist in the `message_slots` table (schema v6), pruned by age and per-conversation cap. The former LLM relatedness classifier is deleted. Serial (`max_concurrent <= 1`) never touches any of this.
 
 ## CLI Surface
 
