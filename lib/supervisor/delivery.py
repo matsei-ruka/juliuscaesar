@@ -22,7 +22,7 @@ from gateway.channels._http import http_json
 from gateway.config import env_value
 from gateway.format import to_markdown_v2
 
-from .cards import Card
+from .cards import Card, build_action_components_discord
 
 
 LogFn = Callable[[str], None]
@@ -359,6 +359,42 @@ def edit_card_slack(
 
 _DISCORD_API = "https://discord.com/api/v10"
 
+# Discord embed colour for an in-flight supervisor card (blurple).
+_DISCORD_CARD_COLOR = 0x5865F2
+
+
+def _discord_card_payload(card: "Card", *, for_edit: bool = False) -> dict[str, Any]:
+    """Build the Discord message body for a card.
+
+    Plain cards (no action token) ship as ``content`` text — byte-identical
+    to the pre-parity behavior, so existing delivery is untouched. Cards with
+    actions enabled (``card.short_token`` set) ship as a richer **embed** plus
+    an action row of Stop/Background **components**, the Discord twin of the
+    Telegram inline keyboard.
+
+    ``for_edit`` matters because Discord's ``PATCH .../messages/{id}`` only
+    touches the fields present in the payload. A card transitioning from an
+    action embed (with buttons) to a plain terminal state must therefore send
+    explicit empty ``embeds`` / ``components`` arrays, or the stale embed and
+    the live Stop/Background buttons survive the edit. On a fresh send there
+    is nothing to clear, so we keep the minimal content-only body (and the
+    "plain card == content only" contract the tests pin).
+    """
+    if not card.short_token:
+        if for_edit:
+            return {"content": card.text[:2000], "embeds": [], "components": []}
+        return {"content": card.text[:2000]}
+    return {
+        "content": "",
+        "embeds": [
+            {
+                "description": card.text[:4000],
+                "color": _DISCORD_CARD_COLOR,
+            }
+        ],
+        "components": build_action_components_discord(card.short_token),
+    }
+
 
 def send_card_discord(
     *,
@@ -368,11 +404,18 @@ def send_card_discord(
     reply_to_message_id: str | None = None,
     log: LogFn | None = None,
 ) -> str | None:
-    """Post card via Discord REST. Returns message_id as str, or None."""
+    """Post card via Discord REST. Returns message_id as str, or None.
+
+    When the card carries an action ``short_token`` (supervisor card actions
+    enabled), the message renders as an embed with Stop/Background buttons and
+    the token→message_id binding is recorded in the action registry so the
+    Discord interaction handler can resolve a button click back to its session
+    (the twin of ``send_card_telegram``'s ``attach_supervisor_message_by_token``).
+    """
     token = env_value(instance_dir, "DISCORD_BOT_TOKEN")
     if not token or not channel_id:
         return None
-    payload: dict[str, Any] = {"content": card.text[:2000]}
+    payload: dict[str, Any] = _discord_card_payload(card)
     if reply_to_message_id:
         payload["message_reference"] = {"message_id": str(reply_to_message_id)}
     url = f"{_DISCORD_API}/channels/{channel_id}/messages"
@@ -388,7 +431,16 @@ def send_card_discord(
             log(f"supervisor send_card_discord error: {exc}")
         return None
     mid = data.get("id")
-    return str(mid) if mid is not None else None
+    if mid is None:
+        return None
+    if card.short_token:
+        try:
+            actions_registry.attach_supervisor_message_by_token(
+                card.short_token, int(mid), card_text=card.text
+            )
+        except (TypeError, ValueError):
+            pass
+    return str(mid)
 
 
 def delete_card_discord(
@@ -433,7 +485,7 @@ def edit_card_discord(
     if not token or not channel_id or not message_id:
         return False
     url = f"{_DISCORD_API}/channels/{channel_id}/messages/{message_id}"
-    payload: dict[str, Any] = {"content": card.text[:2000]}
+    payload: dict[str, Any] = _discord_card_payload(card, for_edit=True)
     try:
         data = http_json(
             url,
@@ -446,4 +498,11 @@ def edit_card_discord(
         if log:
             log(f"supervisor edit_card_discord error: {exc}")
         return False
+    if card.short_token:
+        try:
+            actions_registry.attach_supervisor_message_by_token(
+                card.short_token, int(message_id), card_text=card.text
+            )
+        except (TypeError, ValueError):
+            pass
     return "id" in data

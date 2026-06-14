@@ -233,6 +233,61 @@ class ApproveRejectTest(unittest.TestCase):
             channel.close()
 
 
+class DiscordAuthCallbackTest(unittest.TestCase):
+    """The Telegram channel persists Discord channel-approval taps (dcauth:).
+
+    Single approval surface (discord-parity §B2): Discord access prompts land
+    in the operator's Telegram DM and the allow/deny tap is written into
+    `channels.discord.chat_ids` / `blocked_chat_ids`.
+    """
+
+    def _send(self, channel: TelegramChannel, action: str, target: str,
+              from_id: str = "28547271") -> None:
+        update = {
+            "callback_query": {
+                "id": "cq-d",
+                "data": f"dcauth:{action}:{target}",
+                "from": {"id": int(from_id)},
+                "message": {"chat": {"id": 28547271}, "message_id": 7},
+            }
+        }
+        with patch("gateway.channels.telegram.http_json") as mock_http:
+            mock_http.return_value = {"ok": True, "result": {}}
+            channel._handle_callback_query(update)
+
+    def test_allow_writes_discord_chat_ids(self):
+        instance = _make_instance()
+        channel = _make_channel(instance)
+        try:
+            self._send(channel, "allow", "987654321")
+            cfg = gateway_config.load_config(instance).channel("discord")
+            self.assertIn("987654321", cfg.chat_ids)
+        finally:
+            channel.close()
+
+    def test_deny_writes_discord_blocklist(self):
+        instance = _make_instance()
+        channel = _make_channel(instance)
+        try:
+            self._send(channel, "deny", "111222333")
+            cfg = gateway_config.load_config(instance).channel("discord")
+            self.assertIn("111222333", cfg.blocked_chat_ids)
+            self.assertNotIn("111222333", cfg.chat_ids)
+        finally:
+            channel.close()
+
+    def test_non_operator_cannot_approve_discord(self):
+        instance = _make_instance()
+        channel = _make_channel(instance)
+        yaml_path = instance / "ops" / "gateway.yaml"
+        m_yaml = yaml_path.stat().st_mtime
+        try:
+            self._send(channel, "allow", "987654321", from_id="11111")
+            self.assertEqual(yaml_path.stat().st_mtime, m_yaml)
+        finally:
+            channel.close()
+
+
 class HotReloadTest(unittest.TestCase):
     def test_external_yaml_edit_picked_up(self):
         instance = _make_instance(yaml_chat_ids=["28547271"])
