@@ -79,6 +79,10 @@ class TelegramChannel:
     _APPROVAL_CALLBACK_PREFIX = "apv:"
     _ACTION_STOP_PREFIX = "act:stop:"
     _ACTION_BG_PREFIX = "act:bg:"
+    # Discord channel-approval taps: the Discord channel sends its access
+    # prompts here (single approval surface), and the operator's allow/deny
+    # tap is written back into `channels.discord.chat_ids` / `blocked_chat_ids`.
+    _DISCORD_AUTH_CALLBACK_PREFIX = "dcauth:"
 
     def __init__(self, instance_dir: Path, cfg: ChannelConfig, log: LogFn):
         self.instance_dir = instance_dir
@@ -577,6 +581,9 @@ class TelegramChannel:
                 cq_id, data[len(self._ACTION_BG_PREFIX):], from_user, msg
             )
             return
+        if data.startswith(self._DISCORD_AUTH_CALLBACK_PREFIX):
+            self._handle_discord_auth_callback(cq_id, data, from_user, msg)
+            return
         if not data.startswith(self._AUTH_CALLBACK_PREFIX):
             return
         # Only the operator may authorize.
@@ -631,6 +638,64 @@ class TelegramChannel:
             f"telegram auth flipped chat_id={target_chat_id} action={action} "
             f"(config-only)"
         )
+
+    def _handle_discord_auth_callback(
+        self, cq_id: Any, data: str, from_user: dict, msg: dict
+    ) -> None:
+        """Persist an operator allow/deny tap for a Discord channel.
+
+        The Discord channel can't reach the operator directly, so its access
+        prompts land in this Telegram DM (single approval surface). The tap is
+        written into ``channels.discord.chat_ids`` / ``blocked_chat_ids`` —
+        the Discord channel reads the change on its next message (config cache
+        is busted here).
+        """
+        main = self._main_chat_id()
+        if main and str(from_user.get("id", "")) != main:
+            self._answer_callback(cq_id, "not authorized")
+            return
+        try:
+            _, action, channel_id = data.split(":", 2)
+        except ValueError:
+            self._answer_callback(cq_id, "bad payload")
+            return
+        if action not in ("allow", "deny") or not channel_id:
+            self._answer_callback(cq_id, "bad action")
+            return
+        try:
+            if action == "allow":
+                update_gateway_yaml_chat_lists(
+                    self.instance_dir,
+                    channel="discord",
+                    allow_add=[channel_id],
+                    block_remove=[channel_id],
+                )
+            else:
+                update_gateway_yaml_chat_lists(
+                    self.instance_dir,
+                    channel="discord",
+                    block_add=[channel_id],
+                    allow_remove=[channel_id],
+                )
+            from ..config import clear_config_cache
+
+            clear_config_cache()
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"discord auth write failed channel_id={channel_id}: {exc}")
+            self._answer_callback(cq_id, "write failed")
+            return
+        edit_text = (
+            f"✅ Discord channel allowed — {channel_id}"
+            if action == "allow"
+            else f"⛔ Discord channel denied — {channel_id}"
+        )
+        self._edit_message_text(
+            chat_id=msg.get("chat", {}).get("id"),
+            message_id=msg.get("message_id"),
+            text=edit_text,
+        )
+        self._answer_callback(cq_id, "allowed" if action == "allow" else "denied")
+        self.log(f"discord auth flipped channel_id={channel_id} action={action}")
 
     def _handle_action_stop(
         self,

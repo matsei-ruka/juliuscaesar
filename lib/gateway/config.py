@@ -2086,9 +2086,17 @@ channels:
     enabled: {str(slack_enabled).lower()}
     app_token_env: SLACK_APP_TOKEN
     bot_token_env: SLACK_BOT_TOKEN
+  # discord: Telegram-parity channel. Default-deny — `chat_ids` is the
+  # allowlist of Discord channel ids (or guild ids for a whole server). A
+  # first message from an unknown channel sends an approval prompt to the
+  # operator's Telegram DM; tapping Allow appends the id here. Both telegram
+  # and discord can be enabled at once — each is an independent conversation
+  # (not bridged). See docs/specs/discord-parity.md.
   discord:
     enabled: {str(discord_enabled).lower()}
     bot_token_env: DISCORD_BOT_TOKEN
+    chat_ids: []
+    blocked_chat_ids: []
   voice:
     enabled: false
     paired_with: telegram

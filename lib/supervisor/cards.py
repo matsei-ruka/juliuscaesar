@@ -101,6 +101,36 @@ def build_action_keyboard(short_token: str) -> dict[str, Any]:
     }
 
 
+def build_action_components_discord(short_token: str) -> list[dict[str, Any]]:
+    """Discord message components for supervisor card actions: Stop | Background.
+
+    Returns a single action row (component type 1) holding two buttons
+    (component type 2). The ``custom_id`` reuses the exact token contract the
+    Telegram inline keyboard uses (``act:<verb>:<short_token>``) so one
+    interaction parser serves both channels. Button styles: 4 = danger (red)
+    for Stop, 2 = secondary (grey) for Background.
+    """
+    return [
+        {
+            "type": 1,
+            "components": [
+                {
+                    "type": 2,
+                    "style": 4,
+                    "label": "✋ Stop",
+                    "custom_id": f"act:stop:{short_token}",
+                },
+                {
+                    "type": 2,
+                    "style": 2,
+                    "label": "🔄 Background",
+                    "custom_id": f"act:bg:{short_token}",
+                },
+            ],
+        }
+    ]
+
+
 def render_card(
     *,
     title: str,
