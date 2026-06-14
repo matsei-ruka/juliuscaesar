@@ -363,7 +363,7 @@ _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_CARD_COLOR = 0x5865F2
 
 
-def _discord_card_payload(card: "Card") -> dict[str, Any]:
+def _discord_card_payload(card: "Card", *, for_edit: bool = False) -> dict[str, Any]:
     """Build the Discord message body for a card.
 
     Plain cards (no action token) ship as ``content`` text — byte-identical
@@ -371,8 +371,18 @@ def _discord_card_payload(card: "Card") -> dict[str, Any]:
     actions enabled (``card.short_token`` set) ship as a richer **embed** plus
     an action row of Stop/Background **components**, the Discord twin of the
     Telegram inline keyboard.
+
+    ``for_edit`` matters because Discord's ``PATCH .../messages/{id}`` only
+    touches the fields present in the payload. A card transitioning from an
+    action embed (with buttons) to a plain terminal state must therefore send
+    explicit empty ``embeds`` / ``components`` arrays, or the stale embed and
+    the live Stop/Background buttons survive the edit. On a fresh send there
+    is nothing to clear, so we keep the minimal content-only body (and the
+    "plain card == content only" contract the tests pin).
     """
     if not card.short_token:
+        if for_edit:
+            return {"content": card.text[:2000], "embeds": [], "components": []}
         return {"content": card.text[:2000]}
     return {
         "content": "",
@@ -475,7 +485,7 @@ def edit_card_discord(
     if not token or not channel_id or not message_id:
         return False
     url = f"{_DISCORD_API}/channels/{channel_id}/messages/{message_id}"
-    payload: dict[str, Any] = _discord_card_payload(card)
+    payload: dict[str, Any] = _discord_card_payload(card, for_edit=True)
     try:
         data = http_json(
             url,

@@ -276,3 +276,40 @@ def test_action_card_binds_token_to_message_id(tmp_path):
     args, kwargs = mock_attach.call_args
     assert args[0] == "abc123def456"
     assert args[1] == 1234567890
+
+
+def test_edit_plain_card_clears_embeds_and_components(tmp_path):
+    """Finalizing a card to a plain terminal state must explicitly clear the
+    embed and the Stop/Background buttons. Discord's PATCH only touches fields
+    present in the payload, so a content-only edit would leave the stale embed
+    and live buttons behind — empty arrays force their removal.
+    """
+    with patch("supervisor.delivery.http_json") as mock_http, \
+         patch("supervisor.delivery.env_value", return_value="discord-bot-token"):
+        mock_http.return_value = {"id": "1"}
+        edit_card_discord(
+            instance_dir=tmp_path,
+            channel_id="987",
+            message_id="1234567890",
+            card=_card(),  # plain card, no action token
+        )
+    payload = mock_http.call_args.kwargs["data"]
+    assert payload["embeds"] == []
+    assert payload["components"] == []
+
+
+def test_edit_action_card_keeps_embed_and_buttons(tmp_path):
+    """A mid-flight edit that still carries a token keeps its embed+buttons."""
+    with patch("supervisor.delivery.http_json") as mock_http, \
+         patch("supervisor.delivery.env_value", return_value="discord-bot-token"), \
+         patch("supervisor.delivery.actions_registry.attach_supervisor_message_by_token"):
+        mock_http.return_value = {"id": "1"}
+        edit_card_discord(
+            instance_dir=tmp_path,
+            channel_id="987",
+            message_id="1234567890",
+            card=_action_card(),
+        )
+    payload = mock_http.call_args.kwargs["data"]
+    assert payload["embeds"][0]["description"].startswith("🛠️ test task")
+    assert payload["components"][0]["type"] == 1

@@ -243,7 +243,13 @@ class DiscordChannel:
         async def on_message(message):  # type: ignore[no-untyped-def]
             if message.author.bot:
                 return
-            await self._on_message(client, discord, message, enqueue)
+            try:
+                await self._on_message(client, discord, message, enqueue)
+            except Exception as exc:  # noqa: BLE001
+                # discord.py swallows handler exceptions to stderr; route them
+                # to our channel log instead (parity with on_interaction) so a
+                # malformed payload is observable and never escalates.
+                self.log(f"discord message error: {exc}")
 
         @client.event
         async def on_interaction(interaction):  # type: ignore[no-untyped-def]
@@ -343,6 +349,22 @@ class DiscordChannel:
         author = getattr(resolved, "author", None)
         return author is not None and getattr(author, "id", None) == client.user.id
 
+    @staticmethod
+    def _extract_card_text(message) -> str:
+        """Recover a card's body from the clicked Discord message.
+
+        Action cards render as an embed (description holds the body); plain
+        cards use ``content``. Prefer the embed description, fall back to
+        content. Twin of telegram.py's ``_extract_message_text``.
+        """
+        if message is None:
+            return ""
+        for emb in getattr(message, "embeds", None) or []:
+            desc = getattr(emb, "description", None)
+            if desc:
+                return str(desc)
+        return str(getattr(message, "content", "") or "")
+
     async def _on_interaction(self, client, interaction) -> None:
         """Handle a Stop/Background button click — twin of the Telegram
         callback-query handler. Resolves the token to a running session and
@@ -380,14 +402,22 @@ class DiscordChannel:
             interaction, "Stopping…" if verb == "stop" else "Backgrounding…"
         )
         loop = asyncio.get_running_loop()
-        message_id = str(getattr(getattr(interaction, "message", None), "id", "") or "")
+        msg_obj = getattr(interaction, "message", None)
+        message_id = str(getattr(msg_obj, "id", "") or "")
+        # ``entry.card_text`` is set by the *supervisor* process and never
+        # reaches the gateway's in-memory registry, so it is always empty
+        # here. Recover the original body straight off the clicked message
+        # (embed description, or plain content) — the Discord analog of
+        # telegram.py's ``_extract_message_text(msg)`` fallback. Without this
+        # the finalized card collapses to just the suffix.
+        orig_text = self._extract_card_text(msg_obj)
         if verb == "stop":
             await loop.run_in_executor(
-                None, self._do_stop, entry, channel_id, message_id
+                None, self._do_stop, entry, channel_id, message_id, orig_text
             )
         else:
             await loop.run_in_executor(
-                None, self._do_background, entry, channel_id, message_id
+                None, self._do_background, entry, channel_id, message_id, orig_text
             )
 
     async def _ack_interaction(self, interaction, text: str) -> None:
@@ -403,7 +433,9 @@ class DiscordChannel:
         except Exception as exc:  # noqa: BLE001
             self.log(f"discord interaction ack failed: {exc}")
 
-    def _do_stop(self, entry, channel_id: str, message_id: str) -> None:
+    def _do_stop(
+        self, entry, channel_id: str, message_id: str, orig_text: str = ""
+    ) -> None:
         from .. import actions
 
         grace = self._action_stop_grace_seconds()
@@ -414,13 +446,15 @@ class DiscordChannel:
             actor_chat_id=channel_id,
         )
         suffix = _stopped_suffix(entry)
-        self._finalize_card(entry, channel_id, message_id, suffix)
+        self._finalize_card(entry, channel_id, message_id, suffix, orig_text)
         self.log(
             f"discord action stop session={entry.session_id[:12]} "
             f"ok={result.ok} already_stopped={result.already_stopped}"
         )
 
-    def _do_background(self, entry, channel_id: str, message_id: str) -> None:
+    def _do_background(
+        self, entry, channel_id: str, message_id: str, orig_text: str = ""
+    ) -> None:
         from .. import actions
 
         result = actions.background_session(
@@ -438,21 +472,30 @@ class DiscordChannel:
             )
             return
         suffix = _backgrounded_suffix()
-        self._finalize_card(entry, channel_id, message_id, suffix)
+        self._finalize_card(entry, channel_id, message_id, suffix, orig_text)
         self.log(f"discord action background session={entry.session_id[:12]}")
 
-    def _finalize_card(self, entry, channel_id: str, message_id: str, suffix: str) -> None:
+    def _finalize_card(
+        self,
+        entry,
+        channel_id: str,
+        message_id: str,
+        suffix: str,
+        orig_text: str = "",
+    ) -> None:
         """Append the terminal suffix to the card and drop its buttons.
 
         Edits via the REST card writer with a buttonless Card (short_token
-        cleared) so the action row is removed once a decision lands.
+        cleared) so the action row is removed once a decision lands. The
+        original body comes from the clicked message (``orig_text``) because
+        ``entry.card_text`` is cross-process and empty in the gateway.
         """
         if not message_id:
             return
         from supervisor.cards import Card
         from supervisor.delivery import edit_card_discord
 
-        original = (getattr(entry, "card_text", "") or "").rstrip()
+        original = (orig_text or getattr(entry, "card_text", "") or "").rstrip()
         new_text = f"{original}\n\n{suffix}" if original else suffix
         card = Card(text=new_text, phase="stopped", emoji="⏹", language="en")
         edit_card_discord(

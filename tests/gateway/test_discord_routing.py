@@ -7,10 +7,13 @@ the button ``custom_id`` contract — are exercised here without a live
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "lib"))
@@ -197,6 +200,136 @@ class SplitTests(unittest.TestCase):
         self.assertEqual("".join(chunks), text)
         for c in chunks:
             self.assertLessEqual(len(c), 2000)
+
+
+class _FakeResponse:
+    """Stand-in for ``interaction.response`` — records the ack text."""
+
+    def __init__(self):
+        self.acked: list[str] = []
+
+    async def send_message(self, text, ephemeral=False):  # noqa: ANN001
+        self.acked.append(text)
+
+
+def _fake_interaction(*, custom_id, channel_id, guild_id, embed_desc="", content=""):
+    embeds = [SimpleNamespace(description=embed_desc)] if embed_desc else []
+    message = SimpleNamespace(id=4242, embeds=embeds, content=content)
+    return SimpleNamespace(
+        data={"custom_id": custom_id},
+        channel_id=channel_id,
+        guild_id=guild_id,
+        message=message,
+        response=_FakeResponse(),
+    )
+
+
+def _register_entry(token="abc123def456", session_id="abc123def456cafef00d"):
+    from gateway import actions_registry
+
+    actions_registry.register(
+        short_token=token,
+        session_id=session_id,
+        child_pid=99999,
+        slot_id=0,
+        chat_id="123",
+    )
+    return session_id
+
+
+class InteractionAuthTests(unittest.TestCase):
+    """Button-click handler must authorize the channel before acting.
+
+    The adversarial case: a click landing from a guild channel that is NOT on
+    the allowlist must be rejected — no token resolution, no ``actions`` call.
+    """
+
+    def test_unauthorized_guild_click_does_not_call_actions(self):
+        from gateway import actions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_discord_config(instance, chat_ids=("111",))  # 999 NOT allowed
+            ch = _channel(instance)
+            _register_entry()
+            interaction = _fake_interaction(
+                custom_id="act:stop:abc123def456",
+                channel_id="999",
+                guild_id="777",
+            )
+            with patch.object(actions, "stop_session") as stop:
+                asyncio.run(ch._on_interaction(object(), interaction))
+            stop.assert_not_called()
+            self.assertIn("Not authorized", interaction.response.acked)
+
+    def test_authorized_channel_click_stops_session(self):
+        from gateway import actions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_discord_config(instance, chat_ids=("999",))  # channel allowed
+            ch = _channel(instance)
+            _register_entry()
+            interaction = _fake_interaction(
+                custom_id="act:stop:abc123def456",
+                channel_id="999",
+                guild_id="777",
+                embed_desc="🛠️ building the thing",
+            )
+            fake_result = SimpleNamespace(ok=True, already_stopped=False)
+            with patch.object(actions, "stop_session", return_value=fake_result) as stop, \
+                 patch("supervisor.delivery.edit_card_discord", return_value=True) as edit:
+                asyncio.run(ch._on_interaction(object(), interaction))
+            stop.assert_called_once()
+            # The finalized card preserves the original embed body (not just
+            # the terminal suffix) — the cross-process card_text fallback.
+            edit.assert_called_once()
+            finalized = edit.call_args.kwargs["card"]
+            self.assertIn("building the thing", finalized.text)
+            self.assertIn("Stopped", finalized.text)
+            # Terminal card carries no action token → buttons are dropped.
+            self.assertFalse(getattr(finalized, "short_token", ""))
+
+    def test_unknown_token_acks_session_ended(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_discord_config(instance, chat_ids=("999",))
+            ch = _channel(instance)
+            interaction = _fake_interaction(
+                custom_id="act:stop:deadbeefdead",  # not registered
+                channel_id="999",
+                guild_id="777",
+            )
+            asyncio.run(ch._on_interaction(object(), interaction))
+            self.assertIn("Session already ended", interaction.response.acked)
+
+    def test_non_action_custom_id_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            _write_discord_config(instance, chat_ids=("999",))
+            ch = _channel(instance)
+            interaction = _fake_interaction(
+                custom_id="dcauth:allow:999", channel_id="999", guild_id="777"
+            )
+            asyncio.run(ch._on_interaction(object(), interaction))
+            self.assertEqual(interaction.response.acked, [])
+
+
+class ExtractCardTextTests(unittest.TestCase):
+    """The clicked-message body recovery used to repaint the terminal card."""
+
+    def test_prefers_embed_description(self):
+        msg = SimpleNamespace(
+            embeds=[SimpleNamespace(description="from embed")], content="from content"
+        )
+        self.assertEqual(DiscordChannel._extract_card_text(msg), "from embed")
+
+    def test_falls_back_to_content(self):
+        msg = SimpleNamespace(embeds=[], content="from content")
+        self.assertEqual(DiscordChannel._extract_card_text(msg), "from content")
+
+    def test_none_message(self):
+        self.assertEqual(DiscordChannel._extract_card_text(None), "")
 
 
 if __name__ == "__main__":
